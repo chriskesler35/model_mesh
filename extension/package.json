@@ -1,0 +1,73 @@
+{
+  "name": "modelmesh",
+  "displayName": "ModelMesh",
+  "description": "Intelligent AI gateway for VS Code",
+  "version": "0.1.0",
+  "publisher": "modelmesh",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "modelmesh.sendSelection",
+        "title": "ModelMesh: Ask Selected Text"
+      },
+      {
+        "command": "modelmesh.newConversation",
+        "title": "ModelMesh: New Conversation"
+      },
+      {
+        "command": "modelmesh.selectPersona",
+        "title": "ModelMesh: Select Persona"
+      }
+    ],
+    "configuration": {
+      "title": "ModelMesh",
+      "properties": {
+        "modelmesh.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:18800/v1",
+          "description": "ModelMesh API URL"
+        },
+        "modelmesh.apiKey": {
+          "type": "string",
+          "default": "modelmesh_local_dev_key",
+          "description": "ModelMesh API key"
+        },
+        "modelmesh.defaultPersona": {
+          "type": "string",
+          "default": "quick-helper",
+          "description": "Default persona name"
+        },
+        "modelmesh.streamResponses": {
+          "type": "boolean",
+          "default": true,
+          "description": "Stream responses in real-time"
+        },
+        "modelmesh.showCostInResponse": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show estimated cost in response panel"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.0"
+  }
+}
