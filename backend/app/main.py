@@ -1,0 +1,62 @@
+"""FastAPI application entry point."""
+
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from app.config import settings
+from app.database import engine, Base
+from app.redis import close_redis
+from app.routes import (
+    health_router,
+    models_router,
+    personas_router,
+    conversations_router,
+    chat_router,
+    stats_router,
+)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan handler."""
+    # Startup
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+    # Shutdown
+    await close_redis()
+
+
+app = FastAPI(
+    title="ModelMesh",
+    description="Intelligent AI gateway for multi-provider model routing",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include routers
+app.include_router(health_router)
+app.include_router(models_router)
+app.include_router(personas_router)
+app.include_router(conversations_router)
+app.include_router(chat_router)
+app.include_router(stats_router)
+
+
+@app.get("/")
+async def root():
+    """Root endpoint."""
+    return {
+        "name": "ModelMesh",
+        "version": "0.1.0",
+        "status": "running"
+    }
