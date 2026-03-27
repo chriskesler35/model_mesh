@@ -3,16 +3,17 @@
 from sqlalchemy import Column, String, ForeignKey, Text, Integer, Numeric
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
-from app.models.base import Base
+from app.database import Base
+from app.models.base import BaseMixin
 
 
-class Conversation(Base):
+class Conversation(Base, BaseMixin):
     """Conversation for message history."""
     __tablename__ = "conversations"
     
     persona_id = Column(UUID(as_uuid=True), ForeignKey("personas.id", ondelete="SET NULL"))
     external_id = Column(String(100), unique=True, nullable=True)  # Client-provided ID
-    metadata = Column(JSONB, default=dict)
+    extra_data = Column("metadata", JSONB, default=dict)  # Renamed to avoid SQLAlchemy conflict
     
     # Relationships
     persona = relationship("Persona", backref="conversations")
@@ -22,7 +23,7 @@ class Conversation(Base):
         return f"<Conversation {self.id}>"
 
 
-class Message(Base):
+class Message(Base, BaseMixin):
     """Message in a conversation."""
     __tablename__ = "messages"
     

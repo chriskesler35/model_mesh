@@ -9,7 +9,7 @@ class ConversationCreate(BaseModel):
     """Schema for creating a conversation."""
     persona_id: Optional[UUID4] = None
     external_id: Optional[str] = None
-    metadata: Dict[str, Any] = {}
+    extra_data: Dict[str, Any] = {}
 
 
 class ConversationResponse(BaseModel):
@@ -17,7 +17,7 @@ class ConversationResponse(BaseModel):
     id: UUID4
     persona_id: Optional[UUID4] = None
     external_id: Optional[str] = None
-    metadata: Dict[str, Any] = {}
+    extra_data: Dict[str, Any] = {}
     created_at: datetime
 
     class Config:

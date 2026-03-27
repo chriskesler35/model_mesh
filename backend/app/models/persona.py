@@ -1,12 +1,14 @@
 """Persona model for AI personas."""
 
-from sqlalchemy import Column, String, Boolean, Integer, ForeignKey, Text
+from sqlalchemy import Column, String, Boolean, Integer, ForeignKey, Text, DateTime
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
-from app.models.base import Base
+from app.database import Base
+from app.models.base import BaseMixin
+from datetime import datetime
 
 
-class Persona(Base):
+class Persona(Base, BaseMixin):
     """Persona configuration for routing and prompts."""
     __tablename__ = "personas"
     
@@ -19,7 +21,7 @@ class Persona(Base):
     memory_enabled = Column(Boolean, default=True)
     max_memory_messages = Column(Integer, default=10)
     is_default = Column(Boolean, default=False)
-    updated_at = Column(String(50), default="")  # Updated via trigger
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
     primary_model = relationship("Model", foreign_keys=[primary_model_id])

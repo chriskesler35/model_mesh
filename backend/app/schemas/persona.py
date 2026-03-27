@@ -48,7 +48,7 @@ class PersonaResponse(PersonaBase):
     id: UUID4
     is_default: bool
     created_at: datetime
-    updated_at: Optional[str] = None
+    updated_at: datetime
 
     class Config:
         from_attributes = True

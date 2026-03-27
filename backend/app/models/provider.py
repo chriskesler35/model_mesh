@@ -2,10 +2,11 @@
 
 from sqlalchemy import Column, String, Boolean
 from sqlalchemy.dialects.postgresql import JSONB
-from app.models.base import Base
+from app.database import Base
+from app.models.base import BaseMixin
 
 
-class Provider(Base):
+class Provider(Base, BaseMixin):
     """AI service provider (Ollama, Anthropic, Google)."""
     __tablename__ = "providers"
     

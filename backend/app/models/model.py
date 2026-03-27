@@ -3,10 +3,11 @@
 from sqlalchemy import Column, String, Boolean, Integer, ForeignKey, Numeric, CheckConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
-from app.models.base import Base
+from app.database import Base
+from app.models.base import BaseMixin
 
 
-class Model(Base):
+class Model(Base, BaseMixin):
     """AI model configuration."""
     __tablename__ = "models"
     

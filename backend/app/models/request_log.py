@@ -2,10 +2,11 @@
 
 from sqlalchemy import Column, String, Boolean, Integer, ForeignKey, Text, Numeric
 from sqlalchemy.dialects.postgresql import UUID
-from app.models.base import Base
+from app.database import Base
+from app.models.base import BaseMixin
 
 
-class RequestLog(Base):
+class RequestLog(Base, BaseMixin):
     """Request log for analytics and cost tracking."""
     __tablename__ = "request_logs"
     
