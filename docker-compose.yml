@@ -33,7 +33,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     ports:
-      - "18800:18800"
+      - "19000:18800"
     depends_on:
       postgres:
         condition: service_healthy
@@ -58,7 +58,7 @@ services:
     depends_on:
       - backend
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:18800
+      NEXT_PUBLIC_API_URL: http://localhost:19000
 
 volumes:
   postgres_data:
