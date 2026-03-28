@@ -1,5 +1,6 @@
 """Application configuration using Pydantic Settings."""
 
+import os
 from pydantic_settings import BaseSettings
 from typing import Optional
 
@@ -7,15 +8,21 @@ from typing import Optional
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
-    # Database
-    database_url: str = "postgresql+asyncpg://modelmesh:modelmesh@localhost:5432/modelmesh"
+    # Database - default to SQLite for local dev, Postgres for production
+    database_url: str = "sqlite+aiosqlite:///:memory:"
     
-    # Redis
-    redis_url: str = "redis://localhost:6379"
+    # Redis - optional for local dev
+    redis_url: Optional[str] = None
     
     # API Keys (from environment, never stored in DB)
     anthropic_api_key: Optional[str] = None
     google_api_key: Optional[str] = None
+    gemini_api_key: Optional[str] = None
+    openrouter_api_key: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    
+    # ComfyUI for image generation
+    comfyui_url: str = "http://localhost:8188"
     
     # Application
     modelmesh_api_key: str = "modelmesh_local_dev_key"

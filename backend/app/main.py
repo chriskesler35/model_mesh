@@ -19,6 +19,7 @@ from app.routes.models import router as models_crud_router
 from app.routes.system import router as system_router
 from app.routes.providers import router as providers_router
 from app.routes.images import router as images_router
+from app.routes.agents import router as agents_router
 
 
 @asynccontextmanager
@@ -33,9 +34,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="ModelMesh",
-    description="Intelligent AI gateway for multi-provider model routing",
-    version="0.1.0",
+    title="DevForgeAI",
+    description="Intelligent AI platform for multi-agent orchestration and image generation",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -60,13 +61,14 @@ app.include_router(user_router)
 app.include_router(system_router)
 app.include_router(providers_router)
 app.include_router(images_router)
+app.include_router(agents_router)
 
 
 @app.get("/")
 async def root():
     """Root endpoint."""
     return {
-        "name": "ModelMesh",
-        "version": "0.1.0",
+        "name": "DevForgeAI",
+        "version": "0.2.0",
         "status": "running"
     }

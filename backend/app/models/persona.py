@@ -1,7 +1,7 @@
 """Persona model for AI personas."""
 
-from sqlalchemy import Column, String, Boolean, Integer, ForeignKey, Text, DateTime
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import Column, String, Boolean, Integer, ForeignKey, Text, DateTime, JSON
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.database import Base
 from app.models.base import BaseMixin
@@ -17,7 +17,7 @@ class Persona(Base, BaseMixin):
     system_prompt = Column(Text)
     primary_model_id = Column(UUID(as_uuid=True), ForeignKey("models.id", ondelete="SET NULL"))
     fallback_model_id = Column(UUID(as_uuid=True), ForeignKey("models.id", ondelete="SET NULL"))
-    routing_rules = Column(JSONB, default=dict)
+    routing_rules = Column(JSON, default=dict)
     memory_enabled = Column(Boolean, default=True)
     max_memory_messages = Column(Integer, default=10)
     is_default = Column(Boolean, default=False)

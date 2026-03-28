@@ -1,7 +1,7 @@
 """Conversation and Message models."""
 
-from sqlalchemy import Column, String, ForeignKey, Text, Integer, Numeric
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import Column, String, ForeignKey, Text, Integer, Numeric, JSON
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.database import Base
 from app.models.base import BaseMixin
@@ -13,7 +13,7 @@ class Conversation(Base, BaseMixin):
     
     persona_id = Column(UUID(as_uuid=True), ForeignKey("personas.id", ondelete="SET NULL"))
     external_id = Column(String(100), unique=True, nullable=True)  # Client-provided ID
-    extra_data = Column("metadata", JSONB, default=dict)  # Renamed to avoid SQLAlchemy conflict
+    extra_data = Column("metadata", JSON, default=dict)  # Renamed to avoid SQLAlchemy conflict
     
     # Relationships
     persona = relationship("Persona", backref="conversations")

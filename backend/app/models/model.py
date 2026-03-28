@@ -1,7 +1,7 @@
 """Model model for AI models."""
 
-from sqlalchemy import Column, String, Boolean, Integer, ForeignKey, Numeric, CheckConstraint
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import Column, String, Boolean, Integer, ForeignKey, Numeric, CheckConstraint, JSON
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.database import Base
 from app.models.base import BaseMixin
@@ -17,7 +17,7 @@ class Model(Base, BaseMixin):
     cost_per_1m_input = Column(Numeric(10, 6), default=0)
     cost_per_1m_output = Column(Numeric(10, 6), default=0)
     context_window = Column(Integer)
-    capabilities = Column(JSONB, default=dict)
+    capabilities = Column(JSON, default=dict)
     is_active = Column(Boolean, default=True)
     
     # Relationships

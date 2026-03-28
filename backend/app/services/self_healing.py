@@ -14,8 +14,12 @@ logger = logging.getLogger(__name__)
 class SelfHealingSystem:
     """Manages system health, recovery, and rollback."""
     
-    def __init__(self, project_root: str = "/app"):
-        self.project_root = Path(project_root)
+    def __init__(self, project_root: str = None):
+        if project_root:
+            self.project_root = Path(project_root)
+        else:
+            # Auto-detect project root based on this file's location
+            self.project_root = Path(__file__).parent.parent.parent
         self.snapshots_dir = self.project_root / "snapshots"
         self.health_file = self.project_root / "health_status.json"
         self.last_good_commit_file = self.project_root / "last_good_commit.txt"
