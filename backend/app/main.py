@@ -18,6 +18,7 @@ from app.routes.user import router as user_router
 from app.routes.models import router as models_crud_router
 from app.routes.system import router as system_router
 from app.routes.providers import router as providers_router
+from app.routes.images import router as images_router
 
 
 @asynccontextmanager
@@ -58,6 +59,7 @@ app.include_router(stats_router)
 app.include_router(user_router)
 app.include_router(system_router)
 app.include_router(providers_router)
+app.include_router(images_router)
 
 
 @app.get("/")
