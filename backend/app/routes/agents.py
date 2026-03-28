@@ -81,6 +81,27 @@ async def list_agents(
     result = await db.execute(query)
     agents = result.scalars().all()
     
+    # If no agents in database, return defaults
+    if not agents:
+        default_agents = []
+        for agent_data in DEFAULT_AGENTS:
+            default_agents.append(AgentResponse(
+                id=f"default-{agent_data['agent_type']}",
+                name=agent_data["name"],
+                agent_type=agent_data["agent_type"],
+                description=agent_data.get("description"),
+                system_prompt=agent_data["system_prompt"],
+                model_id=None,
+                tools=agent_data.get("tools", []),
+                memory_enabled=agent_data.get("memory_enabled", True),
+                max_iterations=agent_data.get("max_iterations", 10),
+                timeout_seconds=agent_data.get("timeout_seconds", 300),
+                is_active=True,
+                created_at="default",
+                updated_at="default"
+            ))
+        return AgentListResponse(data=default_agents, total=len(default_agents))
+    
     # Get total count
     count_query = select(Agent)
     if agent_type:
