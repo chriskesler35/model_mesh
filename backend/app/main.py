@@ -28,6 +28,13 @@ async def lifespan(app: FastAPI):
     # Startup
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    
+    # Seed database with initial data
+    from app.database import AsyncSessionLocal
+    from app.seed import seed_database
+    async with AsyncSessionLocal() as session:
+        await seed_database(session)
+    
     yield
     # Shutdown
     await close_redis()

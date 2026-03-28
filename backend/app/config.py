@@ -1,6 +1,7 @@
 """Application configuration using Pydantic Settings."""
 
 import os
+from pathlib import Path
 from pydantic_settings import BaseSettings
 from typing import Optional
 
@@ -8,8 +9,8 @@ from typing import Optional
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
-    # Database - default to SQLite for local dev, Postgres for production
-    database_url: str = "sqlite+aiosqlite:///:memory:"
+    # Database - use SQLite file for local dev, Postgres for production
+    database_url: str = ""
     
     # Redis - optional for local dev
     redis_url: Optional[str] = None
@@ -39,6 +40,15 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Set default database URL if not provided
+        if not self.database_url:
+            # Use SQLite file in the project directory for persistence
+            db_path = Path(__file__).parent.parent.parent / "data" / "devforgeai.db"
+            db_path.parent.mkdir(exist_ok=True)
+            self.database_url = f"sqlite+aiosqlite:///{db_path}"
 
 
 settings = Settings()
