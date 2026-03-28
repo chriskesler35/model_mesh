@@ -59,7 +59,7 @@ export class ModelMeshClient {
       throw new Error(`ModelMesh API error: ${error}`);
     }
 
-    const data: ChatResponse = await response.json();
+    const data = await response.json() as ChatResponse;
     
     // Store conversation ID for memory continuity
     if (data.id) {
@@ -142,7 +142,7 @@ export class ModelMeshClient {
       throw new Error('Failed to fetch personas');
     }
 
-    const data = await response.json();
-    return data.data.map((p: any) => ({ id: p.id, name: p.name }));
+    const data = await response.json() as { data: Array<{ id: string; name: string }> };
+    return data.data.map((p) => ({ id: p.id, name: p.name }));
   }
 }
