@@ -21,6 +21,8 @@ from app.routes.providers import router as providers_router
 from app.routes.images import router as images_router
 from app.routes.agents import router as agents_router
 from app.routes.model_lookup import router as model_lookup_router
+from app.routes.remote import router as remote_router
+from app.routes.telegram_bot import router as telegram_router
 
 
 @asynccontextmanager
@@ -71,6 +73,8 @@ app.include_router(providers_router)
 app.include_router(images_router)
 app.include_router(agents_router)
 app.include_router(model_lookup_router)
+app.include_router(remote_router)
+app.include_router(telegram_router)
 
 
 @app.get("/")
