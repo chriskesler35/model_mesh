@@ -1,4 +1,4 @@
-# Project Charter: ModelMesh (AI Gateway)
+# Project Charter: DevForgeAI (Agentic AI Platform)
 
 ## 1. Project Overview
 
