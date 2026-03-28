@@ -80,7 +80,8 @@ DEFAULT_PERSONAS = [
         "system_prompt": "You are a helpful AI assistant. Provide clear, accurate, and helpful responses.",
         "memory_enabled": True,
         "max_memory_messages": 10,
-        "is_default": True
+        "is_default": True,
+        "primary_model": "llama3.1:8b"  # Default to local model
     },
     {
         "name": "Coder",
@@ -88,7 +89,8 @@ DEFAULT_PERSONAS = [
         "system_prompt": "You are an expert programmer. Help with coding tasks, debug issues, and write clean code. Follow best practices and explain your reasoning.",
         "memory_enabled": True,
         "max_memory_messages": 20,
-        "is_default": False
+        "is_default": False,
+        "primary_model": "llama3.1:8b"
     },
     {
         "name": "Creative",
@@ -96,7 +98,8 @@ DEFAULT_PERSONAS = [
         "system_prompt": "You are a creative assistant. Help with writing, brainstorming, and creative projects. Think outside the box and offer unique perspectives.",
         "memory_enabled": True,
         "max_memory_messages": 15,
-        "is_default": False
+        "is_default": False,
+        "primary_model": "llama3.1:8b"
     }
 ]
 
@@ -137,6 +140,7 @@ async def seed_database(db: AsyncSession):
     await db.flush()  # Get provider IDs
     
     # Create models
+    model_map = {}
     for m in DEFAULT_MODELS:
         model = Model(
             id=uuid.uuid4(),
@@ -150,14 +154,22 @@ async def seed_database(db: AsyncSession):
             is_active=True
         )
         db.add(model)
+        model_map[m["model_id"]] = model.id
     
-    # Create personas
+    await db.flush()  # Get model IDs
+    
+    # Create personas with primary model assigned
     for p in DEFAULT_PERSONAS:
+        primary_model_id = None
+        if "primary_model" in p and p["primary_model"] in model_map:
+            primary_model_id = model_map[p["primary_model"]]
+        
         persona = Persona(
             id=uuid.uuid4(),
             name=p["name"],
             description=p["description"],
             system_prompt=p["system_prompt"],
+            primary_model_id=primary_model_id,
             memory_enabled=p["memory_enabled"],
             max_memory_messages=p["max_memory_messages"],
             is_default=p["is_default"]

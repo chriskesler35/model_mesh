@@ -45,6 +45,28 @@ async def chat_completions(
             }
         )
     
+    # If no model assigned, try to get a default model
+    if not primary_model:
+        # Get first active model as fallback
+        from sqlalchemy import select
+        from app.models import Model
+        result = await db.execute(
+            select(Model).where(Model.is_active == True).limit(1)
+        )
+        primary_model = result.scalar_one_or_none()
+        
+        if not primary_model:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": {
+                        "type": "model_error",
+                        "message": "No models available. Please add a model to use chat.",
+                        "code": "no_models_available"
+                    }
+                }
+            )
+    
     # 2. Handle conversation ID
     conversation_id = request.conversation_id
     if not conversation_id:
