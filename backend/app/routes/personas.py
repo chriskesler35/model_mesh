@@ -55,7 +55,7 @@ async def create_persona(
     
     db_persona = Persona(
         **persona.model_dump(),
-        updated_at=datetime.utcnow().isoformat()
+        updated_at=datetime.utcnow()
     )
     db.add(db_persona)
     await db.commit()
@@ -105,7 +105,7 @@ async def update_persona(
     for field, value in update.model_dump(exclude_unset=True).items():
         setattr(persona, field, value)
     
-    persona.updated_at = datetime.utcnow().isoformat()
+    persona.updated_at = datetime.utcnow()
     await db.commit()
     await db.refresh(persona)
     

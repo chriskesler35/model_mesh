@@ -1,8 +1,9 @@
 """Persona schemas."""
 
-from typing import Optional, Dict, Any
-from pydantic import BaseModel, UUID4
+from typing import Optional, Dict, Any, Union
+from pydantic import BaseModel, UUID4, field_validator
 from datetime import datetime
+import uuid
 
 
 class RoutingRules(BaseModel):
@@ -37,12 +38,22 @@ class PersonaUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     system_prompt: Optional[str] = None
-    primary_model_id: Optional[UUID4] = None
-    fallback_model_id: Optional[UUID4] = None
+    primary_model_id: Optional[Union[UUID4, str]] = None
+    fallback_model_id: Optional[Union[UUID4, str]] = None
     routing_rules: Optional[RoutingRules] = None
     memory_enabled: Optional[bool] = None
     max_memory_messages: Optional[int] = None
     is_default: Optional[bool] = None
+
+    @field_validator('primary_model_id', 'fallback_model_id', mode='before')
+    @classmethod
+    def coerce_uuid(cls, v):
+        if v == '' or v is None:
+            return None
+        try:
+            return uuid.UUID(str(v))
+        except (ValueError, AttributeError):
+            return None
 
 
 class PersonaResponse(PersonaBase):
