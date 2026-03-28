@@ -1,18 +1,47 @@
+'use client'
+
+import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { api } from '@/lib/api'
 
-async function getPersonas() {
-  try {
-    const res = await api.getPersonas(100, 0)
-    return res.data
-  } catch (e) {
-    console.error('Failed to fetch personas:', e)
-    return []
+interface Persona {
+  id: string
+  name: string
+  description?: string
+  system_prompt?: string
+  is_default: boolean
+  memory_enabled: boolean
+  max_memory_messages: number
+  routing_rules?: {
+    max_cost?: number
   }
 }
 
-export default async function PersonasPage() {
-  const personas = await getPersonas()
+export default function PersonasPage() {
+  const [personas, setPersonas] = useState<Persona[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    async function fetchPersonas() {
+      try {
+        const res = await api.getPersonas(100, 0)
+        setPersonas(res.data)
+      } catch (e) {
+        console.error('Failed to fetch personas:', e)
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchPersonas()
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <div className="text-gray-500">Loading...</div>
+      </div>
+    )
+  }
 
   return (
     <div>

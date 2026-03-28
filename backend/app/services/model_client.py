@@ -1,11 +1,9 @@
 """LiteLLM-based model client with unified interface."""
 
 import os
-import time
-from typing import Optional, AsyncGenerator
 import logging
+from typing import Optional, AsyncGenerator
 from litellm import acompletion
-from app.config import settings
 from app.models import Model, Provider
 
 logger = logging.getLogger(__name__)
@@ -13,19 +11,20 @@ logger = logging.getLogger(__name__)
 
 class ModelClient:
     """LiteLLM-based model client with unified interface."""
-    
+
     def get_api_key(self, provider_name: str) -> Optional[str]:
         """Get API key from environment (never from database)."""
         key_map = {
             "anthropic": "ANTHROPIC_API_KEY",
             "google": "GOOGLE_API_KEY",
             "openai": "OPENAI_API_KEY",
+            "openrouter": "OPENROUTER_API_KEY",
         }
         env_key = key_map.get(provider_name.lower())
         if env_key:
             return os.environ.get(env_key)
         return None
-    
+
     async def call_model(
         self,
         model: Model,
@@ -35,12 +34,25 @@ class ModelClient:
         **params
     ):
         """Call model via LiteLLM with unified interface."""
-        # LiteLLM format: "provider/model_name"
-        litellm_model = f"{provider.name}/{model.model_id}"
-        
-        # Get API key from environment
-        api_key = self.get_api_key(provider.name) if provider.auth_type == "api_key" else None
-        
+        import os
+
+        provider_name = provider.name.lower()
+
+        # LiteLLM format varies by provider:
+        # - Anthropic: "claude-sonnet-4-6" (uses ANTHROPIC_API_KEY)
+        # - Google: "gemini/gemini-2.5-pro" (uses GOOGLE_API_KEY or GEMINI_API_KEY)
+        # - Ollama: "ollama/llama3" (uses api_base)
+        # - OpenRouter: "openrouter/anthropic/claude-sonnet-4" (uses OPENROUTER_API_KEY)
+
+        if provider_name == "anthropic":
+            litellm_model = model.model_id
+        elif provider_name == "google":
+            litellm_model = f"gemini/{model.model_id}"
+        elif provider_name == "openrouter":
+            litellm_model = f"openrouter/{model.model_id}"
+        else:
+            litellm_model = f"{provider_name}/{model.model_id}"
+
         # Build kwargs
         kwargs = {
             "model": litellm_model,
@@ -48,37 +60,48 @@ class ModelClient:
             "stream": stream,
             **params
         }
-        
+
         # Add provider-specific config
-        if provider.api_base_url:
+        if provider_name == "ollama":
+            # Use environment variable for Ollama URL (works in Docker)
+            ollama_base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+            kwargs["api_base"] = ollama_base
+        elif provider.api_base_url:
             kwargs["api_base"] = provider.api_base_url
-        
+
+        # Get API key from environment (provider-specific)
+        api_key = self.get_api_key(provider.name)
         if api_key:
             kwargs["api_key"] = api_key
-        
+
+        # Debug logging
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Calling model: {litellm_model} with provider: {provider_name}, api_base: {kwargs.get('api_base', 'default')}")
+
         # Use acompletion for async support
         response = await acompletion(**kwargs)
-        
+
         if stream:
             return self._stream_response(response)
         else:
-            return await response
-    
+            return response
+
     async def _stream_response(self, response) -> AsyncGenerator:
         """Yield streaming chunks."""
         async for chunk in response:
             yield chunk
-    
+
     def estimate_tokens(self, messages: list, model: Model) -> int:
         """Estimate token count for messages."""
         import tiktoken
-        
+
         # Use cl100k_base encoding (good for most models)
         try:
             encoding = tiktoken.get_encoding("cl100k_base")
         except Exception:
             encoding = tiktoken.get_encoding("cl100k_base")
-        
+
         total = 0
         for msg in messages:
             content = msg.get("content", "")
@@ -86,9 +109,9 @@ class ModelClient:
                 total += len(encoding.encode(content))
             # Add overhead for role, etc.
             total += 4
-        
+
         return total
-    
+
     def estimate_cost(
         self, input_tokens: int, output_tokens: int, model: Model
     ) -> float:

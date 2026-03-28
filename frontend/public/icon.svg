@@ -1,0 +1,25 @@
+<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background circle -->
+  <circle cx="100" cy="100" r="95" fill="#f3f4f6" stroke="#10b981" stroke-width="2"/>
+  
+  <!-- Mesh nodes -->
+  <circle cx="60" cy="60" r="8" fill="#10b981"/>
+  <circle cx="140" cy="60" r="8" fill="#059669"/>
+  <circle cx="100" cy="100" r="10" fill="#047857"/>
+  <circle cx="60" cy="140" r="8" fill="#059669"/>
+  <circle cx="140" cy="140" r="8" fill="#10b981"/>
+  
+  <!-- Connecting lines (mesh pattern) -->
+  <line x1="60" y1="60" x2="100" y2="100" stroke="#10b981" stroke-width="2" opacity="0.7"/>
+  <line x1="140" y1="60" x2="100" y2="100" stroke="#059669" stroke-width="2" opacity="0.7"/>
+  <line x1="60" y1="140" x2="100" y2="100" stroke="#059669" stroke-width="2" opacity="0.7"/>
+  <line x1="140" y1="140" x2="100" y2="100" stroke="#10b981" stroke-width="2" opacity="0.7"/>
+  <line x1="60" y1="60" x2="140" y2="60" stroke="#10b981" stroke-width="1.5" opacity="0.5"/>
+  <line x1="60" y1="140" x2="140" y2="140" stroke="#10b981" stroke-width="1.5" opacity="0.5"/>
+  <line x1="60" y1="60" x2="60" y2="140" stroke="#10b981" stroke-width="1.5" opacity="0.5"/>
+  <line x1="140" y1="60" x2="140" y2="140" stroke="#10b981" stroke-width="1.5" opacity="0.5"/>
+  
+  <!-- Central routing indicator (arrow) -->
+  <path d="M 100 85 L 100 115" stroke="#047857" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <path d="M 92 108 L 100 115 L 108 108" stroke="#047857" stroke-width="2.5" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>

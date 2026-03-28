@@ -28,13 +28,14 @@ export default function ChatPage() {
     if (!input.trim() || loading) return
 
     const userMessage: Message = { role: 'user', content: input }
-    setMessages(prev => [...prev, userMessage])
+    const newMessages = [...messages, userMessage]
+    setMessages(newMessages)
     setInput('')
     setLoading(true)
 
     try {
       const response = await api.chat(
-        messages.map(m => ({ role: m.role, content: m.content })),
+        newMessages.map(m => ({ role: m.role, content: m.content })),
         persona
       )
       

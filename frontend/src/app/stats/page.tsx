@@ -1,17 +1,19 @@
-import { api } from '@/lib/api'
-import type { CostSummary, UsageSummary } from '@/lib/types'
+'use client'
 
-async function getStats(): Promise<{ costs: CostSummary; usage: UsageSummary } | null> {
-  try {
-    const [costs, usage] = await Promise.all([
-      api.getCosts(7),
-      api.getUsage(7),
-    ])
-    return { costs, usage }
-  } catch (e) {
-    console.error('Failed to fetch stats:', e)
-    return null
-  }
+import { useState, useEffect } from 'react'
+
+interface CostSummary {
+  total_cost: number
+  by_model: Record<string, number>
+  by_provider: Record<string, number>
+}
+
+interface UsageSummary {
+  total_requests: number
+  total_input_tokens: number
+  total_output_tokens: number
+  success_rate: number
+  by_model: Record<string, { requests: number; input_tokens: number; output_tokens: number }>
 }
 
 function formatNumber(num: number): string {
@@ -26,10 +28,42 @@ function formatCost(cost: number): string {
   return `$${cost.toFixed(2)}`
 }
 
-export default async function StatsPage() {
-  const stats = await getStats()
+export default function StatsPage() {
+  const [costs, setCosts] = useState<CostSummary | null>(null)
+  const [usage, setUsage] = useState<UsageSummary | null>(null)
+  const [loading, setLoading] = useState(true)
 
-  if (!stats) {
+  useEffect(() => {
+    async function fetchStats() {
+      try {
+        const [costsRes, usageRes] = await Promise.all([
+          fetch('http://localhost:19000/v1/stats/costs?days=7', {
+            headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
+          }).then(r => r.json()),
+          fetch('http://localhost:19000/v1/stats/usage?days=7', {
+            headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
+          }).then(r => r.json())
+        ])
+        setCosts(costsRes)
+        setUsage(usageRes)
+      } catch (e) {
+        console.error('Failed to fetch stats:', e)
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchStats()
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <div className="text-gray-500">Loading...</div>
+      </div>
+    )
+  }
+
+  if (!costs || !usage) {
     return (
       <div className="text-center py-12">
         <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -42,8 +76,6 @@ export default async function StatsPage() {
       </div>
     )
   }
-
-  const { costs, usage } = stats
 
   return (
     <div>

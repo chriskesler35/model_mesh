@@ -11,6 +11,8 @@ class RoutingRules(BaseModel):
     prefer_local: Optional[bool] = False
     timeout_seconds: Optional[int] = 60
     max_tokens: Optional[int] = 4096
+    auto_route: Optional[bool] = False
+    classifier_persona_id: Optional[str] = None  # ID of persona to use for classification
 
 
 class PersonaBase(BaseModel):

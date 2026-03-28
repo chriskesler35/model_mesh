@@ -54,6 +54,21 @@ async def create_conversation(
     return ConversationResponse.model_validate(db_conversation)
 
 
+@router.get("/{conversation_id}", response_model=ConversationResponse)
+async def get_conversation(
+    conversation_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get a single conversation by ID."""
+    conv_uuid = uuid.UUID(conversation_id)
+    
+    conv = await db.get(Conversation, conv_uuid)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    
+    return ConversationResponse.model_validate(conv)
+
+
 @router.get("/{conversation_id}/messages", response_model=MessageList)
 async def get_messages(
     conversation_id: str,

@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # Memory
     memory_ttl_seconds: int = 86400  # 24 hours
     default_max_memory_messages: int = 10
+
+    # Rate Limiting (requests per minute/hour)
+    rate_limit_rpm: int = 60  # 60 requests per minute
+    rate_limit_rph: int = 1000  # 1000 requests per hour
     
     class Config:
         env_file = ".env"

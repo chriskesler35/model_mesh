@@ -1,14 +1,14 @@
+'use client'
+
+import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { api } from '@/lib/api'
 
-async function getConversations() {
-  try {
-    const res = await api.getConversations(50, 0)
-    return res.data
-  } catch (e) {
-    console.error('Failed to fetch conversations:', e)
-    return []
-  }
+interface Conversation {
+  id: string
+  persona_id?: string
+  external_id?: string
+  created_at: string
 }
 
 function formatDate(dateStr: string): string {
@@ -26,8 +26,31 @@ function formatDate(dateStr: string): string {
   return date.toLocaleDateString()
 }
 
-export default async function ConversationsPage() {
-  const conversations = await getConversations()
+export default function ConversationsPage() {
+  const [conversations, setConversations] = useState<Conversation[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    async function fetchConversations() {
+      try {
+        const res = await api.getConversations(50, 0)
+        setConversations(res.data)
+      } catch (e) {
+        console.error('Failed to fetch conversations:', e)
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchConversations()
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <div className="text-gray-500">Loading...</div>
+      </div>
+    )
+  }
 
   return (
     <div>

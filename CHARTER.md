@@ -2,149 +2,300 @@
 
 ## 1. Project Overview
 
-**Vision:** To create a unified API interface that intelligently routes development requests to the optimal AI model, balancing cost, performance, and capability.
+**Vision:** To create a unified API interface that intelligently routes development requests to the optimal AI model, balancing cost, performance, and capability. The system should learn from user interactions and personalize responses over time.
 
 **Primary Goal:** Reduce AI operational costs by utilizing local/free models for simple tasks while reserving expensive proprietary models for complex reasoning.
 
 **Secondary Goal:** Prevent vendor lock-in by abstracting the provider layer.
 
+**Tertiary Goal:** Provide a "smarter" AI experience where the system learns user preferences, maintains context across sessions, and can self-heal from errors.
+
 ## 2. Technical Architecture
 
-We will use a **Modular Monolith** architecture initially (easier to develop/test) which can be split into microservices later.
+We use a **Modular Monolith** architecture (easier to develop/test) which can be split into microservices later.
 
-### Tech Stack Recommendation
+### Tech Stack
 
 | Component | Choice | Rationale |
 |-----------|--------|-----------|
-| Backend Language | Python (FastAPI) | Python is the native language of AI. Libraries like litellm or langchain are Python-first. Handles async requests natively (crucial for streaming AI responses). |
-| Database | PostgreSQL | Relational data is best for storing User configs, API keys, and structured Persona data. |
-| Cache/Queue | Redis | To handle rate limiting and store temporary chat context (conversation history). |
-| Frontend | React + Next.js (or AdminJS) | Move fast with templates, or build custom UI. |
-| Infrastructure | Docker | Essential because one of the "Providers" is a local LLM running in a container. |
+| Backend Language | Python (FastAPI) | Python is the native language of AI. Libraries like litellm are Python-first. Handles async requests natively (crucial for streaming). |
+| Database | PostgreSQL | Relational data for user configs, API keys, personas, memory files, preferences. |
+| Cache/Queue | Redis | Rate limiting, conversation memory, temporary context storage. |
+| Frontend | React + Next.js | Modern UI with dark mode, client-side rendering for better UX. |
+| Infrastructure | Docker | Essential for local LLM containers and consistent deployment. |
 
 ### System Diagram
 
 ```
-graph TD
- A[User Client / IDE Plugin] --> B[ModelMesh API Gateway]
- B --> C{Router Engine}
- C -->|Complex Code| D[Adapter: Anthropic]
- C -->|Standard Chat| E[Adapter: OpenAI]
- C -->|Simple Task| F[Adapter: Ollama (Local)]
- D --> G[Claude 3.5 Sonnet]
- E --> H[GPT-4o]
- F --> I[Llama 3 Local Container]
- B --> J[(Postgres DB: Logs/User Config)]
+User Client → ModelMesh API Gateway → Router Engine
+                                              ↓
+                    ┌──────────────────────────┼───────────────────────┐
+                    ↓                          ↓                       ↓
+              Anthropic Adapter          OpenAI Adapter          Ollama Adapter
+                    ↓                          ↓                       ↓
+              Claude Models              GPT Models              Local Models
 ```
 
 ## 3. Database Schema Design
 
-### Table: users
+### Core Tables
+
+#### users
 - id (UUID)
 - email, password_hash
 - default_persona_id
+- preferences (JSON)
 
-### Table: providers
+#### providers
 - id (UUID)
-- name (e.g., "OpenAI", "Anthropic", "Ollama")
-- api_base_url (e.g., "https://api.openai.com/v1" or "http://localhost:11434")
-- auth_type (e.g., "Bearer Token", "None")
+- name, display_name
+- api_base_url
+- auth_type
+- is_active
 
-### Table: models
+#### models
 - id (UUID)
 - provider_id (FK)
-- model_name (e.g., "gpt-4", "claude-3-5-sonnet")
-- cost_per_1k_tokens (Decimal)
-- capabilities (JSON - e.g., {"vision": true, "context_window": 200000})
+- model_id, display_name
+- cost_per_1m_input, cost_per_1m_output
+- context_window
+- capabilities (JSON)
+- is_active
+- updated_at
 
-### Table: personas
+#### personas
+- id (UUID)
+- name, description
+- system_prompt
+- primary_model_id (FK), fallback_model_id (FK)
+- routing_rules (JSON) - max_cost, prefer_local, auto_route, classifier_persona_id
+- memory_enabled, max_memory_messages
+- is_default
+- updated_at
+
+#### conversations
+- id (UUID)
+- persona_id (FK)
+- external_id
+- created_at, updated_at
+
+#### messages
+- id (UUID)
+- conversation_id (FK)
+- role, content
+- created_at
+
+#### request_logs
+- id (UUID)
+- conversation_id, persona_id, model_id, provider_id
+- input_tokens, output_tokens
+- latency_ms, estimated_cost
+- success, error_message
+- created_at
+
+### Personalization Tables (NEW)
+
+#### user_profiles
+- id (UUID)
+- name, email
+- preferences (JSON)
+- is_active
+- created_at, updated_at
+
+#### memory_files
 - id (UUID)
 - user_id (FK)
-- name (e.g., "Python Architect")
-- system_prompt (Text)
-- primary_model_id (FK -> models)
-- fallback_model_id (FK -> models)
-- routing_rules (JSON - e.g., {"max_cost": 0.01, "prefer_local": true})
+- name (e.g., "USER.md", "CONTEXT.md")
+- content (TEXT)
+- description
+- created_at, updated_at
 
-### Table: request_logs
+#### preference_tracking
 - id (UUID)
-- timestamp
-- user_id
-- persona_id
-- model_used
-- input_tokens, output_tokens
-- latency_ms
-- success (Boolean)
+- user_id (FK)
+- key, value
+- source (chat/manual/system)
+- confidence (low/medium/high)
+- context (TEXT)
+- created_at
 
-## 4. Development Phases (Sprints)
+#### system_modifications
+- id (UUID)
+- user_id (FK)
+- conversation_id (FK)
+- modification_type, entity_type
+- entity_id
+- before_value, after_value (JSON)
+- reason (TEXT)
+- created_at
 
-### Phase 1: The Core & Local Integration (Weeks 1-2)
-**Goal:** Prove we can connect to a local model and abstract it.
+## 4. Development Phases
 
-**Tasks:**
-- **Setup Environment:** Docker Compose file containing FastAPI, Postgres, and an Ollama container (running Llama 3).
-- **Database Migrations:** Set up Alembic (Python migration tool) and create the schema.
-- **The Adapter Pattern:** Create a standard Python class BaseModelAdapter.
-- **Ollama Adapter:** Implement the logic to send a prompt to the local Ollama container and stream the response back.
-- **Basic API Endpoint:** POST /v1/chat.
-  - Logic: Accepts a prompt -> Routes to Ollama Adapter -> Returns text.
+### Phase 1: Core & Local Integration ✅ COMPLETE
+- Docker Compose setup
+- Database migrations
+- BaseModelAdapter pattern
+- Ollama adapter
+- POST /v1/chat endpoint
 
-**Deliverable:** A running API where you can curl a prompt, and it returns a response from a local Llama model.
+### Phase 2: Multi-Provider Logic ✅ COMPLETE
+- OpenAI, Anthropic, Google, OpenRouter adapters
+- Unified response format (OpenAI-compatible)
+- Routing engine with failover
+- Cost estimation and checking
 
-### Phase 2: The Multi-Provider Logic (Weeks 3-4)
-**Goal:** Integrate cloud providers and create the routing logic.
+### Phase 3: Intelligence & Personas ✅ COMPLETE
+- Persona CRUD (API + UI)
+- Context management (Redis memory)
+- Auto-router classifier (CODE/MATH/CREATIVE/SIMPLE/ANALYSIS)
+- Frontend dashboard with stats
 
-**Tasks:**
-- **OpenAI Adapter:** Implement logic to call OpenAI API. Handle API key security (store keys encrypted in DB).
-- **Anthropic Adapter:** Implement logic to call Claude API. Handle their specific headers/auth.
-- **Unified Response:** Ensure all adapters return data in the exact same JSON format (OpenAI compatible format is the industry standard).
-- **Routing Engine:** Create Router.py.
-  - Logic: Check the personas table. If primary_model is available, use it. If not, try fallback_model.
-  - Advanced Logic: Implement a "Cost Check." If estimated_tokens * cost > limit, block request or downgrade model.
+### Phase 4: Resilience & Testing ✅ COMPLETE
+- Integration tests
+- Rate limiting (Redis sliding window)
+- Streaming support (SSE)
+- API documentation (Swagger)
 
-**Deliverable:** You can switch between GPT-4 and Llama 3 simply by changing the persona_id in your API request.
+### Phase 5: Personalization & Learning ✅ COMPLETE
+- User profiles
+- Memory files (USER.md, CONTEXT.md, PREFERENCES.md)
+- Preference tracking from chat
+- System modification tracking
+- Context injection into system prompts
 
-### Phase 3: Intelligence & Personas (Weeks 5-6)
-**Goal:** The "Smart" aspect of the system.
+### Phase 6: UI/UX Polish ✅ COMPLETE
+- Dark/Light mode toggle
+- Settings page with memory file editor
+- Persona create/edit forms
+- Model CRUD (add/delete/toggle)
+- Provider names in model list
 
-**Tasks:**
-- **Persona CRUD:** Create UI or API endpoints to create/update/delete Personas.
-- **Context Management:** Implement simple memory. Store the last 10 messages of a chat session in Redis so the AI "remembers" the conversation.
-- **Auto-Router (The "Classifier"):**
-  - Concept: Before sending the main prompt, send a tiny prompt to a cheap model (e.g., Llama 3 local).
-  - Prompt: "Classify this request as: CODE, MATH, or CREATIVE."
-  - Action: If CODE -> Route to Claude. If CREATIVE -> Route to GPT.
-- **Frontend Dashboard:** Build a simple UI to view request_logs (Cost analysis: "You saved $5.00 today by using local models").
+### Phase 7: Self-Healing & Recovery ✅ COMPLETE
+- Health check endpoint (database, Redis, disk, processes)
+- Snapshot creation (config files, git commits)
+- Automatic recovery attempts
+- Manual rollback to snapshots
+- Last known good commit tracking
 
-**Deliverable:** A system where you type "Write code for..." and it automatically routes to the best code model, vs typing "Tell a joke" which routes to the local model.
+### Phase 8: Model Management ✅ COMPLETE
+- Add/delete models via UI ✅
+- Toggle model active status ✅
+- Auto-update personas when model deleted ✅
+- Provider dropdown populated from API ✅
+- Provider names display correctly ✅
 
-### Phase 4: Resilience & Testing (Weeks 7-8)
-**Goal:** Production readiness.
+## 5. API Endpoints
 
-**Tasks:**
-- **Integration Tests:** Write a test suite that spins up Docker containers and mocks API calls to OpenAI/Anthropic (so you don't spend money testing).
-- **Rate Limiting:** Implement middleware to prevent users from spamming the API (protecting your wallet).
-- **Streaming:** Ensure the API supports stream: true (Server-Sent Events) so the UI shows text appearing character-by-character.
-- **Documentation:** Write the README.md and API Swagger docs.
+### Core Endpoints
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET/POST | /v1/chat/completions | Chat completion (streaming supported) |
+| GET | /v1/models | List all models |
+| POST/PATCH/DELETE | /v1/models | Model CRUD |
+| GET | /v1/providers | List all providers |
+| GET/POST/PATCH/DELETE | /v1/personas | Persona CRUD |
+| GET/POST | /v1/conversations | Conversation management |
+| GET | /v1/stats/costs | Cost analytics |
+| GET | /v1/stats/usage | Usage analytics |
 
-## 5. Testing Strategy
+### Personalization Endpoints
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET/PATCH | /v1/user | User profile |
+| GET/POST/PATCH/DELETE | /v1/memory | Memory files |
+| GET/POST/DELETE | /v1/preferences | Learned preferences |
+| GET | /v1/modifications | Modification history |
 
-### Unit Tests (Pytest)
-- Test the Router logic in isolation.
-  - Input: "Complex Python request", Config: Cost limit $0.05. Assert: Router selects Claude-3.5-Sonnet.
-  - Input: "Simple summary". Assert: Router selects Llama-3-Local.
+### System Endpoints
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | /v1/system/health | Health check |
+| POST | /v1/system/snapshots | Create snapshot |
+| GET | /v1/system/snapshots | List snapshots |
+| POST | /v1/system/recover | Trigger recovery |
+| POST | /v1/system/rollback/{name} | Rollback to snapshot |
 
-### Mock Integration Tests
-- Use pytest-mock or responses library to mock the external HTTP calls to OpenAI/Anthropic.
-- Verify that if OpenAI returns a 500 error, your system catches it and tries the fallback model.
+## 6. Frontend Pages
 
-### End-to-End Test
-- Run the full stack locally.
-- Send a real request to your Local Ollama model.
-- Verify the response stream is saved to the database.
+| Page | URL | Description |
+|------|-----|-------------|
+| Dashboard | / | Stats overview, quick actions |
+| Personas | /personas | List all personas |
+| New Persona | /personas/new | Create/edit persona |
+| Models | /models | List all models, add/delete/toggle |
+| Conversations | /conversations | Conversation history |
+| Stats | /stats | Usage and cost analytics |
+| Settings | /settings | Profile, memory files, preferences |
+| Chat | /chat | Chat interface |
 
-## 6. Future Extensions (Post-MVP)
+## 7. Key Features
 
-- **Agent Chains:** Allow a request to go to Model A (Writer), then pass the output to Model B (Reviewer/Refactorer) automatically.
-- **Billing:** Integrate Stripe to bill users based on token usage.
-- **IDE Plugin:** Build a VS Code extension that uses your API instead of Copilot.
+### Intelligent Routing
+- Auto-router classifies requests (CODE/MATH/CREATIVE/SIMPLE/ANALYSIS)
+- Routes to optimal model based on classification
+- Cost-aware routing (blocks expensive requests over limit)
+- Failover from primary to fallback model
+
+### Personalization
+- Memory files injected into system prompts
+- Preference tracking from chat interactions
+- User profile with customizable settings
+- System modification tracking (audit trail)
+
+### Self-Healing
+- Health checks for all critical components
+- Automatic recovery attempts
+- Snapshot-based rollback
+- Git commit tracking for code rollback
+
+### Developer Experience
+- OpenAI-compatible API
+- Swagger documentation
+- Rate limiting with clear headers
+- Streaming responses (SSE)
+- Comprehensive error messages
+
+## 8. Future Extensions
+
+- **Agent Chains:** Pipeline models (Writer → Reviewer)
+- **Billing:** Stripe integration for token billing
+- **IDE Plugin:** VS Code extension
+- **Chat Self-Modification:** Add/update models/personas via chat commands
+- **Advanced Learning:** Preference reinforcement from user feedback
+- **Multi-user Support:** Auth, roles, per-user settings
+
+## 9. Models & Providers
+
+### Current Providers
+| Provider | Models | Cost Range |
+|----------|--------|-------------|
+| Ollama (Local) | Llama 3.1 8B, GLM-5 Cloud, Qwen 2.5 Coder 14B | Free |
+| Anthropic | Claude Sonnet 4.6, Claude Opus 4.6 | $3-75/1M tokens |
+| Google | Gemini 2.5 Pro, Gemini 3.1 Pro Preview | $1.25-5/1M tokens |
+| OpenRouter | Claude, GPT-4.1, Gemini via OpenRouter | Variable |
+
+### Default Personas
+| Persona | Primary Model | Use Case |
+|---------|---------------|----------|
+| quick-helper | Llama 3.1 8B | Simple tasks, local-first |
+| classifier | Llama 3.1 8B | Request classification |
+| python-architect | Claude Sonnet 4.6 | Code review, architecture |
+| smart-router | Claude Sonnet 4.6 | Auto-routing enabled |
+| glm-coder | GLM-5 Cloud | Free coding assistance |
+
+## 10. Configuration
+
+### Environment Variables
+| Variable | Description |
+|----------|-------------|
+| DATABASE_URL | PostgreSQL connection string |
+| REDIS_URL | Redis connection string |
+| ANTHROPIC_API_KEY | Anthropic API key |
+| GOOGLE_API_KEY | Google AI API key |
+| OPENROUTER_API_KEY | OpenRouter API key |
+| OLLAMA_BASE_URL | Ollama API base URL (default: http://localhost:11434) |
+| MODELMESH_API_KEY | API key for ModelMesh API |
+
+### Rate Limits
+- Default: 60 requests/minute, 1000 requests/hour per API key
+- Configurable in `app/config.py`

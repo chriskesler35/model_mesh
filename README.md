@@ -4,12 +4,15 @@ Intelligent AI gateway that routes requests to optimal models based on cost, cap
 
 ## Features
 
-- **Unified API** - OpenAI-compatible interface for Ollama, Anthropic, and Google Gemini
+- **Unified API** - OpenAI-compatible interface for Ollama, Anthropic, Google Gemini, and OpenRouter
 - **Intelligent Routing** - Personas bundle model selection, prompts, and routing rules
+- **Auto-Routing** - Classifies requests (CODE/MATH/CREATIVE/SIMPLE/ANALYSIS) and routes to optimal model
 - **Conversation Memory** - Redis-backed session memory for context continuity
-- **Cost Tracking** - Estimate and track costs across all providers
+- **Cost Tracking** - Real-time token counting and cost estimation across all providers
+- **Rate Limiting** - Redis-backed sliding window (60 req/min, 1000 req/hour per API key)
 - **Failover** - Automatic fallback to alternative models on error
-- **Streaming** - Real-time token streaming for all providers
+- **Streaming** - Real-time token streaming for all providers (SSE)
+- **Usage Dashboard** - Cost and usage analytics by model/provider
 - **VS Code Extension** - IDE integration for development workflow
 
 ## Quick Start

@@ -14,6 +14,10 @@ from app.routes import (
     chat_router,
     stats_router,
 )
+from app.routes.user import router as user_router
+from app.routes.models import router as models_crud_router
+from app.routes.system import router as system_router
+from app.routes.providers import router as providers_router
 
 
 @asynccontextmanager
@@ -46,10 +50,14 @@ app.add_middleware(
 # Include routers
 app.include_router(health_router)
 app.include_router(models_router)
+app.include_router(models_crud_router)
 app.include_router(personas_router)
 app.include_router(conversations_router)
 app.include_router(chat_router)
 app.include_router(stats_router)
+app.include_router(user_router)
+app.include_router(system_router)
+app.include_router(providers_router)
 
 
 @app.get("/")

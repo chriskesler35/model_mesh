@@ -71,15 +71,22 @@ async def get_usage(
         select(
             func.sum(RequestLog.input_tokens),
             func.sum(RequestLog.output_tokens),
-            func.count(RequestLog.id),
-            func.sum(func.cast(RequestLog.success, int))
+            func.count(RequestLog.id)
         ).where(RequestLog.created_at >= start_date)
     )
     row = total_result.one()
     total_input = int(row[0] or 0)
     total_output = int(row[1] or 0)
     total_requests = int(row[2] or 0)
-    successful_requests = int(row[3] or 0)
+    
+    # Get successful requests count separately
+    success_result = await db.execute(
+        select(func.count(RequestLog.id)).where(
+            (RequestLog.created_at >= start_date) & 
+            (RequestLog.success == True)
+        )
+    )
+    successful_requests = int(success_result.scalar() or 0)
     
     success_rate = successful_requests / total_requests if total_requests > 0 else 1.0
     

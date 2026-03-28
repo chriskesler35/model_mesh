@@ -1,26 +1,66 @@
+'use client'
+
+import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { api } from '@/lib/api'
 
-async function getStats() {
-  try {
-    const [personasRes, modelsRes, conversationsRes] = await Promise.all([
-      api.getPersonas(),
-      api.getModels(),
-      api.getConversations(),
-    ])
-    return {
-      personas: personasRes.data,
-      models: modelsRes.data,
-      conversations: conversationsRes.data,
-    }
-  } catch (e) {
-    console.error('Failed to fetch data:', e)
-    return { personas: [], models: [], conversations: [] }
-  }
+interface Persona {
+  id: string
+  name: string
+  description?: string
+  is_default: boolean
+  memory_enabled: boolean
+  max_memory_messages: number
 }
 
-export default async function Home() {
-  const { personas, models, conversations } = await getStats()
+interface Model {
+  id: string
+  model_id: string
+  display_name?: string
+  provider_name?: string
+  is_active: boolean
+  context_window?: number
+  cost_per_1m_input: number
+  cost_per_1m_output: number
+}
+
+interface Conversation {
+  id: string
+}
+
+export default function Home() {
+  const [personas, setPersonas] = useState<Persona[]>([])
+  const [models, setModels] = useState<Model[]>([])
+  const [conversations, setConversations] = useState<Conversation[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    async function fetchData() {
+      try {
+        const [personasRes, modelsRes, conversationsRes] = await Promise.all([
+          api.getPersonas(),
+          api.getModels(),
+          api.getConversations(),
+        ])
+        setPersonas(personasRes.data)
+        setModels(modelsRes.data)
+        setConversations(conversationsRes.data)
+      } catch (e) {
+        console.error('Failed to fetch data:', e)
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchData()
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <div className="text-gray-500">Loading...</div>
+      </div>
+    )
+  }
 
   return (
     <div>
@@ -117,7 +157,7 @@ export default async function Home() {
           </Link>
 
           <Link
-            href="/conversations"
+            href="/chat"
             className="relative flex items-center space-x-3 rounded-lg border border-gray-300 bg-white px-6 py-5 shadow-sm hover:border-indigo-400 hover:ring-1 hover:ring-indigo-400"
           >
             <div className="flex-shrink-0">
@@ -149,7 +189,7 @@ export default async function Home() {
           </Link>
 
           <a
-            href="http://localhost:18800/docs"
+            href="http://localhost:19000/docs"
             target="_blank"
             rel="noopener noreferrer"
             className="relative flex items-center space-x-3 rounded-lg border border-gray-300 bg-white px-6 py-5 shadow-sm hover:border-indigo-400 hover:ring-1 hover:ring-indigo-400"
@@ -217,7 +257,7 @@ export default async function Home() {
         <div className="mt-8">
           <h2 className="text-lg font-medium text-gray-900 mb-4">Available Models</h2>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {models.map((model) => (
+            {models.slice(0, 6).map((model) => (
               <div key={model.id} className="bg-white shadow rounded-lg p-4">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-medium text-gray-900">{model.display_name || model.model_id}</h3>
@@ -233,7 +273,7 @@ export default async function Home() {
                 <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
                   <span>Context: {model.context_window?.toLocaleString() || 'N/A'} tokens</span>
                   <span>
-                    ${model.cost_per_1m_input}/{model.cost_per_1m_output} per 1M
+                    ${model.cost_per_1m_input}/${model.cost_per_1m_output} per 1M
                   </span>
                 </div>
               </div>
