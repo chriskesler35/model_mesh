@@ -22,6 +22,15 @@ interface Provider {
   display_name?: string
 }
 
+interface ModelSuggestion {
+  model_id: string
+  display_name?: string
+  context_window?: number
+  cost_per_1m_input?: number
+  cost_per_1m_output?: number
+  capabilities?: Record<string, boolean>
+}
+
 function formatCost(cost: number): string {
   if (cost === 0) return 'Free'
   return `$${cost.toFixed(4)}/1M`
@@ -40,6 +49,8 @@ export default function ModelsPage() {
   const [loading, setLoading] = useState(true)
   const [showAddModal, setShowAddModal] = useState(false)
   const [editingModel, setEditingModel] = useState<Model | null>(null)
+  const [suggestions, setSuggestions] = useState<ModelSuggestion[]>([])
+  const [lookingUp, setLookingUp] = useState(false)
   const [formData, setFormData] = useState({
     model_id: '',
     display_name: '',
@@ -72,6 +83,88 @@ export default function ModelsPage() {
     }
     fetchData()
   }, [])
+
+  // Fetch model suggestions when provider changes
+  useEffect(() => {
+    async function fetchSuggestions() {
+      if (!formData.provider_id) {
+        setSuggestions([])
+        return
+      }
+      try {
+        const provider = providers.find(p => p.id === formData.provider_id)
+        if (!provider) return
+        
+        const res = await fetch(`http://localhost:19000/v1/model-lookup/suggestions/${provider.name}`, {
+          headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
+        })
+        if (res.ok) {
+          const data = await res.json()
+          setSuggestions(data.suggestions || [])
+        }
+      } catch (e) {
+        console.error('Failed to fetch suggestions:', e)
+      }
+    }
+    fetchSuggestions()
+  }, [formData.provider_id, providers])
+
+  const handleLookupModel = async () => {
+    if (!formData.model_id || !formData.provider_id) {
+      alert('Please enter a model ID and select a provider first')
+      return
+    }
+    
+    setLookingUp(true)
+    try {
+      const provider = providers.find(p => p.id === formData.provider_id)
+      const res = await fetch('http://localhost:19000/v1/model-lookup/lookup', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer modelmesh_local_dev_key'
+        },
+        body: JSON.stringify({
+          model_id: formData.model_id,
+          provider: provider?.name || ''
+        })
+      })
+      
+      if (res.ok) {
+        const data = await res.json()
+        if (data.source !== 'user_input_required') {
+          setFormData({
+            ...formData,
+            display_name: data.display_name || formData.model_id,
+            context_window: data.context_window || formData.context_window,
+            cost_per_1m_input: data.cost_per_1m_input ?? formData.cost_per_1m_input,
+            cost_per_1m_output: data.cost_per_1m_output ?? formData.cost_per_1m_output,
+            capabilities: data.capabilities || formData.capabilities
+          })
+        } else {
+          alert('Model not found in database. Please enter the details manually.')
+        }
+      }
+    } catch (e) {
+      console.error('Failed to lookup model:', e)
+      alert('Failed to lookup model. Please enter details manually.')
+    } finally {
+      setLookingUp(false)
+    }
+  }
+
+  const handleSelectSuggestion = (suggestion: ModelSuggestion) => {
+    setFormData({
+      ...formData,
+      model_id: suggestion.model_id,
+      display_name: suggestion.display_name || suggestion.model_id,
+      context_window: suggestion.context_window || 8192,
+      cost_per_1m_input: suggestion.cost_per_1m_input ?? 0,
+      cost_per_1m_output: suggestion.cost_per_1m_output ?? 0,
+      capabilities: suggestion.capabilities || { streaming: true }
+    })
+    setSuggestions([])
+  }
 
   const handleAddModel = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -180,7 +273,7 @@ export default function ModelsPage() {
         </div>
         <button
           onClick={() => setShowAddModal(true)}
-          className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700"
+          className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700"
         >
           <svg className="-ml-1 mr-2 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -296,37 +389,16 @@ export default function ModelsPage() {
       {/* Add Model Modal */}
       {showAddModal && (
         <div className="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-md w-full">
+          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-lg w-full max-h-[90vh] overflow-y-auto">
             <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Add Model</h3>
             <form onSubmit={handleAddModel} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Model ID *</label>
-                <input
-                  type="text"
-                  required
-                  value={formData.model_id}
-                  onChange={(e) => setFormData({ ...formData, model_id: e.target.value })}
-                  className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
-                  placeholder="e.g., gpt-4-turbo"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Display Name</label>
-                <input
-                  type="text"
-                  value={formData.display_name}
-                  onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
-                  className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
-                  placeholder="e.g., GPT-4 Turbo"
-                />
-              </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Provider *</label>
                 <select
                   required
                   value={formData.provider_id}
                   onChange={(e) => setFormData({ ...formData, provider_id: e.target.value })}
-                  className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
+                  className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-orange-500 focus:ring-orange-500 sm:text-sm"
                 >
                   <option value="">Select a provider</option>
                   {providers.map((p) => (
@@ -334,6 +406,61 @@ export default function ModelsPage() {
                   ))}
                 </select>
               </div>
+              
+              {suggestions.length > 0 && (
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Quick Add</label>
+                  <div className="flex flex-wrap gap-2">
+                    {suggestions.map((s) => (
+                      <button
+                        key={s.model_id}
+                        type="button"
+                        onClick={() => handleSelectSuggestion(s)}
+                        className="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600"
+                      >
+                        {s.display_name || s.model_id}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Model ID *</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    required
+                    value={formData.model_id}
+                    onChange={(e) => setFormData({ ...formData, model_id: e.target.value })}
+                    className="mt-1 flex-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-orange-500 focus:ring-orange-500 sm:text-sm"
+                    placeholder="e.g., gpt-4-turbo"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleLookupModel}
+                    disabled={lookingUp || !formData.model_id || !formData.provider_id}
+                    className="mt-1 px-3 py-2 text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {lookingUp ? 'Looking up...' : 'Lookup'}
+                  </button>
+                </div>
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  Click "Lookup" to auto-fill pricing and context info
+                </p>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Display Name</label>
+                <input
+                  type="text"
+                  value={formData.display_name}
+                  onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
+                  className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-orange-500 focus:ring-orange-500 sm:text-sm"
+                  placeholder="e.g., GPT-4 Turbo"
+                />
+              </div>
+              
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Input Cost ($/1M)</label>
@@ -342,7 +469,7 @@ export default function ModelsPage() {
                     step="0.01"
                     value={formData.cost_per_1m_input}
                     onChange={(e) => setFormData({ ...formData, cost_per_1m_input: parseFloat(e.target.value) || 0 })}
-                    className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
+                    className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-orange-500 focus:ring-orange-500 sm:text-sm"
                   />
                 </div>
                 <div>
@@ -352,20 +479,22 @@ export default function ModelsPage() {
                     step="0.01"
                     value={formData.cost_per_1m_output}
                     onChange={(e) => setFormData({ ...formData, cost_per_1m_output: parseFloat(e.target.value) || 0 })}
-                    className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
+                    className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-orange-500 focus:ring-orange-500 sm:text-sm"
                   />
                 </div>
               </div>
+              
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Context Window (tokens)</label>
                 <input
                   type="number"
                   value={formData.context_window}
                   onChange={(e) => setFormData({ ...formData, context_window: parseInt(e.target.value) || 8192 })}
-                  className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
+                    className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-orange-500 focus:ring-orange-500 sm:text-sm"
                 />
               </div>
-              <div className="flex justify-end gap-3">
+              
+              <div className="flex justify-end gap-3 pt-4">
                 <button
                   type="button"
                   onClick={() => setShowAddModal(false)}
@@ -375,7 +504,7 @@ export default function ModelsPage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700"
+                  className="px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700"
                 >
                   Add Model
                 </button>
