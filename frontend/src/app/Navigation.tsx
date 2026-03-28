@@ -109,6 +109,7 @@ export default function Navigation() {
               <NavLink href="/">Dashboard</NavLink>
               <NavLink href="/chat">Chat</NavLink>
               <NavLink href="/gallery">Gallery</NavLink>
+              <NavLink href="/agents">Agents</NavLink>
               <NavLink href="/personas">Personas</NavLink>
               <NavLink href="/models">Models</NavLink>
               <NavLink href="/conversations">Conversations</NavLink>

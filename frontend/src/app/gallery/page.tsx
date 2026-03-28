@@ -19,6 +19,7 @@ export default function GalleryPage() {
   const [images, setImages] = useState<Image[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedImage, setSelectedImage] = useState<Image | null>(null)
+  const [generating, setGenerating] = useState<string | null>(null)
 
   useEffect(() => {
     async function fetchImages() {
@@ -73,6 +74,35 @@ export default function GalleryPage() {
     }
   }
 
+  const generateVariation = async (imageId: string) => {
+    setGenerating(imageId)
+    try {
+      const response = await fetch(`http://localhost:19000/v1/images/${imageId}/variations`, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer modelmesh_local_dev_key',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({})
+      })
+      
+      if (!response.ok) {
+        throw new Error('Failed to generate variation')
+      }
+      
+      const data = await response.json()
+      // Add the new image to the list
+      if (data.data && data.data[0]) {
+        setImages(prev => [data.data[0], ...prev])
+      }
+    } catch (e) {
+      console.error('Failed to generate variation:', e)
+      alert('Failed to generate variation. Make sure the backend is running.')
+    } finally {
+      setGenerating(null)
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[50vh]">
@@ -101,7 +131,7 @@ export default function GalleryPage() {
           </p>
           <Link
             href="/chat"
-            className="mt-4 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700"
+            className="mt-4 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700"
           >
             Start Chatting
           </Link>
@@ -130,6 +160,16 @@ export default function GalleryPage() {
                   >
                     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); generateVariation(image.id); }}
+                    className="p-2 bg-white rounded-full text-orange-600 hover:bg-gray-100"
+                    title="Generate Variation"
+                    disabled={generating === image.id}
+                  >
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                     </svg>
                   </button>
                   <button
@@ -172,8 +212,15 @@ export default function GalleryPage() {
                 </span>
                 <div className="flex gap-2">
                   <button
+                    onClick={() => generateVariation(selectedImage.id)}
+                    disabled={generating === selectedImage.id}
+                    className="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-orange-600 hover:bg-orange-700 disabled:opacity-50"
+                  >
+                    {generating === selectedImage.id ? 'Generating...' : 'Generate Variation'}
+                  </button>
+                  <button
                     onClick={() => downloadImage(selectedImage)}
-                    className="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700"
+                    className="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
                   >
                     Download
                   </button>
