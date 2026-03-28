@@ -1,6 +1,7 @@
 'use client'
 
 import Link from 'next/link'
+import { usePathname } from 'next/navigation'
 import { useState, useEffect } from 'react'
 
 function ThemeToggle() {
@@ -45,6 +46,24 @@ function ThemeToggle() {
   )
 }
 
+function NavLink({ href, children }: { href: string; children: React.ReactNode }) {
+  const pathname = usePathname()
+  const isActive = pathname === href
+
+  return (
+    <Link
+      href={href}
+      className={`inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium ${
+        isActive
+          ? 'border-indigo-500 text-gray-900 dark:text-white'
+          : 'border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200'
+      }`}
+    >
+      {children}
+    </Link>
+  )
+}
+
 export default function Navigation() {
   const [mounted, setMounted] = useState(false)
 
@@ -59,12 +78,11 @@ export default function Navigation() {
           <div className="flex justify-between h-16">
             <div className="flex">
               <div className="flex-shrink-0 flex items-center gap-2">
-                <img src="/favicon.svg" alt="ModelMesh" className="h-8 w-8" />
+                <img src="/favicon.svg" alt="DevForgeAI" className="h-8 w-8" />
                 <Link href="/" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
-                  <span className="text-xl font-bold bg-gradient-to-r from-emerald-600 to-teal-600 bg-clip-text text-transparent">
-                    ModelMesh
+                  <span className="text-xl font-bold bg-gradient-to-r from-orange-500 to-red-500 bg-clip-text text-transparent">
+                    DevForgeAI
                   </span>
-                  <img src="/badge.svg" alt="Intelligent AI Gateway" className="h-6 hidden sm:block" />
                 </Link>
               </div>
             </div>
@@ -80,51 +98,22 @@ export default function Navigation() {
         <div className="flex justify-between h-16">
           <div className="flex">
             <div className="flex-shrink-0 flex items-center gap-2">
-              <img src="/favicon.svg" alt="ModelMesh" className="h-8 w-8" />
+              <img src="/favicon.svg" alt="DevForgeAI" className="h-8 w-8" />
               <Link href="/" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
-                <span className="text-xl font-bold bg-gradient-to-r from-emerald-600 to-teal-600 dark:from-emerald-400 dark:to-teal-400 bg-clip-text text-transparent">
-                  ModelMesh
+                <span className="text-xl font-bold bg-gradient-to-r from-orange-500 to-red-500 dark:from-orange-400 dark:to-red-400 bg-clip-text text-transparent">
+                  DevForgeAI
                 </span>
-                <img src="/badge.svg" alt="Intelligent AI Gateway" className="h-6 hidden sm:block" />
               </Link>
             </div>
             <div className="hidden sm:ml-6 sm:flex sm:space-x-8">
-              <Link
-                href="/"
-                className="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-              >
-                Dashboard
-              </Link>
-              <Link
-                href="/personas"
-                className="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-              >
-                Personas
-              </Link>
-              <Link
-                href="/models"
-                className="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-              >
-                Models
-              </Link>
-              <Link
-                href="/conversations"
-                className="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-              >
-                Conversations
-              </Link>
-              <Link
-                href="/stats"
-                className="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-              >
-                Stats
-              </Link>
-              <Link
-                href="/settings"
-                className="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-              >
-                Settings
-              </Link>
+              <NavLink href="/">Dashboard</NavLink>
+              <NavLink href="/chat">Chat</NavLink>
+              <NavLink href="/gallery">Gallery</NavLink>
+              <NavLink href="/personas">Personas</NavLink>
+              <NavLink href="/models">Models</NavLink>
+              <NavLink href="/conversations">Conversations</NavLink>
+              <NavLink href="/stats">Stats</NavLink>
+              <NavLink href="/settings">Settings</NavLink>
             </div>
           </div>
           <div className="hidden sm:ml-6 sm:flex sm:items-center gap-4">

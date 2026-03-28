@@ -425,3 +425,84 @@ async def list_images(
         ))
     
     return ImageListResponse(data=images, total=len(IMAGE_STORAGE))
+
+
+class ImageVariationRequest(BaseModel):
+    size: Optional[str] = None  # If None, use original size
+    format: Optional[str] = None  # If None, use original format
+
+
+@router.post("/{image_id}/variations", response_model=ImageListResponse)
+async def generate_variation(
+    image_id: str,
+    request: Optional[ImageVariationRequest] = None,
+    db: AsyncSession = Depends(get_db)
+):
+    """Generate a variation of an existing image."""
+    
+    if image_id not in IMAGE_STORAGE:
+        raise HTTPException(
+            status_code=404,
+            detail="Original image not found"
+        )
+    
+    original = IMAGE_STORAGE[image_id]
+    prompt = original["prompt"]
+    negative_prompt = original.get("negative_prompt")
+    model = original["model"]
+    size = request.size if request and request.size else original["size"]
+    format = request.format if request and request.format else original["format"]
+    
+    try:
+        if model == "gemini-imagen":
+            api_key = os.environ.get('GEMINI_API_KEY') or getattr(settings, 'gemini_api_key', None)
+            if not api_key:
+                raise HTTPException(
+                    status_code=500,
+                    detail="GEMINI_API_KEY not configured"
+                )
+            result = await generate_with_gemini_imagen(prompt, api_key, size)
+        elif model == "comfyui-local":
+            comfyui_url = os.environ.get('COMFYUI_URL') or getattr(settings, 'comfyui_url', 'http://localhost:8188')
+            result = await generate_with_comfyui(prompt, comfyui_url, size, negative_prompt)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model '{model}' does not support image generation"
+            )
+        
+        # Store the variation
+        variation_id = str(uuid.uuid4())
+        IMAGE_STORAGE[variation_id] = {
+            "base64": result["base64"],
+            "prompt": prompt,
+            "revised_prompt": result.get("revised_prompt"),
+            "format": format,
+            "size": size,
+            "model": model,
+            "negative_prompt": negative_prompt,
+            "variation_of": image_id
+        }
+        
+        width, height = map(int, size.split('x'))
+        
+        return ImageListResponse(
+            data=[ImageResponse(
+                id=variation_id,
+                url=f"/v1/images/{variation_id}",
+                revised_prompt=result.get("revised_prompt"),
+                width=width,
+                height=height,
+                format=format
+            )],
+            total=1
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Image variation failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Image variation failed: {str(e)}"
+        )
