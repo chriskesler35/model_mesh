@@ -1,86 +1,78 @@
-# 🎨 ModelMesh Brand Assets
+# DevForgeAI Brand Assets
 
-This directory contains official branding and visual assets for ModelMesh.
+## Logo Files
 
-## Icons & Logos
+| File | Dimensions | Usage |
+|------|------------|-------|
+| `favicon.svg` | 32×32 | Browser tab, bookmarks |
+| `logo.svg` | 200×200 | App logo, documentation |
+| `badge.svg` | 300×100 | Social sharing, badges |
+| `banner.svg` | 1200×400 | Social media, README header |
 
-### `favicon.svg`
-**Size:** 32×32px | **Format:** SVG  
-**Usage:** Browser tabs, favorites, app icons  
-**Description:** Compact mesh network icon with directional routing arrow
-
-### `icon.svg`
-**Size:** 200×200px | **Format:** SVG  
-**Usage:** Apple touch icons, app stores, high-res display  
-**Description:** Detailed mesh network with connected nodes and central routing indicator
-
-### `logo-light.svg`
-**Size:** 200×200px | **Format:** SVG  
-**Usage:** Light backgrounds, standalone logo  
-**Description:** Circular mesh design with layered nodes and connections, optimized for light themes
-
-### `badge.svg`
-**Size:** 300×100px | **Format:** SVG  
-**Usage:** README badges, documentation, social media  
-**Description:** Horizontal badge with icon, name, and tagline
-
-### `banner.svg`
-**Size:** 1200×400px | **Format:** SVG  
-**Usage:** README headers, social media, promotional materials  
-**Description:** Full-featured banner with icon, branding, and feature highlights
-
-## Design System
+## Design Elements
 
 ### Color Palette
-- **Primary Green:** `#10b981` (Emerald 500)
-- **Dark Green:** `#047857` (Emerald 700)
-- **Teal Accent:** `#059669` (Emerald 600)
-- **Background:** `#f0fdf4` (Emerald 50)
+| Color | Hex | Usage |
+|-------|-----|-------|
+| Primary Purple | `#667eea` | Gradients, accents |
+| Secondary Purple | `#764ba2` | Gradients |
+| Accent Pink | `#f093fb` | Highlights |
+| Gold Spark | `#ffd700` | Energy, creation |
+| Dark Background | `#0f0f23` | Primary dark |
+| Deep Navy | `#1a1a2e` | Anvil color |
+| Electric Blue | `#00d9ff` | AI circuit lines |
+| Crimson | `#e94560` | Accent stroke |
 
-### Typography (Implementation)
-- **Headlines:** Arial, Bold, 24-56px
-- **Body:** Arial, Regular, 12-16px
-- **Feature Tags:** Arial, Bold, 12px
+### Icon Symbolism
+- **Anvil** — Represents "forge" — where things are crafted and built
+- **Hammer Sparks** — Energy, creation, the act of building
+- **Circuit Lines** — AI/technology integration
+- **Gradient** — Modern, premium feel
 
-### Visual Elements
-- **Mesh Nodes:** Circular, varying sizes (2.5-8px)
-- **Connection Lines:** 1.5-2.5px stroke width
-- **Routing Arrow:** Directional indicator, 2.5px stroke
-- **Border Radius:** 6-12px for containers
-- **Opacity Layers:** 0.5-0.8 for visual hierarchy
+### Typography
+- **Primary Font:** System UI stack (system-ui, -apple-system, sans-serif)
+- **Logo Weight:** 700 (bold)
+- **Tagline Weight:** 400 (regular)
 
-## Integration Guide
+## Brand Voice
 
-### Next.js Layout
-```typescript
-export const metadata: Metadata = {
-  icons: {
-    icon: '/favicon.svg',
-    apple: '/icon.svg',
-  },
-  openGraph: {
-    images: [{ url: '/banner.svg' }],
-  },
-}
+**DevForgeAI** — Forging Intelligent Solutions
+
+- Professional yet approachable
+- Technical but not intimidating
+- Empowering developers to build with AI
+- "Forge" = create, craft, build with intention
+
+## Usage Guidelines
+
+### Do
+- Use the full logo on first mention
+- Use favicon/favicon.svg for browser tabs
+- Use badge.svg for social sharing
+- Keep clear space around logo
+- Use gradient version on dark backgrounds
+
+### Don't
+- Stretch or distort the logo
+- Change the colors
+- Use low-resolution versions
+- Place on busy backgrounds without contrast
+
+## File Locations
+```
+frontend/public/
+├── favicon.svg    # 32×32 favicon
+├── logo.svg       # 200×200 main logo
+├── badge.svg      # 300×100 horizontal badge
+└── banner.svg      # 1200×400 social banner
 ```
 
-### HTML Head
-```html
-<link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="/icon.svg">
-```
-
-### Markdown README
-```markdown
-![ModelMesh](/frontend/public/badge.svg)
-```
-
-## Usage Rights
-
-These assets are part of the ModelMesh project and should be used in accordance with the project's LICENSE file.
+## Future Enhancements
+- Generate PNG versions for platforms that don't support SVG
+- Create animated loading spinner variant
+- Generate dark/light mode variants
+- Create app icons for mobile (iOS/Android)
 
 ---
 
-**Asset Location:** `frontend/public/`  
-**Last Updated:** 2026-03-28  
-**Maintained By:** ModelMesh Team
+**Branding created by DevForgeAI** — Forging the future of development

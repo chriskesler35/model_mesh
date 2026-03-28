@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <defs>
+    <linearGradient id="forgeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#667eea;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#764ba2;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#f093fb;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="anvilGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#16213e;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Background circle -->
+  <circle cx="100" cy="100" r="95" fill="url(#forgeGrad)"/>
+  
+  <!-- Anvil shape -->
+  <path d="M60 140 L60 100 L80 100 L80 80 L120 80 L120 100 L140 100 L140 140 L130 140 L130 150 L70 150 L70 140 Z" 
+        fill="url(#anvilGrad)" 
+        stroke="#e94560" 
+        stroke-width="2"/>
+  
+  <!-- Hammer spark -->
+  <path d="M100 60 L105 50 L100 40 L95 50 Z" fill="#ffd700"/>
+  <path d="M90 55 L80 50 L90 45 Z" fill="#ffd700" opacity="0.8"/>
+  <path d="M110 55 L120 50 L110 45 Z" fill="#ffd700" opacity="0.8"/>
+  
+  <!-- AI circuit lines -->
+  <g stroke="#00d9ff" stroke-width="1.5" fill="none" opacity="0.6">
+    <path d="M30 100 L50 100 L55 90"/>
+    <path d="M170 100 L150 100 L145 90"/>
+    <path d="M100 170 L100 155 L90 150"/>
+    <circle cx="30" cy="100" r="3" fill="#00d9ff"/>
+    <circle cx="170" cy="100" r="3" fill="#00d9ff"/>
+    <circle cx="100" cy="170" r="3" fill="#00d9ff"/>
+  </g>
+</svg>

@@ -3,21 +3,21 @@ import './globals.css'
 import Navigation from './Navigation'
 
 export const metadata: Metadata = {
-  title: 'ModelMesh | Intelligent AI Gateway',
-  description: 'Intelligent AI gateway that routes requests to optimal models based on cost, capability, and persona configuration.',
+  title: 'DevForgeAI | Intelligent Development Platform',
+  description: 'Forge intelligent solutions with multi-agent orchestration, image generation, and AI-powered development.',
   icons: {
     icon: '/favicon.svg',
-    apple: '/icon.svg',
+    apple: '/logo.svg',
   },
   openGraph: {
-    title: 'ModelMesh',
-    description: 'Intelligent AI Gateway',
+    title: 'DevForgeAI',
+    description: 'Forge intelligent solutions with AI',
     images: [
       {
         url: '/banner.svg',
         width: 1200,
         height: 400,
-        alt: 'ModelMesh',
+        alt: 'DevForgeAI - Intelligent Development Platform',
       },
     ],
   },
