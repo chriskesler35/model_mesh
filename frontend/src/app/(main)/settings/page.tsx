@@ -486,47 +486,28 @@ export default function SettingsPage() {
 
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
-        <nav className="-mb-px flex space-x-8">
-          <button
-            onClick={() => setActiveTab('profile')}
-            className={`py-2 px-1 border-b-2 font-medium text-sm ${
-              activeTab === 'profile'
-                ? 'border-indigo-500 text-indigo-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            Profile
-          </button>
-          <button
-            onClick={() => setActiveTab('memory')}
-            className={`py-2 px-1 border-b-2 font-medium text-sm ${
-              activeTab === 'memory'
-                ? 'border-indigo-500 text-indigo-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            Memory Files
-          </button>
-          <button
-            onClick={() => setActiveTab('preferences')}
-            className={`py-2 px-1 border-b-2 font-medium text-sm ${
-              activeTab === 'preferences'
-                ? 'border-indigo-500 text-indigo-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            Preferences
-          </button>
-          <button
-            onClick={() => setActiveTab('apikeys')}
-            className={`py-2 px-1 border-b-2 font-medium text-sm ${
-              activeTab === 'apikeys'
-                ? 'border-indigo-500 text-indigo-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            API Keys
-          </button>
+        <nav className="-mb-px flex space-x-6 overflow-x-auto">
+          {([
+            ['identity', 'Identity', 'border-orange-500 text-orange-600'],
+            ['profile', 'Profile', 'border-indigo-500 text-indigo-600'],
+            ['memory', 'Memory', 'border-indigo-500 text-indigo-600'],
+            ['preferences', 'Preferences', 'border-indigo-500 text-indigo-600'],
+            ['conversations', 'Conversations', 'border-indigo-500 text-indigo-600'],
+            ['apikeys', 'API Keys', 'border-indigo-500 text-indigo-600'],
+            ['remote', '🌐 Remote', 'border-orange-500 text-orange-600'],
+          ] as const).map(([tab, label, activeClass]) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab as any)}
+              className={`flex-shrink-0 py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                activeTab === tab
+                  ? activeClass
+                  : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
         </nav>
       </div>
 

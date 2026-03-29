@@ -85,8 +85,15 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as session:
         await seed_database(session)
     
+    # Start Telegram polling (non-blocking background task)
+    from app.routes.telegram_bot import start_polling as _start_telegram
+    await _start_telegram()
+
     yield
+
     # Shutdown
+    from app.routes.telegram_bot import stop_polling as _stop_telegram
+    await _stop_telegram()
     await close_redis()
 
 

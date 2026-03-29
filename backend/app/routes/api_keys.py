@@ -27,11 +27,13 @@ def _find_env_file() -> Path:
 
 # Keys we expose (display name → env var name)
 MANAGED_KEYS = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "google": "GOOGLE_API_KEY",
-    "gemini": "GEMINI_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-    "openai": "OPENAI_API_KEY",
+    "anthropic":          "ANTHROPIC_API_KEY",
+    "google":             "GOOGLE_API_KEY",
+    "gemini":             "GEMINI_API_KEY",
+    "openrouter":         "OPENROUTER_API_KEY",
+    "openai":             "OPENAI_API_KEY",
+    "telegram_bot_token": "TELEGRAM_BOT_TOKEN",
+    "telegram_chat_ids":  "TELEGRAM_CHAT_IDS",
 }
 
 def _read_env_file(path: Path) -> dict[str, str]:
@@ -131,6 +133,26 @@ async def set_api_key(provider: str, body: SetKeyRequest):
     elif provider == "google":
         os.environ["GEMINI_API_KEY"] = value
         _write_env_key(env_path, "GEMINI_API_KEY", value)
+
+    # Hot-reload Telegram bot config immediately (no restart needed)
+    if provider == "telegram_bot_token":
+        try:
+            import app.routes.telegram_bot as _tg
+            _tg.TELEGRAM_BOT_TOKEN = value
+            _tg.TELEGRAM_API_URL = f"https://api.telegram.org/bot{value}"
+            logger.info("Telegram bot token reloaded live")
+        except Exception as e:
+            logger.warning(f"Could not hot-reload Telegram token: {e}")
+
+    if provider == "telegram_chat_ids":
+        try:
+            import app.routes.telegram_bot as _tg
+            _tg.AUTHORIZED_CHAT_IDS = [
+                int(cid.strip()) for cid in value.split(",") if cid.strip().lstrip("-").isdigit()
+            ]
+            logger.info(f"Telegram chat IDs reloaded: {_tg.AUTHORIZED_CHAT_IDS}")
+        except Exception as e:
+            logger.warning(f"Could not hot-reload Telegram chat IDs: {e}")
 
     logger.info(f"API key updated for provider: {provider} ({env_var})")
     return {"success": True, "provider": provider, "env_var": env_var, "masked_value": _mask(value)}

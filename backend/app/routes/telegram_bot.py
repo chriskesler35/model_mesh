@@ -1,5 +1,6 @@
 """Telegram bot integration for remote DevForgeAI access."""
 
+import asyncio
 import httpx
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 from pydantic import BaseModel
@@ -431,3 +432,91 @@ async def get_webhook_info():
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.get(f"{TELEGRAM_API_URL}/getWebhookInfo")
         return resp.json().get("result", {})
+
+# ─── Long-polling loop (runs as background task) ──────────────────────────────
+_polling_task = None
+_last_update_id: int = 0
+
+
+async def _poll_loop():
+    """Poll Telegram for updates every 2 seconds. Runs while backend is up."""
+    global _last_update_id
+    logger.info("Telegram polling loop started")
+
+    while True:
+        try:
+            if not TELEGRAM_BOT_TOKEN or not TELEGRAM_API_URL:
+                await asyncio.sleep(10)
+                continue
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(
+                    f"{TELEGRAM_API_URL}/getUpdates",
+                    params={
+                        "offset": _last_update_id + 1,
+                        "timeout": 20,
+                        "allowed_updates": ["message", "edited_message"],
+                    }
+                )
+
+            if resp.status_code != 200:
+                await asyncio.sleep(5)
+                continue
+
+            data = resp.json()
+            if not data.get("ok"):
+                await asyncio.sleep(5)
+                continue
+
+            updates = data.get("result", [])
+            for update in updates:
+                _last_update_id = update["update_id"]
+                message = update.get("message") or update.get("edited_message")
+                if not message:
+                    continue
+
+                chat_id = message.get("chat", {}).get("id")
+                text = message.get("text", "").strip()
+
+                if not chat_id or not text:
+                    continue
+
+                if not is_authorized(chat_id):
+                    await send_telegram_message(chat_id, "Unauthorized.")
+                    continue
+
+                # Process in background so polling continues immediately
+                asyncio.create_task(process_telegram_command(chat_id, text))
+
+        except asyncio.CancelledError:
+            logger.info("Telegram polling loop cancelled")
+            break
+        except Exception as e:
+            logger.warning(f"Telegram poll error: {e}")
+            await asyncio.sleep(5)
+
+
+async def start_polling():
+    """Start the polling loop as a background task."""
+    global _polling_task
+    # First delete any existing webhook so polling works
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_API_URL:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(f"{TELEGRAM_API_URL}/deleteWebhook")
+            logger.info("Webhook cleared — polling mode active")
+        except Exception as e:
+            logger.warning(f"Could not clear webhook: {e}")
+
+    _polling_task = asyncio.create_task(_poll_loop())
+
+
+async def stop_polling():
+    """Cancel the polling loop on shutdown."""
+    global _polling_task
+    if _polling_task and not _polling_task.done():
+        _polling_task.cancel()
+        try:
+            await _polling_task
+        except asyncio.CancelledError:
+            pass

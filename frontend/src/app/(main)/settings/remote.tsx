@@ -50,6 +50,8 @@ export function RemoteAccessTab() {
   const [tailscale, setTailscale] = useState<TailscaleInfo | null>(null)
   const [telegram, setTelegram] = useState<TelegramStatus | null>(null)
   const [loading, setLoading] = useState(true)
+  const [backendStatus, setBackendStatus] = useState<{ running: boolean; healthy: boolean; pid: number | null } | null>(null)
+  const [controlling, setControlling] = useState<string | null>(null)
 
   const [botToken, setBotToken] = useState('')
   const [chatIds, setChatIds] = useState('')
@@ -64,7 +66,38 @@ export function RemoteAccessTab() {
     setTimeout(() => setFeedback(null), 4000)
   }
 
+  const fetchBackendStatus = async () => {
+    const res = await fetch('/api/backend').then(r => r.json()).catch(() => null)
+    if (res) setBackendStatus(res)
+  }
+
+  const controlBackend = async (action: 'start' | 'stop' | 'restart') => {
+    setControlling(action)
+    try {
+      const res = await fetch('/api/backend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action })
+      }).then(r => r.json())
+      fb(res.ok ? 'ok' : 'err', res.message)
+      await fetchBackendStatus()
+      // If backend came back up, also refresh remote status
+      if (res.ok && action !== 'stop') {
+        setTimeout(async () => {
+          const [ts, tg] = await Promise.all([
+            fetch(`${API_BASE}/v1/remote/tailscale-info`, { headers: AUTH }).then(r => r.json()).catch(() => null),
+            fetch(`${API_BASE}/v1/telegram/status`, { headers: AUTH }).then(r => r.json()).catch(() => null),
+          ])
+          if (ts) setTailscale(ts)
+          if (tg) setTelegram(tg)
+        }, 1000)
+      }
+    } catch (e: any) { fb('err', e.message) }
+    finally { setControlling(null) }
+  }
+
   useEffect(() => {
+    fetchBackendStatus()
     Promise.all([
       fetch(`${API_BASE}/v1/remote/tailscale-info`, { headers: AUTH }).then(r => r.json()).catch(() => null),
       fetch(`${API_BASE}/v1/telegram/status`, { headers: AUTH }).then(r => r.json()).catch(() => null),
@@ -74,6 +107,9 @@ export function RemoteAccessTab() {
       if (tg?.authorized_chats?.length) setChatIds(tg.authorized_chats.join(', '))
       setLoading(false)
     })
+    // Poll backend status every 10s
+    const interval = setInterval(fetchBackendStatus, 10000)
+    return () => clearInterval(interval)
   }, [])
 
   const saveBotToken = async () => {
@@ -86,7 +122,7 @@ export function RemoteAccessTab() {
       setBotToken('')
       const res = await fetch(`${API_BASE}/v1/telegram/status`, { headers: AUTH }).then(r => r.json())
       setTelegram(res)
-      fb('ok', 'Bot token saved — restart the backend to apply')
+      fb('ok', 'Bot token saved — active immediately')
     } catch (e: any) { fb('err', e.message) }
     finally { setSaving(null) }
   }
@@ -98,7 +134,10 @@ export function RemoteAccessTab() {
       await fetch(`${API_BASE}/v1/api-keys/telegram_chat_ids`, {
         method: 'PUT', headers: AUTH, body: JSON.stringify({ value: chatIds.trim() })
       })
-      fb('ok', 'Chat IDs saved — restart the backend to apply')
+      // Refresh status immediately so Send Test button activates
+      const res = await fetch(`${API_BASE}/v1/telegram/status`, { headers: AUTH }).then(r => r.json()).catch(() => null)
+      if (res) setTelegram(res)
+      fb('ok', 'Chat IDs saved')
     } catch (e: any) { fb('err', e.message) }
     finally { setSaving(null) }
   }
@@ -155,6 +194,60 @@ export function RemoteAccessTab() {
           {feedback.type === 'ok' ? '✓ ' : '✗ '}{feedback.text}
         </div>
       )}
+
+      {/* Backend Control */}
+      <Card icon="⚙️" title="Backend Process" subtitle="Start, stop or restart the Python backend (port 19000)">
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className={`w-3 h-3 rounded-full flex-shrink-0 ${
+                backendStatus?.healthy ? 'bg-green-500' :
+                backendStatus?.running ? 'bg-yellow-400 animate-pulse' :
+                'bg-red-500'
+              }`} />
+              <div>
+                <p className="text-sm font-medium text-gray-900 dark:text-white">
+                  {backendStatus?.healthy ? 'Running & healthy' :
+                   backendStatus?.running ? 'Running (not responding)' :
+                   backendStatus === null ? 'Checking...' :
+                   'Stopped'}
+                </p>
+                {backendStatus?.pid && (
+                  <p className="text-xs text-gray-400">PID {backendStatus.pid} · port {19000}</p>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-2">
+              {!backendStatus?.running ? (
+                <button onClick={() => controlBackend('start')} disabled={!!controlling}
+                  className="px-3 py-1.5 text-xs font-medium bg-green-600 hover:bg-green-700 text-white rounded-lg disabled:opacity-40 transition-colors">
+                  {controlling === 'start' ? '...' : '▶ Start'}
+                </button>
+              ) : (
+                <>
+                  <button onClick={() => controlBackend('restart')} disabled={!!controlling}
+                    className="px-3 py-1.5 text-xs font-medium bg-orange-500 hover:bg-orange-600 text-white rounded-lg disabled:opacity-40 transition-colors">
+                    {controlling === 'restart' ? '...' : '↺ Restart'}
+                  </button>
+                  <button onClick={() => controlBackend('stop')} disabled={!!controlling}
+                    className="px-3 py-1.5 text-xs font-medium border border-red-300 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg disabled:opacity-40 transition-colors">
+                    {controlling === 'stop' ? '...' : '■ Stop'}
+                  </button>
+                </>
+              )}
+              <button onClick={fetchBackendStatus} disabled={!!controlling}
+                className="px-3 py-1.5 text-xs border border-gray-300 dark:border-gray-600 text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800 rounded-lg disabled:opacity-40 transition-colors">
+                ↻
+              </button>
+            </div>
+          </div>
+          {!backendStatus?.healthy && backendStatus?.running === false && (
+            <p className="text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 px-3 py-2 rounded-lg">
+              Backend is down — most app features won't work until it's restarted. Click ▶ Start above.
+            </p>
+          )}
+        </div>
+      </Card>
 
       {/* Remote / Tailscale status */}
       <Card icon="🌐" title="Remote Access Status" subtitle="Tailscale network configuration">
@@ -232,24 +325,20 @@ export function RemoteAccessTab() {
             </div>
           </div>
 
-          {/* Webhook */}
+          {/* Polling status */}
           <div className="pt-3 border-t border-gray-100 dark:border-gray-700">
-            <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs font-medium text-gray-700 dark:text-gray-300">Webhook Registration</p>
-                <p className="text-xs text-gray-400">Points Telegram at your Tailscale URL so it delivers messages here</p>
+                <p className="text-xs font-medium text-gray-700 dark:text-gray-300">Receive Mode</p>
+                <p className="text-xs text-gray-400">Polling — backend checks Telegram every 2s for new messages</p>
               </div>
-              <button onClick={registerWebhook} disabled={!telegram?.configured || saving === 'webhook'}
-                className="px-3 py-1.5 text-xs bg-gray-800 hover:bg-gray-700 dark:bg-gray-700 dark:hover:bg-gray-600 text-white rounded-lg disabled:opacity-40 transition-colors">
-                {saving === 'webhook' ? '...' : '🔗 Register Webhook'}
-              </button>
+              {telegram?.configured && (
+                <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400">
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+                  Active
+                </span>
+              )}
             </div>
-            {webhookUrl && (
-              <div className="flex items-center gap-2 p-2.5 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-700 rounded-lg">
-                <span className="text-xs text-green-700 dark:text-green-400 font-mono break-all flex-1">{webhookUrl}</span>
-                <CopyButton text={webhookUrl} />
-              </div>
-            )}
           </div>
         </div>
       </Card>

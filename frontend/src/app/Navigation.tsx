@@ -80,6 +80,20 @@ export default function Navigation() {
     return pathname === href || pathname.startsWith(href + '/')
   }
 
+  const [backendUp, setBackendUp] = useState<boolean | null>(null)
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const res = await fetch('/api/backend')
+        const data = await res.json()
+        setBackendUp(data.healthy)
+      } catch { setBackendUp(false) }
+    }
+    check()
+    const interval = setInterval(check, 15000)
+    return () => clearInterval(interval)
+  }, [])
+
   return (
     <aside className={`
       flex-shrink-0 flex flex-col h-full
@@ -155,8 +169,28 @@ export default function Navigation() {
         })}
       </nav>
 
-      {/* Bottom — theme toggle */}
-      <div className="flex-shrink-0 border-t border-gray-100 dark:border-gray-800 p-2">
+      {/* Bottom — backend status + theme toggle */}
+      <div className="flex-shrink-0 border-t border-gray-100 dark:border-gray-800 p-2 space-y-1">
+        {/* Backend health indicator */}
+        <Link href="/settings" title={collapsed ? `Backend ${backendUp ? 'online' : backendUp === false ? 'offline' : 'checking'}` : undefined}
+          className={`flex items-center gap-2.5 w-full px-3 py-2 rounded-lg transition-colors ${
+            backendUp === false
+              ? 'bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/30'
+              : 'hover:bg-gray-100 dark:hover:bg-gray-800'
+          }`}>
+          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
+            backendUp === true ? 'bg-green-500' :
+            backendUp === false ? 'bg-red-500 animate-pulse' :
+            'bg-gray-300 animate-pulse'
+          }`} />
+          {!collapsed && (
+            <span className={`text-xs font-medium ${
+              backendUp === false ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'
+            }`}>
+              {backendUp === true ? 'Backend online' : backendUp === false ? 'Backend offline ⚡' : 'Checking...'}
+            </span>
+          )}
+        </Link>
         <ThemeToggle collapsed={collapsed} />
       </div>
     </aside>
