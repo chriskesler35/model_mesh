@@ -15,7 +15,8 @@ class Agent(Base, BaseMixin):
     agent_type = Column(String(50), nullable=False)  # coder, researcher, designer, etc.
     description = Column(Text)
     system_prompt = Column(Text, nullable=False)
-    model_id = Column(UUID(as_uuid=True))  # Primary model to use
+    model_id = Column(UUID(as_uuid=True))  # Direct model override (optional if persona_id set)
+    persona_id = Column(UUID(as_uuid=True))  # Persona to use (model resolved through persona)
     tools = Column(JSON, default=list)  # ["read_file", "write_file", "shell_execute", etc.]
     memory_enabled = Column(Boolean, default=True)
     max_iterations = Column(Integer, default=10)

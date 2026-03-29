@@ -5,6 +5,9 @@ import base64
 import httpx
 import logging
 import asyncio
+import subprocess
+import sys
+from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -18,7 +21,76 @@ import os
 
 logger = logging.getLogger(__name__)
 
+# ─── ComfyUI auto-launch ──────────────────────────────────────────────────────
+
+COMFYUI_DIR = Path(r"E:\AI_Models\ComfyUI")
+COMFYUI_PYTHON = Path(r"C:\Python314\python.exe")
+_comfyui_proc: Optional[subprocess.Popen] = None
+
+
+async def is_comfyui_running(url: str = "http://localhost:8188") -> bool:
+    """Quick TCP health-check against ComfyUI."""
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            r = await client.get(f"{url}/system_stats")
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
+async def launch_comfyui(url: str = "http://localhost:8188") -> bool:
+    """
+    Spawn ComfyUI in the background (Windows detached process).
+    Returns True if it becomes reachable within ~45 s, False otherwise.
+    """
+    global _comfyui_proc
+    logger.info("ComfyUI not running — attempting auto-launch…")
+
+    if not COMFYUI_DIR.exists():
+        logger.warning(f"ComfyUI directory not found: {COMFYUI_DIR}")
+        return False
+    if not COMFYUI_PYTHON.exists():
+        logger.warning(f"Python not found at: {COMFYUI_PYTHON}")
+        return False
+
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = "1,0"
+
+    try:
+        _comfyui_proc = subprocess.Popen(
+            [str(COMFYUI_PYTHON), "main.py", "--listen", "0.0.0.0"],
+            cwd=str(COMFYUI_DIR),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+        )
+        logger.info(f"ComfyUI launched (pid {_comfyui_proc.pid}), waiting for ready…")
+    except Exception as e:
+        logger.error(f"Failed to launch ComfyUI: {e}")
+        return False
+
+    # Poll until ready (max 45 s)
+    for _ in range(45):
+        await asyncio.sleep(1)
+        if await is_comfyui_running(url):
+            logger.info("ComfyUI is ready ✓")
+            return True
+
+    logger.warning("ComfyUI launched but did not become ready in 45s")
+    return False
+
+
+async def ensure_comfyui(url: str = "http://localhost:8188") -> bool:
+    """Check if ComfyUI is running; auto-launch if not. Returns True if available."""
+    if await is_comfyui_running(url):
+        return True
+    return await launch_comfyui(url)
+
 router = APIRouter(prefix="/v1/images", tags=["images"], dependencies=[Depends(verify_api_key)])
+
+# Public router for serving images (no auth needed for <img src> tags)
+public_router = APIRouter(prefix="/v1/img", tags=["images"])
 
 
 class ImageGenerationRequest(BaseModel):
@@ -46,67 +118,108 @@ class ImageListResponse(BaseModel):
 
 
 # In-memory storage for generated images (use proper storage in production)
-IMAGE_STORAGE = {}
+# Persistent image storage on disk
+_IMAGE_DIR = Path(r"G:\Model_Mesh\data\images")
+_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+_IMAGE_META = _IMAGE_DIR / "_meta.json"
+
+def _load_image_storage() -> dict:
+    """Load image metadata from disk."""
+    if _IMAGE_META.exists():
+        import json
+        try:
+            return json.loads(_IMAGE_META.read_text())
+        except Exception:
+            return {}
+    return {}
+
+def _save_image_storage(storage: dict):
+    """Save image metadata to disk."""
+    import json
+    # Save metadata (without base64 — that's in separate files)
+    meta = {}
+    for k, v in storage.items():
+        meta[k] = {key: val for key, val in v.items() if key != "base64"}
+    _IMAGE_META.write_text(json.dumps(meta, indent=2))
+
+def _store_image(image_id: str, data: dict):
+    """Store image binary + metadata to disk."""
+    # Save binary
+    img_bytes = base64.b64decode(data["base64"])
+    fmt = data.get("format", "png")
+    (_IMAGE_DIR / f"{image_id}.{fmt}").write_bytes(img_bytes)
+    # Update in-memory + metadata
+    IMAGE_STORAGE[image_id] = data
+    _save_image_storage(IMAGE_STORAGE)
+
+def _load_image_base64(image_id: str, fmt: str = "png") -> str:
+    """Load image binary from disk as base64."""
+    for ext in [fmt, "png", "jpg", "jpeg", "webp"]:
+        p = _IMAGE_DIR / f"{image_id}.{ext}"
+        if p.exists():
+            return base64.b64encode(p.read_bytes()).decode("utf-8")
+    return ""
+
+# In-memory cache, bootstrapped from disk
+IMAGE_STORAGE = _load_image_storage()
+# Patch base64 loader
+for _id in IMAGE_STORAGE:
+    if "base64" not in IMAGE_STORAGE[_id]:
+        IMAGE_STORAGE[_id]["base64"] = ""  # lazy-loaded
 
 
 async def generate_with_gemini_imagen(prompt: str, api_key: str, size: str = "1024x1024") -> dict:
-    """Generate image using Gemini Imagen API via OpenRouter or direct API."""
-    
-    # Parse dimensions
-    width, height = map(int, size.split('x'))
-    
-    # For now, use a placeholder that returns a generated image URL
-    # In production, this would call the actual Gemini Imagen API
-    # Gemini's image generation is done through Vertex AI or Imagen API
-    
+    """Generate image using Gemini's image generation model via REST API."""
     try:
-        # Using Google's Generative AI with image generation
-        # Note: This requires the google-generativeai package
-        import google.generativeai as genai
-        
-        genai.configure(api_key=api_key)
-        
-        # Try to use image generation model
-        # Note: Actual API may vary - this is a placeholder
-        model = genai.GenerativeModel('imagen-3.0-generate-002')
-        
-        # Generate image
-        response = model.generate_content(
-            prompt,
-            generation_config={
-                "response_modalities": ["image", "text"],
+        # Use gemini-2.5-flash-image (Nano Banana) which supports image generation
+        model_name = "gemini-2.5-flash-image"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+
+        # Prefix prompt to force image generation (not text description)
+        gen_prompt = f"Generate an image: {prompt}"
+
+        payload = {
+            "contents": [{"parts": [{"text": gen_prompt}]}],
+            "generationConfig": {
+                "responseModalities": ["IMAGE"],
             }
-        )
-        
+        }
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
+
+            if response.status_code != 200:
+                error_msg = response.text[:200]
+                raise HTTPException(status_code=response.status_code, detail=f"Gemini image generation failed: {error_msg}")
+
+            data = response.json()
+
         # Extract image from response
-        if hasattr(response, 'candidates') and response.candidates:
-            candidate = response.candidates[0]
-            if hasattr(candidate.content, 'parts'):
-                for part in candidate.content.parts:
-                    if hasattr(part, 'inline_data') and part.inline_data:
-                        image_bytes = part.inline_data.data
-                        return {
-                            "base64": base64.b64encode(image_bytes).decode('utf-8'),
-                            "revised_prompt": prompt
-                        }
-        
-        # Fallback: Generate a placeholder
-        raise HTTPException(
-            status_code=501,
-            detail="Gemini image generation requires Vertex AI setup. Use ComfyUI for local generation."
-        )
-        
-    except ImportError:
-        raise HTTPException(
-            status_code=500,
-            detail="google-generativeai package not installed"
-        )
+        candidates = data.get("candidates", [])
+        if not candidates:
+            raise HTTPException(status_code=500, detail="Gemini returned no candidates")
+
+        parts = candidates[0].get("content", {}).get("parts", [])
+        for part in parts:
+            inline_data = part.get("inlineData")
+            if inline_data and inline_data.get("mimeType", "").startswith("image/"):
+                return {
+                    "base64": inline_data["data"],
+                    "revised_prompt": prompt,
+                }
+
+        # If no image part found, check for text explanation
+        text_parts = [p.get("text", "") for p in parts if "text" in p]
+        detail = " ".join(text_parts) if text_parts else "No image in response"
+        raise HTTPException(status_code=500, detail=f"Gemini did not return an image: {detail[:200]}")
+
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Gemini image generation timed out (120s)")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Gemini image generation failed: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Image generation failed: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Image generation failed: {str(e)[:200]}")
 
 
 async def generate_with_comfyui(prompt: str, comfyui_url: str, size: str = "1024x1024", negative_prompt: str = None) -> dict:
@@ -293,12 +406,37 @@ async def generate_image(
                 
             elif request.model == "comfyui-local":
                 comfyui_url = os.environ.get('COMFYUI_URL') or getattr(settings, 'comfyui_url', 'http://localhost:8188')
-                result = await generate_with_comfyui(
-                    request.prompt,
-                    comfyui_url,
-                    request.size,
-                    request.negative_prompt
-                )
+
+                # Try to ensure ComfyUI is running; fall back to Gemini Imagen if unavailable
+                comfyui_available = await ensure_comfyui(comfyui_url)
+                if not comfyui_available:
+                    logger.warning("ComfyUI unavailable after auto-launch attempt — falling back to Gemini Imagen")
+                    # Look up gemini-imagen model for fallback
+                    gemini_model_result = await db.execute(
+                        select(Model).where(Model.model_id == "gemini-imagen")
+                    )
+                    gemini_model = gemini_model_result.scalar_one_or_none()
+                    if gemini_model:
+                        api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY') or getattr(settings, 'gemini_api_key', None) or getattr(settings, 'google_api_key', None)
+                        if not api_key:
+                            raise HTTPException(
+                                status_code=503,
+                                detail="ComfyUI is not running and could not be started. Gemini Imagen fallback requires a Google API key."
+                            )
+                        result = await generate_with_gemini_imagen(request.prompt, api_key, request.size)
+                        request.model = "gemini-imagen"  # update for storage
+                    else:
+                        raise HTTPException(
+                            status_code=503,
+                            detail="ComfyUI is not running and could not be started. Add a Gemini API key to enable the fallback image generator."
+                        )
+                else:
+                    result = await generate_with_comfyui(
+                        request.prompt,
+                        comfyui_url,
+                        request.size,
+                        request.negative_prompt
+                    )
                 
             else:
                 raise HTTPException(
@@ -414,7 +552,10 @@ async def list_images(
     
     images = []
     for image_id, data in list(IMAGE_STORAGE.items())[offset:offset + limit]:
-        width, height = map(int, data["size"].split('x'))
+        try:
+            width, height = map(int, data["size"].split('x'))
+        except (ValueError, AttributeError):
+            width, height = 0, 0
         images.append(ImageResponse(
             id=image_id,
             url=f"/v1/images/{image_id}",
@@ -464,7 +605,16 @@ async def generate_variation(
             result = await generate_with_gemini_imagen(prompt, api_key, size)
         elif model == "comfyui-local":
             comfyui_url = os.environ.get('COMFYUI_URL') or getattr(settings, 'comfyui_url', 'http://localhost:8188')
-            result = await generate_with_comfyui(prompt, comfyui_url, size, negative_prompt)
+            comfyui_available = await ensure_comfyui(comfyui_url)
+            if not comfyui_available:
+                logger.warning("ComfyUI unavailable — falling back to Gemini Imagen for variation")
+                api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY') or getattr(settings, 'gemini_api_key', None)
+                if not api_key:
+                    raise HTTPException(status_code=503, detail="ComfyUI unavailable and no Gemini API key configured")
+                result = await generate_with_gemini_imagen(prompt, api_key, size)
+                model = "gemini-imagen"
+            else:
+                result = await generate_with_comfyui(prompt, comfyui_url, size, negative_prompt)
         else:
             raise HTTPException(
                 status_code=400,
@@ -506,3 +656,182 @@ async def generate_variation(
             status_code=500,
             detail=f"Image variation failed: {str(e)}"
         )
+
+
+
+
+# ─── Image Upload + Editing ────────────────────────────────────────────────────
+
+class ImageEditRequest(BaseModel):
+    source_image_id: Optional[str] = None  # ID of previously uploaded/generated image
+    source_base64: Optional[str] = None    # Or raw base64 upload
+    source_mime: str = "image/png"
+    prompt: str                            # Edit instruction
+    size: str = "1024x1024"
+
+
+class ImageUploadRequest(BaseModel):
+    base64: str
+    filename: Optional[str] = None
+    mime_type: str = "image/png"
+
+
+@router.post("/upload")
+async def upload_image(req: ImageUploadRequest):
+    """Upload an image for later editing or reference."""
+    image_id = str(uuid.uuid4())
+
+    # Try to detect actual image dimensions
+    size = "0x0"
+    try:
+        img_bytes = base64.b64decode(req.base64)
+        from io import BytesIO
+        from PIL import Image as PILImage
+        with PILImage.open(BytesIO(img_bytes)) as img:
+            size = f"{img.width}x{img.height}"
+    except Exception:
+        pass  # Pillow not available or bad data — fall back gracefully
+
+    _store_image(image_id, {
+        "base64": req.base64,
+        "prompt": f"Uploaded: {req.filename or 'image'}",
+        "revised_prompt": None,
+        "format": req.mime_type.split("/")[-1] if "/" in req.mime_type else "png",
+        "size": size,
+        "model": "upload",
+        "negative_prompt": None,
+    })
+
+    return {
+        "id": image_id,
+        "url": f"/v1/img/{image_id}",
+        "message": "Image uploaded successfully",
+    }
+
+
+async def _gemini_image_edit(source_base64: str, source_mime: str, prompt: str, api_key: str) -> dict:
+    """Edit an image using Gemini's multimodal image generation."""
+    model_name = "gemini-2.5-flash-image"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+
+    payload = {
+        "contents": [{
+            "parts": [
+                {"inlineData": {"mimeType": source_mime, "data": source_base64}},
+                {"text": f"Generate an image: {prompt}"},
+            ]
+        }],
+        "generationConfig": {
+            "responseModalities": ["IMAGE"],
+        }
+    }
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
+
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code,
+                                detail=f"Gemini image edit failed: {response.text[:200]}")
+
+        data = response.json()
+
+    candidates = data.get("candidates", [])
+    if not candidates:
+        raise HTTPException(status_code=500, detail="Gemini returned no candidates for edit")
+
+    parts = candidates[0].get("content", {}).get("parts", [])
+    for part in parts:
+        inline_data = part.get("inlineData")
+        if inline_data and inline_data.get("mimeType", "").startswith("image/"):
+            return {
+                "base64": inline_data["data"],
+                "revised_prompt": prompt,
+                "mime_type": inline_data.get("mimeType", "image/png"),
+            }
+
+    # Check for text response (Gemini refused to edit)
+    text_parts = [p.get("text", "") for p in parts if "text" in p]
+    detail = " ".join(text_parts) if text_parts else "No image in response"
+    raise HTTPException(status_code=500, detail=f"Gemini did not return an edited image: {detail[:200]}")
+
+
+@router.post("/edit", response_model=ImageListResponse)
+async def edit_image(req: ImageEditRequest):
+    """Edit an image using AI — upload a photo and describe what you want."""
+
+    # Get source image base64
+    source_b64 = req.source_base64
+    source_mime = req.source_mime
+
+    if req.source_image_id:
+        # Load from stored image
+        if req.source_image_id in IMAGE_STORAGE:
+            stored = IMAGE_STORAGE[req.source_image_id]
+            source_b64 = stored.get("base64") or _load_image_base64(
+                req.source_image_id, stored.get("format", "png"))
+            fmt = stored.get("format", "png")
+            source_mime = f"image/{fmt}" if fmt != "jpg" else "image/jpeg"
+        else:
+            # Try loading from disk
+            source_b64 = _load_image_base64(req.source_image_id)
+            if not source_b64:
+                raise HTTPException(status_code=404, detail="Source image not found")
+
+    if not source_b64:
+        raise HTTPException(status_code=400,
+                            detail="Provide either source_image_id or source_base64")
+
+    # Get API key
+    api_key = (os.environ.get('GEMINI_API_KEY')
+               or os.environ.get('GOOGLE_API_KEY')
+               or getattr(settings, 'gemini_api_key', None))
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Gemini API key required for image editing")
+
+    # Call Gemini
+    result = await _gemini_image_edit(source_b64, source_mime, req.prompt, api_key)
+
+    # Store result
+    image_id = str(uuid.uuid4())
+    fmt = result.get("mime_type", "image/png").split("/")[-1]
+    if fmt == "jpeg": fmt = "jpg"
+    width, height = map(int, req.size.split("x")) if "x" in req.size else (1024, 1024)
+
+    _store_image(image_id, {
+        "base64": result["base64"],
+        "prompt": req.prompt,
+        "revised_prompt": result.get("revised_prompt"),
+        "format": fmt,
+        "size": req.size,
+        "model": "gemini-image-edit",
+        "negative_prompt": None,
+        "source_image_id": req.source_image_id,
+    })
+
+    return ImageListResponse(
+        data=[ImageResponse(
+            id=image_id,
+            url=f"/v1/images/{image_id}",
+            revised_prompt=result.get("revised_prompt"),
+            width=width,
+            height=height,
+            format=fmt,
+        )],
+        total=1,
+    )
+
+@public_router.get("/{image_id}")
+async def serve_image_public(image_id: str):
+    """Serve image binary without auth — for <img src> tags."""
+    fmt = "png"
+    if image_id in IMAGE_STORAGE:
+        fmt = IMAGE_STORAGE[image_id].get("format", "png")
+
+    # Try loading from disk
+    for ext in [fmt, "png", "jpg", "jpeg", "webp"]:
+        p = _IMAGE_DIR / f"{image_id}.{ext}"
+        if p.exists():
+            media_type = f"image/{ext}" if ext != "jpg" else "image/jpeg"
+            return Response(content=p.read_bytes(), media_type=media_type)
+
+    raise HTTPException(status_code=404, detail="Image not found")

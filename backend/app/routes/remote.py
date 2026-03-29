@@ -278,11 +278,11 @@ async def get_tailscale_info():
         "hostname": hostname,
         "tailscale_ip": tailscale_ip,
         "backend_port": 19000,
-        "frontend_port": 3000,
+        "frontend_port": 3001,
         "api_url": f"http://{tailscale_ip or hostname}:19000",
-        "frontend_url": f"http://{tailscale_ip or hostname}:3000",
+        "frontend_url": f"http://{tailscale_ip or hostname}:3001",
         "instructions": {
-            "tailscale": f"Connect via Tailscale: http://{tailscale_ip or '100.106.217.99'}:3000",
-            "local": f"Local access: http://localhost:3000"
+            "tailscale": f"Connect via Tailscale: http://{tailscale_ip or '100.106.217.99'}:3001",
+            "local": f"Local access: http://localhost:3001"
         }
     }

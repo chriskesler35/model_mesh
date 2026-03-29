@@ -14,13 +14,17 @@ class ModelClient:
 
     def get_api_key(self, provider_name: str) -> Optional[str]:
         """Get API key from environment (never from database)."""
+        p = provider_name.lower()
+        if p == "google":
+            # litellm Gemini handler requires explicit api_key; prefer GEMINI_API_KEY
+            return (os.environ.get("GEMINI_API_KEY")
+                    or os.environ.get("GOOGLE_API_KEY"))
         key_map = {
             "anthropic": "ANTHROPIC_API_KEY",
-            "google": "GOOGLE_API_KEY",
             "openai": "OPENAI_API_KEY",
             "openrouter": "OPENROUTER_API_KEY",
         }
-        env_key = key_map.get(provider_name.lower())
+        env_key = key_map.get(p)
         if env_key:
             return os.environ.get(env_key)
         return None
@@ -66,7 +70,12 @@ class ModelClient:
             # Use environment variable for Ollama URL (works in Docker)
             ollama_base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
             kwargs["api_base"] = ollama_base
-        elif provider.api_base_url:
+        elif provider_name == "google":
+            # DO NOT set api_base for Google/Gemini — litellm handles the URL
+            # automatically when api_key is provided. Setting api_base causes
+            # litellm to route to Vertex AI instead of Google AI Studio.
+            pass
+        elif provider.api_base_url and provider_name not in ("anthropic",):
             kwargs["api_base"] = provider.api_base_url
 
         # Get API key from environment (provider-specific)
@@ -77,7 +86,8 @@ class ModelClient:
         # Debug logging
         import logging
         logger = logging.getLogger(__name__)
-        logger.info(f"Calling model: {litellm_model} with provider: {provider_name}, api_base: {kwargs.get('api_base', 'default')}")
+        _key_hint = kwargs.get('api_key', '')[:8] if kwargs.get('api_key') else 'MISSING'
+        logger.info(f"Calling model: {litellm_model} | stream={stream} | api_key={_key_hint} | provider={provider_name}")
 
         # Use acompletion for async support
         response = await acompletion(**kwargs)

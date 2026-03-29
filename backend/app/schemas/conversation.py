@@ -10,6 +10,14 @@ class ConversationCreate(BaseModel):
     persona_id: Optional[UUID4] = None
     external_id: Optional[str] = None
     extra_data: Dict[str, Any] = {}
+    title: Optional[str] = None
+
+
+class ConversationUpdate(BaseModel):
+    """Schema for updating a conversation."""
+    title: Optional[str] = None
+    pinned: Optional[bool] = None
+    keep_forever: Optional[bool] = None
 
 
 class ConversationResponse(BaseModel):
@@ -18,7 +26,13 @@ class ConversationResponse(BaseModel):
     persona_id: Optional[UUID4] = None
     external_id: Optional[str] = None
     extra_data: Dict[str, Any] = {}
+    title: Optional[str] = None
+    pinned: bool = False
+    keep_forever: bool = False
+    last_message_at: Optional[datetime] = None
+    message_count: int = 0
     created_at: datetime
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

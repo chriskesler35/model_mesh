@@ -3,12 +3,13 @@
 import uuid
 import json
 import time
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_memory
-from app.models import Conversation
+from app.models import Conversation, Message
 from app.schemas import ChatCompletionRequest
 from app.services import PersonaResolver, Router, model_client
 from app.services.memory_context import MemoryContext
@@ -71,8 +72,19 @@ async def chat_completions(
     conversation_id = request.conversation_id
     if not conversation_id:
         conversation_id = await memory.create_conversation_id()
+        # Auto-title from first user message
+        first_user = next((m.content for m in request.messages if m.role == "user"), None)
+        auto_title = None
+        if first_user:
+            auto_title = first_user[:60] + ("…" if len(first_user) > 60 else "")
         # Create conversation record
-        conv = Conversation(id=uuid.UUID(conversation_id), persona_id=persona.id)
+        conv = Conversation(
+            id=uuid.UUID(conversation_id),
+            persona_id=persona.id,
+            title=auto_title,
+            last_message_at=datetime.now(timezone.utc),
+            message_count=len(request.messages),
+        )
         db.add(conv)
         await db.commit()
     
@@ -106,6 +118,29 @@ async def _stream_response(
             # Convert messages to dict
             msg_dicts = [{"role": m.role, "content": m.content} for m in request.messages]
 
+            # Inject soul + user identity context + active method
+            try:
+                from pathlib import Path as _Path
+                from app.routes.methods import _load_state as _load_method_state, BUILT_IN_METHODS as _METHODS
+                _data = _Path(r"G:\Model_Mesh\data")
+                _soul = _data / "soul.md"
+                _user = _data / "user.md"
+                identity_parts = []
+                if _soul.exists():
+                    identity_parts.append(f"# AI Identity\n{_soul.read_text(encoding='utf-8')}")
+                if _user.exists():
+                    identity_parts.append(f"# About the User\n{_user.read_text(encoding='utf-8')}")
+                # Inject active method prompt
+                _method_state = _load_method_state()
+                _active_method = _METHODS.get(_method_state.get("active_method", "standard"), {})
+                _method_prompt = _active_method.get("system_prompt", "")
+                if _method_prompt:
+                    identity_parts.append(_method_prompt)
+                if identity_parts:
+                    msg_dicts.insert(0, {"role": "system", "content": "\n\n".join(identity_parts)})
+            except Exception as _e:
+                logger.warning(f"Failed to inject identity context: {_e}")
+
             # Inject memory context into system prompt if enabled
             if persona.memory_enabled:
                 try:
@@ -138,7 +173,7 @@ async def _stream_response(
                         full_content += content
                         data = json.dumps({
                             "id": completion_id,
-                            "object": "chat.completion.chunk",
+                            "object": "chat.completion.chunk", "conversation_id": conversation_id,
                             "model": primary_model.model_id if primary_model else "unknown",
                             "choices": [{
                                 "index": 0,
@@ -163,6 +198,14 @@ async def _stream_response(
                               primary_model.provider_id if primary_model else None,
                               input_tokens, output_tokens, latency_ms, True, None,
                               estimated_cost=estimated_cost)
+            await _update_conversation_meta(db, conversation_id)
+            # Persist messages to DB
+            user_text = next((m['content'] for m in reversed(msg_dicts) if m['role'] == 'user'), '')
+            if user_text and full_content:
+                await _save_messages(db, conversation_id, user_text, full_content,
+                                     model_id=primary_model.id if primary_model else None,
+                                     input_tokens=input_tokens, output_tokens=output_tokens,
+                                     latency_ms=latency_ms, estimated_cost=estimated_cost)
 
         except Exception as e:
             logger.error(f"Streaming error: {e}")
@@ -208,6 +251,28 @@ async def _sync_response(
                     }
                 }
             )
+
+        # Inject soul + user identity context + active method
+        try:
+            from pathlib import Path as _Path
+            from app.routes.methods import _load_state as _load_method_state, BUILT_IN_METHODS as _METHODS
+            _data = _Path(r"G:\Model_Mesh\data")
+            _soul = _data / "soul.md"
+            _user = _data / "user.md"
+            identity_parts = []
+            if _soul.exists():
+                identity_parts.append(f"# AI Identity\n{_soul.read_text(encoding='utf-8')}")
+            if _user.exists():
+                identity_parts.append(f"# About the User\n{_user.read_text(encoding='utf-8')}")
+            _method_state = _load_method_state()
+            _active_method = _METHODS.get(_method_state.get("active_method", "standard"), {})
+            _method_prompt = _active_method.get("system_prompt", "")
+            if _method_prompt:
+                identity_parts.append(_method_prompt)
+            if identity_parts:
+                msg_dicts.insert(0, {"role": "system", "content": "\n\n".join(identity_parts)})
+        except Exception as _e:
+            logger.warning(f"Failed to inject identity context: {_e}")
 
         # Inject memory context into system prompt if enabled
         if persona.memory_enabled:
@@ -273,10 +338,19 @@ async def _sync_response(
                           primary_model.provider_id if primary_model else None,
                           input_tokens, output_tokens, latency_ms, True, None,
                           estimated_cost=estimated_cost)
+        await _update_conversation_meta(db, conversation_id)
+        # Persist messages to DB
+        user_text = next((m['content'] for m in reversed(msg_dicts) if m['role'] == 'user'), '')
+        if user_text and full_content:
+            await _save_messages(db, conversation_id, user_text, full_content,
+                                 model_id=primary_model.id if primary_model else None,
+                                 input_tokens=input_tokens, output_tokens=output_tokens,
+                                 latency_ms=latency_ms, estimated_cost=estimated_cost)
 
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
             "object": "chat.completion",
+            "conversation_id": conversation_id,
             "model": primary_model.model_id if primary_model else "unknown",
             "choices": [{
                 "index": 0,
@@ -313,6 +387,52 @@ async def _sync_response(
                 }
             }
         )
+
+
+async def _save_messages(db, conversation_id: str, user_content: str, assistant_content: str,
+                         model_id=None, input_tokens=0, output_tokens=0, latency_ms=0, estimated_cost=0.0):
+    """Persist user + assistant messages to the database using a fresh session."""
+    from app.database import AsyncSessionLocal
+    try:
+        async with AsyncSessionLocal() as fresh_db:
+            # Use string for conversation_id to avoid UUID type mismatch with SQLite
+            conv_str = str(conversation_id)
+            model_str = str(model_id) if model_id else None
+            user_msg = Message(
+                conversation_id=conv_str,
+                role="user",
+                content=user_content,
+            )
+            fresh_db.add(user_msg)
+            asst_msg = Message(
+                conversation_id=conv_str,
+                role="assistant",
+                content=assistant_content,
+                model_used=model_str,
+                tokens_in=input_tokens,
+                tokens_out=output_tokens,
+                latency_ms=latency_ms,
+                estimated_cost=estimated_cost,
+            )
+            fresh_db.add(asst_msg)
+            await fresh_db.commit()
+            logger.info(f"Saved messages for conv {conversation_id[:8]}")
+    except Exception as e:
+        logger.error(f"Failed to save messages: {e}")
+
+
+async def _update_conversation_meta(db, conversation_id: str, added_messages: int = 2):
+    """Update last_message_at and message_count after each exchange."""
+    from app.database import AsyncSessionLocal
+    try:
+        async with AsyncSessionLocal() as fresh_db:
+            conv = await fresh_db.get(Conversation, uuid.UUID(str(conversation_id)))
+            if conv:
+                conv.last_message_at = datetime.now(timezone.utc)
+                conv.message_count = (conv.message_count or 0) + added_messages
+                await fresh_db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to update conversation meta: {e}")
 
 
 async def _log_request(db, conversation_id, persona_id, model_id, provider_id,

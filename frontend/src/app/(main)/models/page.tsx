@@ -1,7 +1,25 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { api } from '@/lib/api'
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:19000'
+const AUTH_HEADERS = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
+
+interface ValidationResult {
+  valid: boolean
+  model_id: string
+  display_name?: string
+  provider: string
+  litellm_model: string
+  context_window?: number
+  max_output_tokens?: number
+  cost_per_1m_input?: number
+  cost_per_1m_output?: number
+  capabilities: Record<string, boolean>
+  source: string
+  warning?: string
+}
 
 interface Model {
   id: string
@@ -51,6 +69,10 @@ export default function ModelsPage() {
   const [editingModel, setEditingModel] = useState<Model | null>(null)
   const [suggestions, setSuggestions] = useState<ModelSuggestion[]>([])
   const [lookingUp, setLookingUp] = useState(false)
+  const [validating, setValidating] = useState(false)
+  const [validation, setValidation] = useState<ValidationResult | null>(null)
+  const [validationError, setValidationError] = useState<string | null>(null)
+  const validateTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [formData, setFormData] = useState({
     model_id: '',
     display_name: '',
@@ -151,6 +173,49 @@ export default function ModelsPage() {
     } finally {
       setLookingUp(false)
     }
+  }
+
+  const validateModel = async (modelId: string, providerId: string) => {
+    const provider = providers.find(p => p.id === providerId)
+    if (!modelId.trim() || !provider) {
+      setValidation(null)
+      setValidationError(null)
+      return
+    }
+    setValidating(true)
+    setValidation(null)
+    setValidationError(null)
+    try {
+      const res = await fetch(`${API_BASE}/v1/models/validate`, {
+        method: 'POST',
+        headers: AUTH_HEADERS,
+        body: JSON.stringify({ model_id: modelId.trim(), provider: provider.name }),
+      })
+      const data: ValidationResult = await res.json()
+      setValidation(data)
+      if (data.valid) {
+        // Auto-fill fields from validated data
+        setFormData(prev => ({
+          ...prev,
+          display_name: prev.display_name || data.display_name || modelId,
+          context_window: data.context_window || prev.context_window,
+          cost_per_1m_input: data.cost_per_1m_input ?? prev.cost_per_1m_input,
+          cost_per_1m_output: data.cost_per_1m_output ?? prev.cost_per_1m_output,
+          capabilities: Object.keys(data.capabilities).length > 0 ? data.capabilities : prev.capabilities,
+        }))
+      }
+    } catch (e) {
+      setValidationError('Validation request failed')
+    } finally {
+      setValidating(false)
+    }
+  }
+
+  // Debounced validation on model_id / provider_id change
+  const triggerValidation = (modelId: string, providerId: string) => {
+    if (validateTimer.current) clearTimeout(validateTimer.current)
+    if (!modelId.trim() || !providerId) { setValidation(null); return }
+    validateTimer.current = setTimeout(() => validateModel(modelId, providerId), 600)
   }
 
   const handleSelectSuggestion = (suggestion: ModelSuggestion) => {
@@ -397,7 +462,12 @@ export default function ModelsPage() {
                 <select
                   required
                   value={formData.provider_id}
-                  onChange={(e) => setFormData({ ...formData, provider_id: e.target.value })}
+                  onChange={(e) => {
+                    const newProviderId = e.target.value
+                    setFormData(prev => ({ ...prev, provider_id: newProviderId }))
+                    setValidation(null)
+                    triggerValidation(formData.model_id, newProviderId)
+                  }}
                   className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-orange-500 focus:ring-orange-500 sm:text-sm"
                 >
                   <option value="">Select a provider</option>
@@ -432,22 +502,82 @@ export default function ModelsPage() {
                     type="text"
                     required
                     value={formData.model_id}
-                    onChange={(e) => setFormData({ ...formData, model_id: e.target.value })}
-                    className="mt-1 flex-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-orange-500 focus:ring-orange-500 sm:text-sm"
-                    placeholder="e.g., gpt-4-turbo"
+                    onChange={(e) => {
+                      const newId = e.target.value
+                      setFormData(prev => ({ ...prev, model_id: newId }))
+                      triggerValidation(newId, formData.provider_id)
+                    }}
+                    className={`mt-1 flex-1 block w-full rounded-md shadow-sm focus:ring-orange-500 sm:text-sm
+                      ${validation
+                        ? validation.valid
+                          ? 'border-green-400 focus:border-green-500'
+                          : 'border-red-400 focus:border-red-500'
+                        : 'border-gray-300 dark:border-gray-600 focus:border-orange-500'
+                      } dark:bg-gray-700 dark:text-white`}
+                    placeholder="e.g., claude-3-5-haiku-20241022"
                   />
                   <button
                     type="button"
-                    onClick={handleLookupModel}
-                    disabled={lookingUp || !formData.model_id || !formData.provider_id}
-                    className="mt-1 px-3 py-2 text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    onClick={() => validateModel(formData.model_id, formData.provider_id)}
+                    disabled={validating || !formData.model_id || !formData.provider_id}
+                    className="mt-1 px-3 py-2 text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
                   >
-                    {lookingUp ? 'Looking up...' : 'Lookup'}
+                    {validating ? '⟳ Checking…' : 'Validate'}
                   </button>
                 </div>
-                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  Click "Lookup" to auto-fill pricing and context info
-                </p>
+
+                {/* Validation status */}
+                {validating && (
+                  <p className="mt-1 text-xs text-gray-400 animate-pulse">Validating model with provider…</p>
+                )}
+                {validationError && (
+                  <p className="mt-1 text-xs text-red-500">{validationError}</p>
+                )}
+                {validation && (
+                  <div className={`mt-2 rounded-md p-3 text-sm border ${
+                    validation.valid
+                      ? 'bg-green-50 border-green-200 dark:bg-green-900/20 dark:border-green-700'
+                      : 'bg-red-50 border-red-200 dark:bg-red-900/20 dark:border-red-700'
+                  }`}>
+                    <div className="flex items-center gap-2 font-medium">
+                      <span>{validation.valid ? '✅' : '❌'}</span>
+                      <span className={validation.valid ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}>
+                        {validation.valid ? 'Valid model' : 'Model not found'}
+                      </span>
+                      <span className="text-xs font-normal text-gray-400">via {validation.source}</span>
+                    </div>
+                    {validation.valid && (
+                      <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-gray-600 dark:text-gray-300">
+                        {validation.context_window && (
+                          <span>Context: <strong>{(validation.context_window / 1000).toFixed(0)}K tokens</strong></span>
+                        )}
+                        {validation.cost_per_1m_input !== undefined && (
+                          <span>Input: <strong>${validation.cost_per_1m_input}/1M</strong></span>
+                        )}
+                        {validation.max_output_tokens && (
+                          <span>Max output: <strong>{(validation.max_output_tokens / 1000).toFixed(0)}K</strong></span>
+                        )}
+                        {validation.cost_per_1m_output !== undefined && (
+                          <span>Output: <strong>${validation.cost_per_1m_output}/1M</strong></span>
+                        )}
+                        {Object.keys(validation.capabilities).length > 0 && (
+                          <span className="col-span-2">
+                            Caps: <strong>{Object.keys(validation.capabilities).join(', ')}</strong>
+                          </span>
+                        )}
+                        <span className="col-span-2 text-gray-400 italic">↑ Fields auto-filled above</span>
+                      </div>
+                    )}
+                    {validation.warning && (
+                      <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">⚠ {validation.warning}</p>
+                    )}
+                    {!validation.valid && (
+                      <p className="mt-1 text-xs text-red-600 dark:text-red-400">
+                        This model ID was not recognized by {validation.provider}. Check the ID and try again.
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
               
               <div>
@@ -497,7 +627,7 @@ export default function ModelsPage() {
               <div className="flex justify-end gap-3 pt-4">
                 <button
                   type="button"
-                  onClick={() => setShowAddModal(false)}
+                  onClick={() => { setShowAddModal(false); setValidation(null); setValidationError(null) }}
                   className="px-4 py-2 border border-gray-300 dark:border-gray-600 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600"
                 >
                   Cancel

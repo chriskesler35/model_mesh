@@ -9,10 +9,11 @@ from app.models.conversation import Conversation, Message
 from app.models.request_log import RequestLog
 from app.models.user_profile import UserProfile, MemoryFile, PreferenceTracking, SystemModification
 from app.models.agent import Agent
+from app.models.task import Task
 
 __all__ = [
     "Base", "BaseMixin", "Provider", "Model", "Persona", 
     "Conversation", "Message", "RequestLog",
     "UserProfile", "MemoryFile", "PreferenceTracking", "SystemModification",
-    "Agent"
+    "Agent", "Task"
 ]

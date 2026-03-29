@@ -110,9 +110,13 @@ export default function Navigation() {
               <NavLink href="/chat">Chat</NavLink>
               <NavLink href="/gallery">Gallery</NavLink>
               <NavLink href="/agents">Agents</NavLink>
+              <NavLink href="/agents/sessions">Sessions</NavLink>
+              <NavLink href="/workbench">Workbench</NavLink>
+              <NavLink href="/projects">Projects</NavLink>
+              <NavLink href="/methods">Methods</NavLink>
+              <NavLink href="/collaborate">Collaborate</NavLink>
               <NavLink href="/personas">Personas</NavLink>
               <NavLink href="/models">Models</NavLink>
-              <NavLink href="/conversations">Conversations</NavLink>
               <NavLink href="/stats">Stats</NavLink>
               <NavLink href="/settings">Settings</NavLink>
             </div>

@@ -65,3 +65,21 @@ docker-compose.override.yml
 # OS
 .DS_Store
 Thumbs.db
+
+# DevForgeAI data (personal / generated content)
+data/images/
+data/soul.md
+data/user.md
+data/projects.json
+data/methods_state.json
+data/sandbox_state.json
+data/collab_users.json
+data/audit_log.json
+data/collab_sessions.json
+data/workspaces.json
+data/_meta.json
+
+# Startup scripts with local paths on desktop
+# (keep the template but not personal copies)
+agent_task.txt
+check_db.py

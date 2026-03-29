@@ -23,6 +23,7 @@ class ModelCreate(ModelBase):
 
 class ModelUpdate(BaseModel):
     """Schema for updating a model."""
+    model_id: Optional[str] = None
     display_name: Optional[str] = None
     cost_per_1m_input: Optional[float] = None
     cost_per_1m_output: Optional[float] = None

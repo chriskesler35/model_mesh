@@ -1,9 +1,22 @@
 """FastAPI application entry point."""
 
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
+
+# Ensure API keys from settings are available in os.environ for litellm
+_key_map = {
+    "ANTHROPIC_API_KEY": settings.anthropic_api_key,
+    "GOOGLE_API_KEY": settings.google_api_key,
+    "GEMINI_API_KEY": settings.gemini_api_key or settings.google_api_key,
+    "OPENROUTER_API_KEY": settings.openrouter_api_key,
+    "OPENAI_API_KEY": settings.openai_api_key,
+}
+for _k, _v in _key_map.items():
+    if _v and not os.environ.get(_k):
+        os.environ[_k] = _v
 from app.database import engine, Base
 from app.redis import close_redis
 from app.routes import (
@@ -18,19 +31,53 @@ from app.routes.user import router as user_router
 from app.routes.models import router as models_crud_router
 from app.routes.system import router as system_router
 from app.routes.providers import router as providers_router
-from app.routes.images import router as images_router
+from app.routes.images import router as images_router, public_router as images_public_router
 from app.routes.agents import router as agents_router
 from app.routes.model_lookup import router as model_lookup_router
 from app.routes.remote import router as remote_router
 from app.routes.telegram_bot import router as telegram_router
+from app.routes.identity import router as identity_router
+from app.routes.workbench import router as workbench_router
+from app.routes.projects import router as projects_router
+from app.routes.methods import router as methods_router
+from app.routes.sandbox import router as sandbox_router
+from app.routes.collaboration import router as collab_router
+from app.routes.api_keys import router as api_keys_router
+from app.routes.model_validate import router as model_validate_router
+from app.routes.tasks import router as tasks_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    # Startup
+    # Startup — create tables then run column migrations
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    from app.migrate import run_migrations
+    await run_migrations()
+
+    # Auto-cleanup conversations older than 30 days
+    try:
+        from app.database import AsyncSessionLocal as _ASL
+        from datetime import datetime, timezone, timedelta
+        from sqlalchemy import select, delete
+        from app.models import Conversation
+        async with _ASL() as _db:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+            old = await _db.execute(
+                select(Conversation).where(Conversation.keep_forever == False, Conversation.created_at < cutoff)
+            )
+            old_convs = old.scalars().all()
+            if old_convs:
+                for c in old_convs:
+                    await _db.delete(c)
+                await _db.commit()
+                import logging
+                logging.getLogger(__name__).info(f"Cleaned up {len(old_convs)} conversations older than 30 days")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Conversation cleanup failed: {e}")
     
     # Seed database with initial data
     from app.database import AsyncSessionLocal
@@ -71,10 +118,20 @@ app.include_router(user_router)
 app.include_router(system_router)
 app.include_router(providers_router)
 app.include_router(images_router)
+app.include_router(images_public_router)
 app.include_router(agents_router)
 app.include_router(model_lookup_router)
 app.include_router(remote_router)
 app.include_router(telegram_router)
+app.include_router(identity_router)
+app.include_router(workbench_router)
+app.include_router(projects_router)
+app.include_router(methods_router)
+app.include_router(sandbox_router)
+app.include_router(collab_router)
+app.include_router(api_keys_router)
+app.include_router(model_validate_router)
+app.include_router(tasks_router)
 
 
 @app.get("/")

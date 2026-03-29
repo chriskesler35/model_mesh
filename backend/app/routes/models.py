@@ -130,6 +130,8 @@ async def update_model(
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
     
+    if updates.model_id is not None:
+        model.model_id = updates.model_id
     if updates.display_name is not None:
         model.display_name = updates.display_name
     if updates.cost_per_1m_input is not None:

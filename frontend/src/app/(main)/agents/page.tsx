@@ -57,6 +57,19 @@ export default function AgentsPage() {
     }
   }
 
+  const deleteAgent = async (id: string, name: string) => {
+    if (!confirm(`Delete agent "${name}"? This cannot be undone.`)) return
+    try {
+      await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:19000'}/v1/agents/${id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' },
+      })
+      setAgents(agents.filter(a => a.id !== id))
+    } catch (err) {
+      console.error('Failed to delete agent:', err)
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[50vh]">
@@ -138,6 +151,12 @@ export default function AgentsPage() {
               >
                 Configure →
               </Link>
+                <button
+                  onClick={() => deleteAgent(agent.id, agent.name)}
+                  className="text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 text-sm"
+                >
+                  Delete
+                </button>
             </div>
           </div>
         ))}

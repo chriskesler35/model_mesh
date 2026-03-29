@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
 from app.models.agent import Agent, DEFAULT_AGENTS
+from app.models import Persona, Model
 from app.middleware.auth import verify_api_key
 from pydantic import BaseModel
 from typing import Optional, List
@@ -16,12 +17,85 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["agents"], dependencies=[Depends(verify_api_key)])
 
 
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+async def _resolve_agent_model(agent: Agent, db: AsyncSession) -> dict:
+    """
+    Resolve the effective model for an agent.
+    Priority: persona_id → persona.primary_model → agent.model_id → None
+    Returns a dict with resolved model info to attach to the response.
+    """
+    resolved = {
+        "resolved_model_id": None,
+        "resolved_model_name": None,
+        "resolved_via": None,
+        "persona_name": None,
+    }
+
+    # Try persona first
+    if agent.persona_id:
+        try:
+            persona_result = await db.execute(
+                select(Persona).where(Persona.id == agent.persona_id)
+            )
+            persona = persona_result.scalar_one_or_none()
+            if persona:
+                resolved["persona_name"] = persona.name
+                if persona.primary_model_id:
+                    model_result = await db.execute(
+                        select(Model).where(Model.id == persona.primary_model_id)
+                    )
+                    model = model_result.scalar_one_or_none()
+                    if model:
+                        resolved["resolved_model_id"] = str(model.id)
+                        resolved["resolved_model_name"] = model.display_name or model.model_id
+                        resolved["resolved_via"] = "persona"
+        except Exception as e:
+            logger.warning(f"Failed to resolve persona for agent {agent.id}: {e}")
+
+    # Fall back to direct model_id
+    if not resolved["resolved_model_id"] and agent.model_id:
+        try:
+            model_result = await db.execute(
+                select(Model).where(Model.id == agent.model_id)
+            )
+            model = model_result.scalar_one_or_none()
+            if model:
+                resolved["resolved_model_id"] = str(model.id)
+                resolved["resolved_model_name"] = model.display_name or model.model_id
+                resolved["resolved_via"] = "direct"
+        except Exception as e:
+            logger.warning(f"Failed to resolve direct model for agent {agent.id}: {e}")
+
+    return resolved
+
+
+def _agent_to_dict(agent: Agent) -> dict:
+    """Convert agent ORM object to plain dict."""
+    import uuid as _uuid
+    from datetime import datetime
+    d = {}
+    for f in ['id', 'name', 'agent_type', 'description', 'system_prompt',
+              'model_id', 'persona_id', 'tools', 'memory_enabled',
+              'max_iterations', 'timeout_seconds', 'is_active', 'created_at', 'updated_at']:
+        val = getattr(agent, f, None)
+        if isinstance(val, _uuid.UUID):
+            val = str(val)
+        if isinstance(val, datetime):
+            val = val.isoformat()
+        d[f] = val
+    return d
+
+
+# ─── Schemas ──────────────────────────────────────────────────────────────────
+
 class AgentCreate(BaseModel):
     name: str
     agent_type: str
     description: Optional[str] = None
     system_prompt: str
     model_id: Optional[str] = None
+    persona_id: Optional[str] = None
     tools: List[str] = []
     memory_enabled: bool = True
     max_iterations: int = 10
@@ -30,9 +104,11 @@ class AgentCreate(BaseModel):
 
 class AgentUpdate(BaseModel):
     name: Optional[str] = None
+    agent_type: Optional[str] = None
     description: Optional[str] = None
     system_prompt: Optional[str] = None
     model_id: Optional[str] = None
+    persona_id: Optional[str] = None
     tools: Optional[List[str]] = None
     memory_enabled: Optional[bool] = None
     max_iterations: Optional[int] = None
@@ -44,16 +120,21 @@ class AgentResponse(BaseModel):
     id: str
     name: str
     agent_type: str
-    description: Optional[str]
+    description: Optional[str] = None
     system_prompt: str
-    model_id: Optional[str]
-    tools: List[str]
-    memory_enabled: bool
-    max_iterations: int
-    timeout_seconds: int
-    is_active: bool
-    created_at: str
-    updated_at: str
+    model_id: Optional[str] = None
+    persona_id: Optional[str] = None
+    persona_name: Optional[str] = None
+    resolved_model_id: Optional[str] = None
+    resolved_model_name: Optional[str] = None
+    resolved_via: Optional[str] = None  # "persona" | "direct" | None
+    tools: List[str] = []
+    memory_enabled: bool = True
+    max_iterations: int = 10
+    timeout_seconds: int = 300
+    is_active: bool = True
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -64,6 +145,8 @@ class AgentListResponse(BaseModel):
     total: int
 
 
+# ─── Routes ───────────────────────────────────────────────────────────────────
+
 @router.get("", response_model=AgentListResponse)
 async def list_agents(
     agent_type: Optional[str] = None,
@@ -71,61 +154,44 @@ async def list_agents(
     offset: int = 0,
     db: AsyncSession = Depends(get_db)
 ):
-    """List all agents, optionally filtered by type."""
     query = select(Agent)
-    
     if agent_type:
         query = query.where(Agent.agent_type == agent_type)
-    
     query = query.limit(limit).offset(offset)
     result = await db.execute(query)
     agents = result.scalars().all()
-    
-    # If no agents in database, return defaults
+
     if not agents:
-        default_agents = []
-        for agent_data in DEFAULT_AGENTS:
-            default_agents.append(AgentResponse(
-                id=f"default-{agent_data['agent_type']}",
-                name=agent_data["name"],
-                agent_type=agent_data["agent_type"],
-                description=agent_data.get("description"),
-                system_prompt=agent_data["system_prompt"],
-                model_id=None,
-                tools=agent_data.get("tools", []),
-                memory_enabled=agent_data.get("memory_enabled", True),
-                max_iterations=agent_data.get("max_iterations", 10),
-                timeout_seconds=agent_data.get("timeout_seconds", 300),
-                is_active=True,
-                created_at="default",
-                updated_at="default"
+        # Return defaults with no model resolution
+        defaults = []
+        for d in DEFAULT_AGENTS:
+            defaults.append(AgentResponse(
+                id=f"default-{d['agent_type']}",
+                name=d["name"], agent_type=d["agent_type"],
+                description=d.get("description"), system_prompt=d["system_prompt"],
+                tools=d.get("tools", []),
+                max_iterations=d.get("max_iterations", 10),
+                timeout_seconds=d.get("timeout_seconds", 300),
+                created_at="default", updated_at="default"
             ))
-        return AgentListResponse(data=default_agents, total=len(default_agents))
-    
-    # Get total count
-    count_query = select(Agent)
-    if agent_type:
-        count_query = count_query.where(Agent.agent_type == agent_type)
-    count_result = await db.execute(count_query)
-    total = len(count_result.scalars().all())
-    
-    return AgentListResponse(
-        data=[AgentResponse.model_validate(a) for a in agents],
-        total=total
-    )
+        return AgentListResponse(data=defaults, total=len(defaults))
+
+    data = []
+    for agent in agents:
+        d = _agent_to_dict(agent)
+        resolved = await _resolve_agent_model(agent, db)
+        d.update(resolved)
+        data.append(AgentResponse(**d))
+
+    return AgentListResponse(data=data, total=len(data))
 
 
 @router.post("", response_model=AgentResponse)
-async def create_agent(
-    agent: AgentCreate,
-    db: AsyncSession = Depends(get_db)
-):
-    """Create a new agent."""
-    # Get default user
+async def create_agent(agent: AgentCreate, db: AsyncSession = Depends(get_db)):
     from app.models import UserProfile
     result = await db.execute(select(UserProfile).limit(1))
     user = result.scalar_one_or_none()
-    
+
     new_agent = Agent(
         id=uuid.uuid4(),
         name=agent.name,
@@ -133,120 +199,87 @@ async def create_agent(
         description=agent.description,
         system_prompt=agent.system_prompt,
         model_id=uuid.UUID(agent.model_id) if agent.model_id else None,
+        persona_id=uuid.UUID(agent.persona_id) if agent.persona_id else None,
         tools=agent.tools,
         memory_enabled=agent.memory_enabled,
         max_iterations=agent.max_iterations,
         timeout_seconds=agent.timeout_seconds,
         user_id=user.id if user else None
     )
-    
     db.add(new_agent)
     await db.commit()
     await db.refresh(new_agent)
-    
-    return AgentResponse.model_validate(new_agent)
+
+    d = _agent_to_dict(new_agent)
+    resolved = await _resolve_agent_model(new_agent, db)
+    d.update(resolved)
+    return AgentResponse(**d)
 
 
 @router.get("/defaults", response_model=AgentListResponse)
 async def get_default_agents():
-    """Get the default agent configurations."""
-    agents = []
-    for agent_data in DEFAULT_AGENTS:
-        agents.append(AgentResponse(
-            id=str(uuid.uuid4()),  # Placeholder ID
-            name=agent_data["name"],
-            agent_type=agent_data["agent_type"],
-            description=agent_data.get("description"),
-            system_prompt=agent_data["system_prompt"],
-            model_id=None,
-            tools=agent_data.get("tools", []),
-            memory_enabled=agent_data.get("memory_enabled", True),
-            max_iterations=agent_data.get("max_iterations", 10),
-            timeout_seconds=agent_data.get("timeout_seconds", 300),
-            is_active=True,
-            created_at="",
-            updated_at=""
-        ))
-    
+    agents = [AgentResponse(
+        id=str(uuid.uuid4()), name=d["name"], agent_type=d["agent_type"],
+        description=d.get("description"), system_prompt=d["system_prompt"],
+        tools=d.get("tools", []), max_iterations=d.get("max_iterations", 10),
+        timeout_seconds=d.get("timeout_seconds", 300), created_at="", updated_at=""
+    ) for d in DEFAULT_AGENTS]
     return AgentListResponse(data=agents, total=len(agents))
 
 
 @router.get("/{agent_id}", response_model=AgentResponse)
-async def get_agent(
-    agent_id: str,
-    db: AsyncSession = Depends(get_db)
-):
-    """Get a specific agent by ID."""
+async def get_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
     try:
-        agent_uuid = uuid.UUID(agent_id)
-        result = await db.execute(select(Agent).where(Agent.id == agent_uuid))
+        result = await db.execute(select(Agent).where(Agent.id == uuid.UUID(agent_id)))
     except ValueError:
         result = await db.execute(select(Agent).where(Agent.name == agent_id))
-    
     agent = result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    
-    return AgentResponse.model_validate(agent)
+    d = _agent_to_dict(agent)
+    resolved = await _resolve_agent_model(agent, db)
+    d.update(resolved)
+    return AgentResponse(**d)
 
 
 @router.patch("/{agent_id}", response_model=AgentResponse)
-async def update_agent(
-    agent_id: str,
-    updates: AgentUpdate,
-    db: AsyncSession = Depends(get_db)
-):
-    """Update an agent."""
+async def update_agent(agent_id: str, updates: AgentUpdate, db: AsyncSession = Depends(get_db)):
     try:
-        agent_uuid = uuid.UUID(agent_id)
-        result = await db.execute(select(Agent).where(Agent.id == agent_uuid))
+        result = await db.execute(select(Agent).where(Agent.id == uuid.UUID(agent_id)))
     except ValueError:
         result = await db.execute(select(Agent).where(Agent.name == agent_id))
-    
     agent = result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    
-    if updates.name is not None:
-        agent.name = updates.name
-    if updates.description is not None:
-        agent.description = updates.description
-    if updates.system_prompt is not None:
-        agent.system_prompt = updates.system_prompt
+
+    for field in ['name', 'agent_type', 'description', 'system_prompt',
+                  'tools', 'memory_enabled', 'max_iterations', 'timeout_seconds', 'is_active']:
+        val = getattr(updates, field, None)
+        if val is not None:
+            setattr(agent, field, val)
+
     if updates.model_id is not None:
-        agent.model_id = uuid.UUID(updates.model_id)
-    if updates.tools is not None:
-        agent.tools = updates.tools
-    if updates.memory_enabled is not None:
-        agent.memory_enabled = updates.memory_enabled
-    if updates.max_iterations is not None:
-        agent.max_iterations = updates.max_iterations
-    if updates.timeout_seconds is not None:
-        agent.timeout_seconds = updates.timeout_seconds
-    if updates.is_active is not None:
-        agent.is_active = updates.is_active
-    
+        agent.model_id = uuid.UUID(updates.model_id) if updates.model_id else None
+    if updates.persona_id is not None:
+        agent.persona_id = uuid.UUID(updates.persona_id) if updates.persona_id else None
+
     await db.commit()
     await db.refresh(agent)
-    return AgentResponse.model_validate(agent)
+    d = _agent_to_dict(agent)
+    resolved = await _resolve_agent_model(agent, db)
+    d.update(resolved)
+    return AgentResponse(**d)
 
 
 @router.delete("/{agent_id}")
-async def delete_agent(
-    agent_id: str,
-    db: AsyncSession = Depends(get_db)
-):
-    """Delete an agent."""
+async def delete_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
     try:
-        agent_uuid = uuid.UUID(agent_id)
-        result = await db.execute(select(Agent).where(Agent.id == agent_uuid))
+        result = await db.execute(select(Agent).where(Agent.id == uuid.UUID(agent_id)))
     except ValueError:
         result = await db.execute(select(Agent).where(Agent.name == agent_id))
-    
     agent = result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    
     await db.delete(agent)
     await db.commit()
     return {"status": "deleted"}

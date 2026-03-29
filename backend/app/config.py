@@ -38,8 +38,9 @@ class Settings(BaseSettings):
     rate_limit_rph: int = 1000  # 1000 requests per hour
     
     class Config:
-        env_file = ".env"
+        env_file = [".env", "../.env"]
         env_file_encoding = "utf-8"
+        extra = "ignore"
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
