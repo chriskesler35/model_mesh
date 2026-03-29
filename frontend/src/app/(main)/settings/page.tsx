@@ -1,4 +1,5 @@
 'use client'
+import { RemoteAccessTab } from './remote'
 
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '@/lib/api'
@@ -394,7 +395,7 @@ export default function SettingsPage() {
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [memoryFiles, setMemoryFiles] = useState<MemoryFile[]>([])
   const [loading, setLoading] = useState(true)
-  const [activeTab, setActiveTab] = useState<'identity' | 'profile' | 'memory' | 'preferences' | 'conversations' | 'apikeys'>('identity')
+  const [activeTab, setActiveTab] = useState<'identity' | 'profile' | 'memory' | 'preferences' | 'conversations' | 'apikeys' | 'remote'>('identity')
   const [editingFile, setEditingFile] = useState<MemoryFile | null>(null)
   const [newFileName, setNewFileName] = useState('')
 
@@ -698,6 +699,17 @@ export default function SettingsPage() {
       {/* Conversations Tab */}
       {activeTab === 'conversations' && (
         <ConversationsTab />
+      )}
+
+      {/* Remote Access Tab */}
+      {activeTab === 'remote' && (
+        <div>
+          <div className="mb-6">
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Remote Access</h2>
+            <p className="text-sm text-gray-500 mt-1">Telegram bot, Tailscale, and firewall configuration for remote access.</p>
+          </div>
+          <RemoteAccessTab />
+        </div>
       )}
 
       {/* API Keys Tab */}

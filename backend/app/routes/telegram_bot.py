@@ -148,7 +148,7 @@ async def process_telegram_command(chat_id: int, text: str):
         command = parts[0].lower()
         args = parts[1] if len(parts) > 1 else ""
     else:
-        # Treat as a chat message
+        # Treat plain text as a chat message (most natural Telegram UX)
         command = "/chat"
         args = text
     
@@ -167,6 +167,9 @@ async def process_telegram_command(chat_id: int, text: str):
     
     elif command == "/run":
         await handle_run_command(chat_id, args)
+    
+    elif command == "/continue":
+        await handle_continue_command(chat_id)
     
     elif command == "/chat":
         await handle_chat_command(chat_id, args)
@@ -189,7 +192,8 @@ Commands:
 /models - Available models
 /run <agent> <task> - Start agent session
 /cancel <session_id> - Cancel session
-/chat <message> - Chat with default model
+/chat <message> - Chat (context kept per session)
+/continue - Resume last conversation
 /help - Show this help
 
 Examples:
@@ -335,6 +339,14 @@ async def handle_chat_command(chat_id: int, args: str):
     await send_telegram_message(chat_id, f"💭 You said: _{args}_\n\n(Chat integration coming soon)")
 
 
+async def handle_continue_command(chat_id: int):
+    """Resume the last conversation for this Telegram chat."""
+    conv_id = _telegram_conversations.get(chat_id)
+    if not conv_id:
+        await send_telegram_message(chat_id, "No active conversation. Start one with /chat or just send a message.")
+        return
+    await send_telegram_message(chat_id, f"Continuing conversation `{conv_id[:8]}...`\nJust send your next message.")
+
 async def handle_cancel_command(chat_id: int, args: str):
     """Handle /cancel command."""
     if not args:
@@ -352,3 +364,70 @@ async def handle_cancel_command(chat_id: int, args: str):
                 await send_telegram_message(chat_id, f"⚠️ Session not found or already completed")
     except Exception as e:
         await send_telegram_message(chat_id, f"⚠️ Error: {e}")
+
+@router.post("/register-webhook")
+async def register_webhook(request: Request):
+    """Register this server as the Telegram webhook."""
+    if not TELEGRAM_BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN not configured")
+
+    # Try to determine our public URL
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    public_url = body.get("url")
+    if not public_url:
+        # Try to get Tailscale IP
+        import socket
+        try:
+            hostname = socket.gethostname()
+            tailscale_ip = None
+            result = __import__("subprocess").run(
+                ["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                tailscale_ip = result.stdout.strip()
+        except Exception:
+            tailscale_ip = None
+
+        base = f"http://{tailscale_ip}:19000" if tailscale_ip else "http://localhost:19000"
+        public_url = f"{base}/v1/telegram/webhook"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{TELEGRAM_API_URL}/setWebhook",
+                json={"url": public_url, "allowed_updates": ["message", "edited_message"]}
+            )
+            data = resp.json()
+            if data.get("ok"):
+                return {"ok": True, "webhook_url": public_url, "description": data.get("description")}
+            else:
+                raise HTTPException(status_code=400, detail=f"Telegram rejected webhook: {data.get('description')}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/webhook")
+async def delete_webhook():
+    """Remove the Telegram webhook (switch to polling mode)."""
+    if not TELEGRAM_BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN not configured")
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(f"{TELEGRAM_API_URL}/deleteWebhook")
+        return resp.json()
+
+
+@router.get("/webhook-info")
+async def get_webhook_info():
+    """Get current webhook configuration from Telegram."""
+    if not TELEGRAM_BOT_TOKEN:
+        return {"configured": False}
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(f"{TELEGRAM_API_URL}/getWebhookInfo")
+        return resp.json().get("result", {})
