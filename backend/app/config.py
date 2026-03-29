@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     openrouter_api_key: Optional[str] = None
     openai_api_key: Optional[str] = None
     
+    # Telegram bot
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_ids: Optional[str] = None  # comma-separated list of authorized chat IDs
+
     # ComfyUI for image generation
     comfyui_url: str = "http://localhost:8188"
     

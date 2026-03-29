@@ -5,26 +5,26 @@ import { usePathname } from 'next/navigation'
 import { useState, useEffect } from 'react'
 
 const NAV_ITEMS = [
-  { href: '/',             label: 'Dashboard',    icon: '◈' },
-  { href: '/chat',         label: 'Chat',         icon: '💬' },
-  { href: '/agents',       label: 'Agents',       icon: '🤖' },
-  { href: '/agents/sessions', label: 'Sessions',  icon: '▶' },
-  { href: '/workbench',    label: 'Workbench',    icon: '🔨' },
-  { href: '/projects',     label: 'Projects',     icon: '🗂️' },
-  { href: '/gallery',      label: 'Gallery',      icon: '🖼️' },
-  { href: '/methods',      label: 'Methods',      icon: '🧠' },
-  { href: '/collaborate',  label: 'Collaborate',  icon: '👥' },
-  { href: '/personas',     label: 'Personas',     icon: '🎭' },
-  { href: '/models',       label: 'Models',       icon: '⚡' },
-  { href: '/stats',        label: 'Stats',        icon: '📊' },
-  { href: '/settings',     label: 'Settings',     icon: '⚙️' },
+  { href: '/',                label: 'Dashboard',  icon: '◈' },
+  { href: '/chat',            label: 'Chat',        icon: '💬' },
+  { href: '/agents',          label: 'Agents',      icon: '🤖' },
+  { href: '/agents/sessions', label: 'Sessions',    icon: '▶' },
+  { href: '/workbench',       label: 'Workbench',   icon: '🔨' },
+  { href: '/projects',        label: 'Projects',    icon: '🗂️' },
+  { href: '/gallery',         label: 'Gallery',     icon: '🖼️' },
+  { href: '/methods',         label: 'Methods',     icon: '🧠' },
+  { href: '/collaborate',     label: 'Collaborate', icon: '👥' },
+  { href: '/personas',        label: 'Personas',    icon: '🎭' },
+  { href: '/models',          label: 'Models',      icon: '⚡' },
+  { href: '/stats',           label: 'Stats',       icon: '📊' },
+  { href: '/settings',        label: 'Settings',    icon: '⚙️' },
 ]
 
 const GROUPS = [
-  { label: 'MAIN',    items: ['/', '/chat'] },
-  { label: 'BUILD',   items: ['/agents', '/agents/sessions', '/workbench', '/projects'] },
-  { label: 'CREATE',  items: ['/gallery', '/methods'] },
-  { label: 'MANAGE',  items: ['/collaborate', '/personas', '/models', '/stats', '/settings'] },
+  { label: 'MAIN',   items: ['/', '/chat'] },
+  { label: 'BUILD',  items: ['/agents', '/agents/sessions', '/workbench', '/projects'] },
+  { label: 'CREATE', items: ['/gallery', '/methods'] },
+  { label: 'MANAGE', items: ['/collaborate', '/personas', '/models', '/stats', '/settings'] },
 ]
 
 function ThemeToggle({ collapsed }: { collapsed: boolean }) {
@@ -56,13 +56,31 @@ function ThemeToggle({ collapsed }: { collapsed: boolean }) {
 
 export default function Navigation() {
   const pathname = usePathname()
-  const [collapsed, setCollapsed] = useState(false)
+
+  // All hooks must be declared before any conditional returns
   const [mounted, setMounted] = useState(false)
+  const [collapsed, setCollapsed] = useState(false)
+  const [backendUp, setBackendUp] = useState<boolean | null>(null)
 
   useEffect(() => {
     setMounted(true)
     const stored = localStorage.getItem('sidebar-collapsed')
     if (stored === 'true') setCollapsed(true)
+  }, [])
+
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const res = await fetch('/api/backend')
+        const data = await res.json()
+        setBackendUp(data.healthy)
+      } catch {
+        setBackendUp(false)
+      }
+    }
+    check()
+    const interval = setInterval(check, 15000)
+    return () => clearInterval(interval)
   }, [])
 
   const toggle = () => {
@@ -71,28 +89,15 @@ export default function Navigation() {
     localStorage.setItem('sidebar-collapsed', String(next))
   }
 
-  if (!mounted) {
-    return <aside className="w-56 flex-shrink-0 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800" />
-  }
-
   const isActive = (href: string) => {
     if (href === '/') return pathname === '/'
     return pathname === href || pathname.startsWith(href + '/')
   }
 
-  const [backendUp, setBackendUp] = useState<boolean | null>(null)
-  useEffect(() => {
-    const check = async () => {
-      try {
-        const res = await fetch('/api/backend')
-        const data = await res.json()
-        setBackendUp(data.healthy)
-      } catch { setBackendUp(false) }
-    }
-    check()
-    const interval = setInterval(check, 15000)
-    return () => clearInterval(interval)
-  }, [])
+  // Early return AFTER all hooks
+  if (!mounted) {
+    return <aside className="w-56 flex-shrink-0 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800" />
+  }
 
   return (
     <aside className={`
@@ -171,15 +176,15 @@ export default function Navigation() {
 
       {/* Bottom — backend status + theme toggle */}
       <div className="flex-shrink-0 border-t border-gray-100 dark:border-gray-800 p-2 space-y-1">
-        {/* Backend health indicator */}
-        <Link href="/settings" title={collapsed ? `Backend ${backendUp ? 'online' : backendUp === false ? 'offline' : 'checking'}` : undefined}
+        <Link href="/settings"
+          title={collapsed ? `Backend ${backendUp ? 'online' : backendUp === false ? 'offline' : 'checking'}` : undefined}
           className={`flex items-center gap-2.5 w-full px-3 py-2 rounded-lg transition-colors ${
             backendUp === false
               ? 'bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/30'
               : 'hover:bg-gray-100 dark:hover:bg-gray-800'
           }`}>
           <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
-            backendUp === true ? 'bg-green-500' :
+            backendUp === true  ? 'bg-green-500' :
             backendUp === false ? 'bg-red-500 animate-pulse' :
             'bg-gray-300 animate-pulse'
           }`} />
@@ -187,7 +192,9 @@ export default function Navigation() {
             <span className={`text-xs font-medium ${
               backendUp === false ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'
             }`}>
-              {backendUp === true ? 'Backend online' : backendUp === false ? 'Backend offline ⚡' : 'Checking...'}
+              {backendUp === true  ? 'Backend online' :
+               backendUp === false ? 'Backend offline ⚡' :
+               'Checking...'}
             </span>
           )}
         </Link>

@@ -14,14 +14,26 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/telegram", tags=["telegram"])
 
-# Telegram Bot Token (set in environment)
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else None
+# Load from pydantic settings (reads .env file) then fall back to os.environ
+def _load_telegram_config():
+    from app.config import settings
+    token = settings.telegram_bot_token or os.environ.get("TELEGRAM_BOT_TOKEN") or ""
+    chat_ids_str = settings.telegram_chat_ids or os.environ.get("TELEGRAM_CHAT_IDS") or ""
+    # Sync into os.environ so any code that reads os.environ directly works too
+    if token:
+        os.environ["TELEGRAM_BOT_TOKEN"] = token
+    if chat_ids_str:
+        os.environ["TELEGRAM_CHAT_IDS"] = chat_ids_str
+    chat_ids = [int(c.strip()) for c in chat_ids_str.split(",") if c.strip().lstrip("-").isdigit()]
+    return token, chat_ids
 
-# Authorized chat IDs (set in environment, comma-separated)
-AUTHORIZED_CHAT_IDS = [
-    int(cid) for cid in (os.environ.get("TELEGRAM_CHAT_IDS", "").split(",") if os.environ.get("TELEGRAM_CHAT_IDS") else [])
-]
+_token, _chat_ids = _load_telegram_config()
+TELEGRAM_BOT_TOKEN: str = _token
+TELEGRAM_API_URL: str = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else ""
+AUTHORIZED_CHAT_IDS: list = _chat_ids
+
+# Per-chat conversation context (in-memory, persists while backend is up)
+_telegram_conversations: dict = {}
 
 
 class TelegramMessage(BaseModel):
@@ -331,14 +343,64 @@ async def handle_run_command(chat_id: int, args: str):
 
 
 async def handle_chat_command(chat_id: int, args: str):
-    """Handle /chat command to chat with the default model."""
+    """Chat with the default persona, maintaining conversation context per Telegram chat."""
     if not args:
-        await send_telegram_message(chat_id, "Usage: `/chat <message>`")
+        await send_telegram_message(chat_id, "Usage: `/chat <message>`\nOr just send any message directly.")
         return
-    
-    # For now, just acknowledge - full chat integration would need more work
-    await send_telegram_message(chat_id, f"💭 You said: _{args}_\n\n(Chat integration coming soon)")
 
+    await send_telegram_message(chat_id, "_Thinking..._")
+
+    try:
+        conv_id = _telegram_conversations.get(chat_id)
+
+        # Resolve the default persona ID dynamically
+        persona_id = "default"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as pc:
+                pr = await pc.get(
+                    "http://localhost:19000/v1/personas",
+                    headers={"Authorization": "Bearer modelmesh_local_dev_key"}
+                )
+                if pr.status_code == 200:
+                    personas = pr.json().get("data", [])
+                    default_p = next((p for p in personas if p.get("is_default")), None) or (personas[0] if personas else None)
+                    if default_p:
+                        persona_id = default_p["id"]
+        except Exception:
+            pass
+
+        body: dict = {
+            "model": persona_id,
+            "messages": [{"role": "user", "content": args}],
+            "stream": False,
+        }
+        if conv_id:
+            body["conversation_id"] = conv_id
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "http://localhost:19000/v1/chat/completions",
+                json=body,
+                headers={"Authorization": "Bearer modelmesh_local_dev_key"},
+            )
+
+        if response.status_code != 200:
+            await send_telegram_message(chat_id, f"Error from AI: {response.text[:200]}")
+            return
+
+        data = response.json()
+        reply = data.get("choices", [{}])[0].get("message", {}).get("content", "(no response)")
+        new_conv_id = data.get("conversation_id") or (data.get("modelmesh") or {}).get("conversation_id")
+        if new_conv_id:
+            _telegram_conversations[chat_id] = new_conv_id
+
+        model_used = data.get("model", "")
+        footer = f"\n\n_via {model_used}_" if model_used else ""
+        await send_telegram_message(chat_id, reply + footer)
+
+    except Exception as e:
+        logger.error(f"Chat command failed: {e}")
+        await send_telegram_message(chat_id, f"Error: {str(e)[:200]}")
 
 async def handle_continue_command(chat_id: int):
     """Resume the last conversation for this Telegram chat."""
