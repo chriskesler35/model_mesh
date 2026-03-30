@@ -50,76 +50,150 @@ async def rollback_to_snapshot(snapshot_name: str):
     return await self_healing.restore_snapshot(snapshot_name)
 
 
-@router.get("/processes")
-async def get_processes():
-    """Get PM2 process status for all DevForgeAI services."""
+def _root_dir() -> Path:
+    return Path(__file__).parent.parent.parent.parent
+
+
+def _read_pids() -> dict:
+    pids_file = _root_dir() / ".devforgeai.pids"
+    if pids_file.exists():
+        import json as _json
+        try:
+            return _json.loads(pids_file.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _process_info(pid: int, name: str) -> dict:
+    """Get info about a running process by PID."""
     import subprocess
     try:
         result = subprocess.run(
-            ["pm2", "jlist"],
-            capture_output=True, text=True, timeout=10
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=5
         )
-        if result.returncode != 0:
-            return {"pm2": False, "processes": [], "error": "PM2 not running or not found"}
+        running = str(pid) in result.stdout
+        mem_mb = None
+        if running:
+            parts = result.stdout.strip().strip('"').split('","')
+            if len(parts) >= 5:
+                mem_str = parts[4].replace(",", "").replace(" K", "").strip()
+                try:
+                    mem_mb = round(int(mem_str) / 1024, 1)
+                except ValueError:
+                    pass
+        return {
+            "name": name,
+            "pid": pid if running else None,
+            "status": "online" if running else "stopped",
+            "memory_mb": mem_mb,
+        }
+    except Exception:
+        return {"name": name, "pid": None, "status": "unknown", "memory_mb": None}
 
-        import json as _json
-        procs = _json.loads(result.stdout)
-        # Filter to devforgeai processes only
-        filtered = [
-            {
-                "name": p.get("name"),
-                "status": p.get("pm2_env", {}).get("status"),
-                "pid": p.get("pid"),
-                "uptime": p.get("pm2_env", {}).get("pm_uptime"),
-                "restarts": p.get("pm2_env", {}).get("restart_time", 0),
-                "cpu": p.get("monit", {}).get("cpu"),
-                "memory_mb": round(p.get("monit", {}).get("memory", 0) / 1024 / 1024, 1),
-            }
-            for p in procs
-            if "devforgeai" in p.get("name", "")
+
+@router.get("/processes")
+async def get_processes():
+    """Get status of DevForgeAI background processes."""
+    pids = _read_pids()
+    processes = []
+
+    port_checks = {
+        "devforgeai-backend": 19000,
+        "devforgeai-frontend": 3001,
+    }
+
+    # Check each service — by PID if we have it, by port as fallback
+    import subprocess
+    for svc_name, port in port_checks.items():
+        pid = pids.get("backend" if "backend" in svc_name else "frontend")
+
+        # Check if port is listening (most reliable signal)
+        port_result = subprocess.run(
+            ["netstat", "-ano"],
+            capture_output=True, text=True, timeout=5
+        )
+        listening_pids = [
+            line.strip().split()[-1]
+            for line in port_result.stdout.splitlines()
+            if f":{port} " in line and "LISTENING" in line
         ]
-        return {"pm2": True, "processes": filtered}
-    except FileNotFoundError:
-        return {"pm2": False, "processes": [], "error": "PM2 not installed"}
-    except Exception as e:
-        return {"pm2": False, "processes": [], "error": str(e)}
+        is_running = len(listening_pids) > 0
+        actual_pid = int(listening_pids[0]) if listening_pids else pid
+
+        info = {"name": svc_name, "status": "online" if is_running else "stopped",
+                "pid": actual_pid if is_running else None, "port": port,
+                "memory_mb": None, "restarts": 0, "cpu": None}
+
+        if is_running and actual_pid:
+            details = _process_info(actual_pid, svc_name)
+            info["memory_mb"] = details.get("memory_mb")
+
+        processes.append(info)
+
+    return {"pm2": False, "managed": True, "processes": processes}
 
 
 @router.get("/logs")
-async def get_logs(lines: int = 50, service: str = "backend"):
-    """Read recent log lines from PM2 log files."""
-    log_dir = Path(__file__).parent.parent.parent.parent / "logs"
-    log_file = log_dir / f"{service}-out.log"
-    err_file = log_dir / f"{service}-error.log"
+async def get_logs(lines: int = 80, service: str = "backend"):
+    """Read recent log lines from log files."""
+    log_dir = _root_dir() / "logs"
+    # Support both naming conventions
+    candidates = [
+        log_dir / f"{service}.log",
+        log_dir / f"{service}-out.log",
+    ]
+    err_candidates = [
+        log_dir / f"{service}-error.log",
+    ]
 
     out_lines, err_lines = [], []
-    if log_file.exists():
-        all_lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
-        out_lines = all_lines[-lines:]
-    if err_file.exists():
-        all_lines = err_file.read_text(encoding="utf-8", errors="replace").splitlines()
-        err_lines = all_lines[-lines:]
+    for f in candidates:
+        if f.exists():
+            all_lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+            out_lines = all_lines[-lines:]
+            break
+    for f in err_candidates:
+        if f.exists():
+            all_lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+            err_lines = all_lines[-lines:]
+            break
 
-    return {
-        "service": service,
-        "out": out_lines,
-        "err": err_lines,
-        "log_dir": str(log_dir),
-    }
+    return {"service": service, "out": out_lines, "err": err_lines, "log_dir": str(log_dir)}
 
 
 @router.post("/processes/{action}")
 async def control_process(action: str, service: str = "all"):
-    """Control PM2 processes: start, stop, restart."""
+    """Control DevForgeAI processes: start, stop, restart."""
     import subprocess
     if action not in ("start", "stop", "restart"):
         raise HTTPException(status_code=400, detail="action must be start, stop, or restart")
-    try:
-        result = subprocess.run(
-            ["pm2", action, service],
-            capture_output=True, text=True, timeout=15
+
+    root = _root_dir()
+    stop_script  = root / "Stop-DevForgeAI.ps1"
+    start_script = root / "Start-DevForgeAI.ps1"
+
+    def run_ps(script: Path):
+        return subprocess.run(
+            ["powershell", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+             "-File", str(script)],
+            capture_output=True, text=True, timeout=30
         )
-        return {"ok": result.returncode == 0, "output": result.stdout + result.stderr}
+
+    try:
+        if action == "stop":
+            r = run_ps(stop_script)
+            return {"ok": r.returncode == 0, "output": r.stdout + r.stderr}
+        elif action == "start":
+            r = run_ps(start_script)
+            return {"ok": r.returncode == 0, "output": r.stdout + r.stderr}
+        elif action == "restart":
+            run_ps(stop_script)
+            import asyncio as _asyncio
+            await _asyncio.sleep(2)
+            r = run_ps(start_script)
+            return {"ok": r.returncode == 0, "output": r.stdout + r.stderr}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

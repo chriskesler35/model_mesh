@@ -440,14 +440,35 @@ function ServerTab() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [infoRes, healthRes, procRes] = await Promise.all([
+      const [infoRes, healthRes, backendStatus] = await Promise.all([
         fetch(`${API_BASE}/v1/system/info`, { headers: AUTH }).then(r => r.json()).catch(() => null),
         fetch(`${API_BASE}/v1/system/health`, { headers: AUTH }).then(r => r.json()).catch(() => null),
-        fetch(`${API_BASE}/v1/system/processes`, { headers: AUTH }).then(r => r.json()).catch(() => null),
+        fetch('/api/backend').then(r => r.json()).catch(() => null),
       ])
       setInfo(infoRes)
       setHealth(healthRes)
-      setProcesses(procRes)
+      // Build process list from backend status + assume frontend is running (we're talking to it)
+      setProcesses({
+        managed: true,
+        processes: [
+          {
+            name: 'devforgeai-backend',
+            status: backendStatus?.running ? 'online' : 'stopped',
+            pid: backendStatus?.pid ?? null,
+            port: 19000,
+            memory_mb: null,
+            restarts: 0,
+          },
+          {
+            name: 'devforgeai-frontend',
+            status: 'online',
+            pid: null,
+            port: 3001,
+            memory_mb: null,
+            restarts: 0,
+          },
+        ]
+      })
     } finally {
       setLoading(false)
     }
@@ -467,26 +488,32 @@ function ServerTab() {
   const restart = async () => {
     if (!confirm('Restart the backend server? It will be unavailable for a few seconds.')) return
     setRestarting(true)
-    setRestartMsg('Sending restart signal…')
-    try { await fetch(`${API_BASE}/v1/system/restart`, { method: 'POST', headers: AUTH }) } catch {}
-    setRestartMsg('Restarting… waiting for server to come back online.')
-    for (let i = 0; i < 20; i++) {
-      await new Promise(r => setTimeout(r, 1000))
-      try {
-        const res = await fetch(`${API_BASE}/health`)
-        if (res.ok) { setRestartMsg('✅ Back online!'); setRestarting(false); fetchAll(); return }
-      } catch {}
+    setRestartMsg('Restarting backend…')
+    try {
+      const res = await fetch('/api/backend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'restart' })
+      }).then(r => r.json())
+      setRestartMsg(res.ok ? '✅ Back online!' : `⚠️ ${res.message || 'Restart timed out'}`)
+    } catch {
+      setRestartMsg('⚠️ Restart failed')
     }
-    setRestartMsg('⚠️ Taking longer than expected — check logs below.')
     setRestarting(false)
+    fetchAll()
   }
 
   const pmControl = async (action: string, service = 'all') => {
-    setActionMsg(`${action}ing ${service}…`)
+    setActionMsg(`${action}ing…`)
     try {
-      await fetch(`${API_BASE}/v1/system/processes/${action}?service=${service}`, { method: 'POST', headers: AUTH })
-      setTimeout(() => { fetchAll(); setActionMsg('') }, 2000)
-    } catch { setActionMsg('Failed — is PM2 running?') }
+      // Use the Next.js API route — works even when backend is down
+      const res = await fetch('/api/backend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: action === 'restart' ? 'restart' : action === 'stop' ? 'stop' : 'start' })
+      }).then(r => r.json())
+      setTimeout(() => { fetchAll(); setActionMsg(res.ok ? '' : res.message || 'Failed') }, 2000)
+    } catch { setActionMsg('Failed') }
   }
 
   const statusColor = (s: string) => s === 'online' ? 'text-green-600' : s === 'stopped' ? 'text-gray-400' : 'text-red-500'

@@ -10,8 +10,11 @@ import { promisify } from 'util'
 const execAsync = promisify(exec)
 
 const BACKEND_PORT = 19000
-const PYTHON_EXE  = 'C:\\Python314\\python.exe'
-const BACKEND_DIR = 'G:\\Model_Mesh\\backend'
+const PYTHON_EXE  = 'C:\\Python313\\python.exe'
+// Resolve relative to this file: frontend/src/app/api/backend/ → ../../../../.. → repo root → backend
+const REPO_ROOT   = require('path').resolve(__dirname, '..', '..', '..', '..', '..', '..', '..')
+const BACKEND_DIR = require('path').join(REPO_ROOT, 'backend')
+const VENV_PYTHON = require('path').join(BACKEND_DIR, 'venv', 'Scripts', 'python.exe')
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -46,13 +49,17 @@ async function killBackend(): Promise<void> {
 }
 
 function spawnBackend(): void {
-  const child = spawn(PYTHON_EXE, ['-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', String(BACKEND_PORT)], {
+  // Use venv python if it exists, fall back to system python
+  const fs = require('fs')
+  const pythonExe = fs.existsSync(VENV_PYTHON) ? VENV_PYTHON : PYTHON_EXE
+  const child = spawn(pythonExe, ['-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', String(BACKEND_PORT), '--reload'], {
     cwd: BACKEND_DIR,
     detached: true,
     stdio: 'ignore',
+    windowsHide: true,
     shell: false,
   })
-  child.unref() // Don't keep Next.js alive waiting for it
+  child.unref()
 }
 
 async function waitForBackend(timeoutMs = 15000): Promise<boolean> {
