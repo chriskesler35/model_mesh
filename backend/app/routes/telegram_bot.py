@@ -187,6 +187,9 @@ async def process_telegram_command(chat_id: int, text: str):
     elif command == "/chat":
         await handle_chat_command(chat_id, args)
     
+    elif command == "/image" or command == "/imagine" or command == "/img":
+        await handle_image_command(chat_id, args)
+
     elif command == "/cancel":
         await handle_cancel_command(chat_id, args)
     
@@ -203,6 +206,7 @@ Commands:
 /status - System status
 /sessions - Active sessions
 /models - Available models
+/image <prompt> - Generate an image
 /run <agent> <task> - Start agent session
 /cancel <session_id> - Cancel session
 /chat <message> - Chat (context kept per session)
@@ -210,6 +214,7 @@ Commands:
 /help - Show this help
 
 Examples:
+`/image a golden retriever skiing in Colorado`
 `/run coder create a python script`
 `/chat what is the capital of France?`
 """
@@ -409,6 +414,64 @@ async def handle_continue_command(chat_id: int):
         await send_telegram_message(chat_id, "No active conversation. Start one with /chat or just send a message.")
         return
     await send_telegram_message(chat_id, f"Continuing conversation `{conv_id[:8]}...`\nJust send your next message.")
+
+async def handle_image_command(chat_id: int, args: str):
+    """Handle /image command — submit an image gen task and deliver result back to Telegram."""
+    if not args:
+        await send_telegram_message(chat_id, "Usage: `/image <prompt>`\n\nExample:\n`/image a golden retriever skiing in Colorado`")
+        return
+
+    await send_telegram_message(chat_id, f"🎨 Generating image...\n\n_{args[:100]}_")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "http://localhost:19000/v1/tasks",
+                json={
+                    "task_type": "image_gen",
+                    "params": {
+                        "prompt": args,
+                        "model": "gemini-imagen",
+                        "size": "1024x1024",
+                        "format": "png",
+                    }
+                },
+                headers={"Authorization": "Bearer modelmesh_local_dev_key"},
+            )
+            if resp.status_code != 200:
+                await send_telegram_message(chat_id, f"⚠️ Failed to submit image task: {resp.text[:200]}")
+                return
+
+            task = resp.json()
+            task_id = task.get("id") or task.get("task_id")
+            if not task_id:
+                await send_telegram_message(chat_id, "⚠️ No task ID returned.")
+                return
+
+            # Poll until done (max 90 seconds)
+            for _ in range(45):
+                await asyncio.sleep(2)
+                poll = await client.get(
+                    f"http://localhost:19000/v1/tasks/{task_id}",
+                    headers={"Authorization": "Bearer modelmesh_local_dev_key"},
+                )
+                if poll.status_code != 200:
+                    continue
+                data = poll.json()
+                status = data.get("status")
+                if status == "completed":
+                    return  # _send_image_to_telegram already handles delivery
+                elif status == "failed":
+                    error = data.get("error") or data.get("user_message", "Unknown error")
+                    await send_telegram_message(chat_id, f"❌ Image generation failed: {error[:200]}")
+                    return
+
+            await send_telegram_message(chat_id, "⏱️ Image is taking longer than expected — check the gallery when it's done.")
+
+    except Exception as e:
+        logger.error(f"Image command failed: {e}")
+        await send_telegram_message(chat_id, f"⚠️ Error: {str(e)[:200]}")
+
 
 async def handle_cancel_command(chat_id: int, args: str):
     """Handle /cancel command."""

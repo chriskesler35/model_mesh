@@ -156,6 +156,15 @@ async def _run_image_gen(task_id: str, params: dict):
             await db.commit()
             logger.info(f"Task {task_id} completed: image {image_id}")
 
+            # Send image to Telegram if configured
+            asyncio.create_task(_send_image_to_telegram(
+                image_id=image_id,
+                image_b64=result["base64"],
+                fmt=params.get("format", "png"),
+                prompt=prompt,
+                model=used_model,
+            ))
+
         except Exception as e:
             logger.error(f"Task {task_id} failed: {e}")
             task.status = "failed"
@@ -163,6 +172,36 @@ async def _run_image_gen(task_id: str, params: dict):
             task.user_message = f"Failed: {str(e)[:100]}"
             task.progress = 0
             await db.commit()
+
+
+async def _send_image_to_telegram(image_id: str, image_b64: str, fmt: str, prompt: str, model: str):
+    """Send a completed image to all configured Telegram chats."""
+    try:
+        from app.routes.telegram_bot import TELEGRAM_BOT_TOKEN, TELEGRAM_API_URL, AUTHORIZED_CHAT_IDS
+        if not TELEGRAM_BOT_TOKEN or not AUTHORIZED_CHAT_IDS:
+            return  # Telegram not configured
+
+        import base64
+        import httpx
+        image_bytes = base64.b64decode(image_b64)
+        caption = f"🎨 *Image Ready*\n\n_{prompt[:200]}{'...' if len(prompt) > 200 else ''}_\n\n`{model}`"
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for chat_id in AUTHORIZED_CHAT_IDS:
+                try:
+                    resp = await client.post(
+                        f"{TELEGRAM_API_URL}/sendPhoto",
+                        data={"chat_id": chat_id, "caption": caption, "parse_mode": "Markdown"},
+                        files={"photo": (f"{image_id}.{fmt}", image_bytes, f"image/{fmt}")},
+                    )
+                    if resp.status_code == 200:
+                        logger.info(f"Image {image_id} sent to Telegram chat {chat_id}")
+                    else:
+                        logger.warning(f"Telegram sendPhoto failed for chat {chat_id}: {resp.text[:200]}")
+                except Exception as e:
+                    logger.warning(f"Failed to send image to Telegram chat {chat_id}: {e}")
+    except Exception as e:
+        logger.warning(f"Telegram image delivery skipped: {e}")
 
 
 # Worker dispatch
