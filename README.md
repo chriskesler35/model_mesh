@@ -2,23 +2,21 @@
 
 An intelligent AI development platform for multi-agent orchestration, image generation, and workflow automation. Built with FastAPI + Next.js 14.
 
-![DevForgeAI](frontend/public/banner.svg)
-
 ---
 
 ## What It Does
 
-DevForgeAI brings together everything you need to build with AI:
-
-- **Chat** with multiple AI models through a single interface (Ollama, Anthropic, Google, OpenRouter)
+- **Chat** with local Ollama models and cloud providers (Anthropic, Google, OpenRouter, OpenAI) through a single interface
 - **Agents** that can code, research, design, review, plan, and write — each backed by a persona
+- **Image Generation** via Gemini Imagen or ComfyUI with gallery management and Telegram delivery
+- **Telegram Bot** — chat with your AI, generate images, and get notifications remotely
+- **Identity System** — the AI learns who you are (SOUL.md + USER.md) and injects context into every session
+- **Session Snapshots** — every conversation is snapshotted to disk; broken/compacted sessions recover automatically
+- **Rolling Memory** — MEMORY.md accumulates distilled insights across all conversations over time
 - **Live Workbench** — watch agents work in real-time, intervene mid-task
-- **Image Generation** via Gemini Imagen or ComfyUI with gallery management
-- **Projects** — point agents at any directory on your machine
+- **Projects** — point agents at any directory; per-project venvs, git snapshots, rollbacks
 - **Development Methods** — BMAD, GSD, SuperPowers, GTrack (stackable)
-- **Identity System** — the AI learns who you are through onboarding (SOUL.md + USER.md)
-- **Process Isolation** — per-project Python venvs, git snapshots, rollbacks
-- **Collaboration** — multi-user support, shared workspaces, session handoffs, audit log
+- **Settings UI** — manage API keys, providers, server health, restart backend, and more
 
 ---
 
@@ -26,9 +24,9 @@ DevForgeAI brings together everything you need to build with AI:
 
 | Layer | Tech |
 |---|---|
-| Backend | Python 3.14, FastAPI, SQLite (aiosqlite), LiteLLM |
+| Backend | Python 3.11–3.13, FastAPI, SQLite (aiosqlite), LiteLLM |
 | Frontend | Next.js 14, React 18, TailwindCSS |
-| AI Providers | Ollama (local), Anthropic, Google Gemini, OpenRouter |
+| AI Providers | Ollama (local), Anthropic, Google Gemini, OpenRouter, OpenAI |
 | Image Gen | Gemini Imagen, ComfyUI |
 | Ports | Backend: 19000 · Frontend: 3001 |
 
@@ -36,13 +34,11 @@ DevForgeAI brings together everything you need to build with AI:
 
 ## Quick Start
 
-> **Full installation guide:** [INSTALL.md](INSTALL.md)
-
 ### Prerequisites
 
-- Python 3.11+ — https://www.python.org/downloads/
-- Node.js 18+ — https://nodejs.org/
-- At least one AI provider API key *(Ollama works locally with no key)*
+- **Python 3.11, 3.12, or 3.13** — https://www.python.org/downloads/
+- **Node.js 18+** — https://nodejs.org/
+- At least one AI provider key, *or* [Ollama](https://ollama.ai) installed locally (no key needed)
 
 ### 1. Clone
 
@@ -51,201 +47,146 @@ git clone https://github.com/chriskesler35/model_mesh.git
 cd model_mesh
 ```
 
-### 2. Install
+### 2. Backend setup
 
 ```bash
-python install.py
-```
+cd backend
+python -m venv venv
 
-This creates the virtual environment, installs all dependencies, and generates start scripts.
+# Windows
+venv\Scripts\activate
+# macOS/Linux
+source venv/bin/activate
+
+pip install -r requirements.txt
+```
 
 ### 3. Configure
 
-Edit `backend/.env` and add at least one API key:
-
-```env
-ANTHROPIC_API_KEY=sk-ant-...
-GOOGLE_API_KEY=AIza...
-OPENROUTER_API_KEY=sk-or-v1-...
-# or just run Ollama locally — no key needed
-OLLAMA_BASE_URL=http://localhost:11434
-```
-
-### 4. Start
+Copy the example env file and fill in your keys:
 
 ```bash
-python devforgeai.py start
+cp .env.example .env   # or create backend/.env manually
 ```
 
-Or double-click `start.bat` (Windows) / run `./start.sh` (macOS/Linux).
+Minimum `.env` to get started:
 
-### 5. Open
+```env
+# At least one of these — or just run Ollama locally
+ANTHROPIC_API_KEY=sk-ant-...
+GOOGLE_API_KEY=AIza...
+GEMINI_API_KEY=AIza...        # same key as GOOGLE_API_KEY works
+OPENROUTER_API_KEY=sk-or-v1-...
+OPENAI_API_KEY=sk-...
+
+# Ollama (if installed locally — no key needed)
+OLLAMA_BASE_URL=http://localhost:11434
+
+# App auth key (change this in production)
+MODELMESH_API_KEY=modelmesh_local_dev_key
+
+# Telegram (optional)
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_IDS=
+```
+
+### 4. Frontend setup
+
+```bash
+cd ../frontend
+npm install
+```
+
+### 5. Start
+
+**Terminal 1 — Backend:**
+```bash
+cd backend
+venv\Scripts\activate          # Windows
+# source venv/bin/activate    # macOS/Linux
+python -m uvicorn app.main:app --host 0.0.0.0 --port 19000 --reload
+```
+
+**Terminal 2 — Frontend:**
+```bash
+cd frontend
+npm run dev
+```
+
+### 6. Open
 
 - **App:** http://localhost:3001
 - **API docs:** http://localhost:19000/docs
 
-First launch runs onboarding — the AI asks a few questions to set up your profile.
+First launch runs an onboarding wizard — the AI asks a few questions to set up your identity profile.
+
+---
+
+## After a `git pull`
+
+If you pull new changes, you only need to re-run:
+
+```bash
+# Backend — if requirements changed
+cd backend && pip install -r requirements.txt
+
+# Frontend — if package.json changed
+cd frontend && npm install
+```
+
+The database migrates automatically on startup (no manual `alembic upgrade` needed).  
+Your `backend/.env`, `data/` folder, and generated images are never touched by a pull.
 
 ---
 
 ## Features
 
 ### Chat
-- OpenAI-compatible chat completions
-- Multiple personas (each with its own model, system prompt, and routing rules)
-- Conversation history with pin, keep-forever, rename
-- Inline image generation
-- **Slash commands:** `/reset`, `/onboard`, `/persona`, `/model`, `/image`, `/pin`, `/export`, `/theme`, `/method`, `/help`
+- OpenAI-compatible chat completions with streaming
+- Automatic image generation intent detection — just say "generate an image of..."
+- Multiple personas (each with its own model, system prompt, routing)
+- Conversation history with pin, keep-forever, rename, export
+- **Slash commands:** `/reset` `/image` `/persona` `/model` `/pin` `/export` `/theme` `/method` `/help`
 
 ### Agents
-- 7 built-in agent types: Coder, Researcher, Designer, Reviewer, Planner, Executor, Writer
-- Each agent is backed by a **Persona** (model resolved through persona chain)
-- Custom system prompts, tool lists, iteration limits
-- Live Sessions dashboard with real-time status
+- 7 built-in types: Coder, Researcher, Designer, Reviewer, Planner, Executor, Writer
+- Persona-based model resolution — persona prompt is the base, agent adds role-specific additions
+- Custom tools, iteration limits, memory toggle
+- Clicking a default agent opens it for editing; first save promotes it to a real DB record
 
-### Live Workbench
-- Start a workbench session → watch the agent work in real-time
-- 3-panel layout: file tree (left) · event stream (center) · file preview (right)
-- **Intervention console** — send messages to the agent mid-task
-- Agent pauses and surfaces a prompt when human input is required
-- SSE-based streaming (`/v1/workbench/sessions/{id}/stream`)
+### Image Generation
+- Gemini Imagen (cloud) or ComfyUI (local) with auto-fallback
+- Natural language intent detection — no slash command required
+- Gallery with lightbox, variations, edit-with-AI, download, delete
+- **Telegram delivery** — generated images are automatically sent to your Telegram chats
+- Generate images directly from Telegram: `/image a golden retriever skiing`
 
-### Image Gallery
-- Generate images with Gemini Imagen or ComfyUI
-- Auto-fallback to Gemini if ComfyUI is unavailable
-- Gallery with lightbox, download, delete, variations
-- Upload images and edit them with AI prompts
-- Drag-and-drop upload
-
-### Development Methods
-Five methods that shape how the AI approaches work — activatable individually or **stacked**:
-
-| Method | Mode |
-|---|---|
-| 💬 Standard | Default behavior |
-| 🧠 BMAD | Brainstorm → Model → Architect → Deploy |
-| ⚡ GSD | Get Shit Done — ship fast, iterate |
-| 🦸 SuperPowers | Deep decompose → research → synthesize |
-| 📊 GTrack | Git-tracked — commit after every change |
-
-Switch via UI or slash command: `/method bmad`
-
-### Projects
-- Register any directory on your machine as a project
-- Templates: blank, python-api, next-app, cli-tool
-- Browse file tree, preview files
-- Launch directly into Workbench
-- **Sandbox tab:** Python venv, pip install, git init, snapshots + rollback, .env editor
-
-### Identity System
-- **SOUL.md** (`data/soul.md`) — AI personality injected into every conversation
-- **USER.md** (`data/user.md`) — built during onboarding, what the AI knows about you
-- Both editable from **Settings → Identity**
-- Reset onboarding anytime
+### Session Snapshots & Memory
+- Every chat exchange writes `data/context/YYYY-MM-DD/session_*.md`
+- If a session is lost (crash, compaction, DB wipe), a recovery banner appears on reload
+- Every 10 messages, key facts are distilled and appended to `data/context/MEMORY.md`
+- Long-term memory accumulates across all conversations over time
 
 ### Settings
-- **Identity** — Edit SOUL.md and USER.md, reset onboarding
-- **Profile** — User profile
-- **Memory Files** — Custom context files injected into chat
-- **Preferences** — Learned preferences
-- **Conversations** — Browse, open, delete conversations
-- **API Keys** — Manage provider keys (stored in .env, never exposed in full)
+- **Identity** — Edit SOUL.md, USER.md, IDENTITY.md; reset onboarding
+- **API Keys** — Set/update/clear provider keys; hot-reloaded instantly (no restart needed)
+- **Memory Files** — USER.md, CONTEXT.md, PREFERENCES.md injected into every chat
+- **Conversations** — Browse and delete conversation history
+- **Remote** — Telegram bot config, Tailscale setup
+- **⚙️ Server** — Uptime, health checks, one-click backend restart
 
-### Collaboration
-- Local user accounts with roles (owner/admin/member/viewer)
-- Shared workspaces grouping projects and members
-- Session handoff — pass a conversation between users
-- Full audit log (last 1000 events)
-
----
-
-## API
-
-Full OpenAPI docs at `http://localhost:19000/docs`
-
-Key endpoints:
-
-```
-POST /v1/chat/completions          Chat (OpenAI-compatible)
-GET  /v1/conversations             List conversations
-GET  /v1/personas                  List personas
-GET  /v1/agents                    List agents
-POST /v1/agents                    Create agent
-GET  /v1/images/                   List generated images
-POST /v1/images/generations        Generate image
-GET  /v1/workbench/sessions        List workbench sessions
-POST /v1/workbench/sessions        Start workbench session
-GET  /v1/workbench/sessions/{id}/stream  SSE stream
-POST /v1/projects/                 Create project
-GET  /v1/projects/{id}/files       Browse project files
-GET  /v1/methods/                  List methods
-POST /v1/methods/activate          Set active method
-POST /v1/methods/stack             Set method stack
-GET  /v1/identity/status           Check onboarding status
-GET  /v1/sandbox/projects/{id}/status  Sandbox status
-POST /v1/sandbox/projects/{id}/snapshot  Create git snapshot
-GET  /v1/collab/users              List users
-GET  /v1/collab/audit              Audit log
-```
-
----
-
-## Project Structure
-
-```
-model_mesh/
-├── backend/
-│   ├── app/
-│   │   ├── main.py              # FastAPI app, router registration
-│   │   ├── config.py            # Settings from .env
-│   │   ├── database.py          # SQLite async engine
-│   │   ├── migrate.py           # Column migrations (idempotent)
-│   │   ├── seed.py              # Default data seeding
-│   │   ├── models/              # SQLAlchemy ORM models
-│   │   ├── routes/              # API route handlers
-│   │   │   ├── chat.py          # Chat completions
-│   │   │   ├── agents.py        # Agent CRUD + persona resolution
-│   │   │   ├── images.py        # Image generation + gallery
-│   │   │   ├── workbench.py     # Live workbench + SSE
-│   │   │   ├── projects.py      # Project management
-│   │   │   ├── methods.py       # Development methods
-│   │   │   ├── identity.py      # SOUL.md + USER.md
-│   │   │   ├── sandbox.py       # Venv, git, snapshots
-│   │   │   └── collaboration.py # Users, workspaces, audit
-│   │   ├── schemas/             # Pydantic request/response schemas
-│   │   └── services/            # Business logic (routing, memory)
-│   └── .env                     # API keys and config (not committed)
-├── frontend/
-│   ├── src/app/
-│   │   ├── chat/                # Chat interface with slash commands
-│   │   ├── (main)/
-│   │   │   ├── agents/          # Agent list + detail + sessions
-│   │   │   ├── workbench/       # Live workbench + session view
-│   │   │   ├── projects/        # Project list + detail + sandbox
-│   │   │   ├── gallery/         # Image gallery
-│   │   │   ├── methods/         # Development methods
-│   │   │   ├── collaborate/     # Users, workspaces, handoffs
-│   │   │   ├── personas/        # Persona management
-│   │   │   ├── models/          # Model management
-│   │   │   ├── stats/           # Usage stats
-│   │   │   └── settings/        # Settings tabs
-│   │   └── Navigation.tsx       # Top nav
-│   └── package.json
-├── data/
-│   ├── devforgeai.db            # SQLite database
-│   ├── soul.md                  # AI identity (editable)
-│   ├── user.md                  # User profile (built during onboarding)
-│   ├── images/                  # Generated images
-│   └── projects.json            # Project registry
-└── devforgeai_startup.bat       # Windows startup script
-```
+### Providers & Models
+- On first startup: auto-discovers all locally installed Ollama models
+- Only adds paid provider models (Anthropic, Google, OpenRouter, OpenAI) when API keys are set
+- Add/update keys anytime in Settings → API Keys — models sync automatically
+- Manual sync: `POST /v1/models/sync`
 
 ---
 
 ## Environment Variables
 
 ```env
-# Database
+# Database (auto-created, don't change unless you know why)
 DATABASE_URL=sqlite+aiosqlite:///data/devforgeai.db
 
 # AI Providers (at least one required)
@@ -258,15 +199,18 @@ OPENAI_API_KEY=
 # Local AI
 OLLAMA_BASE_URL=http://localhost:11434
 
-# Image Generation
+# Image Generation (optional — falls back to Gemini)
 COMFYUI_URL=http://localhost:8188
 
-# App
+# App auth
 MODELMESH_API_KEY=modelmesh_local_dev_key
 
 # Telegram (optional)
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_IDS=
+
+# Redis (optional — for multi-turn conversation memory)
+# REDIS_URL=redis://localhost:6379
 ```
 
 ---
@@ -274,7 +218,7 @@ TELEGRAM_CHAT_IDS=
 ## Remote Access (Tailscale)
 
 ```powershell
-# Run as Administrator — allow Tailscale subnet only
+# Windows — allow Tailscale subnet only (run as Administrator)
 netsh advfirewall firewall add rule name="DevForgeAI API" dir=in action=allow protocol=tcp localport=19000 remoteip=100.64.0.0/10
 netsh advfirewall firewall add rule name="DevForgeAI Frontend" dir=in action=allow protocol=tcp localport=3001 remoteip=100.64.0.0/10
 ```
@@ -282,6 +226,54 @@ netsh advfirewall firewall add rule name="DevForgeAI Frontend" dir=in action=all
 Access from any Tailnet device:
 - Frontend: `http://[tailscale-IP]:3001`
 - API: `http://[tailscale-IP]:19000`
+
+---
+
+## Project Structure
+
+```
+model_mesh/
+├── backend/
+│   ├── app/
+│   │   ├── main.py              # FastAPI app, lifespan, router registration
+│   │   ├── config.py            # Settings (reads .env)
+│   │   ├── seed.py              # Default data + Ollama auto-sync on first run
+│   │   ├── migrate.py           # Idempotent column migrations (runs on startup)
+│   │   ├── models/              # SQLAlchemy ORM models
+│   │   ├── routes/              # API route handlers
+│   │   │   ├── chat.py          # Chat completions + snapshot hooks
+│   │   │   ├── agents.py        # Agent CRUD + default agent recovery
+│   │   │   ├── images.py        # Image generation, gallery, variations
+│   │   │   ├── model_sync.py    # Ollama + paid provider model sync
+│   │   │   ├── api_keys.py      # API key management (hot-reload)
+│   │   │   ├── settings.py      # Provider/model settings
+│   │   │   ├── context.py       # Snapshot recovery + MEMORY.md
+│   │   │   ├── system.py        # Health, restart, snapshots
+│   │   │   ├── telegram_bot.py  # Telegram polling bot + image delivery
+│   │   │   ├── identity.py      # SOUL.md / USER.md / IDENTITY.md
+│   │   │   └── ...
+│   │   └── services/
+│   │       ├── context_snapshot.py  # Snapshot writer + memory distillation
+│   │       ├── memory_context.py    # Memory files injection
+│   │       ├── ollama_sync.py       # Ollama model discovery
+│   │       └── ...
+│   ├── requirements.txt
+│   └── .env                     # Your keys (never committed)
+├── frontend/
+│   └── src/app/
+│       ├── chat/                # Chat UI + recovery banner
+│       └── (main)/
+│           ├── agents/          # Agent list + detail
+│           ├── gallery/         # Image gallery
+│           ├── settings/        # All settings tabs incl. Server
+│           └── ...
+└── data/                        # Auto-created, never committed
+    ├── devforgeai.db            # SQLite database
+    ├── soul.md                  # AI identity
+    ├── user.md                  # Your profile
+    ├── images/                  # Generated images
+    └── context/                 # Session snapshots + MEMORY.md
+```
 
 ---
 
