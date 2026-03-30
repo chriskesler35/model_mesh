@@ -2,9 +2,9 @@
 
 import os
 import sys
-import signal
 import asyncio
 import time
+from pathlib import Path
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
@@ -71,16 +71,19 @@ async def server_info():
 @router.post("/restart")
 async def restart_server():
     """
-    Gracefully restart the backend worker process.
-    Sends SIGTERM to the current process — uvicorn --reload will
-    automatically spawn a fresh worker.
+    Trigger a graceful restart by touching app/main.py.
+    uvicorn --reload watches for file changes and will automatically
+    restart the worker — works reliably on Windows and Linux.
     """
-    logger.info("Restart requested via API — sending SIGTERM to worker process")
+    logger.info("Restart requested via API — touching main.py to trigger reload watcher")
 
     async def _do_restart():
         await asyncio.sleep(0.3)  # Let the HTTP response go out first
-        os.kill(os.getpid(), signal.SIGTERM)
+        # Touch main.py — the watchfiles reloader will detect the change
+        # and restart the worker cleanly without killing the parent
+        main_py = Path(__file__).parent.parent / "main.py"
+        main_py.touch()
 
     asyncio.create_task(_do_restart())
 
-    return JSONResponse({"status": "restarting", "message": "Worker is restarting — ready again in a few seconds."})
+    return JSONResponse({"status": "restarting", "message": "Reload triggered — server will be back in a few seconds."})
