@@ -519,15 +519,53 @@ function ServerTab() {
         <div className="bg-white shadow sm:rounded-lg overflow-hidden">
           <div className="px-4 py-5 sm:p-6">
             <h3 className="text-base font-semibold text-gray-900 mb-3">Health</h3>
-            <div className="space-y-2 text-sm">
-              {Object.entries(health).map(([key, val]: any) => (
-                <div key={key} className="flex items-center justify-between">
-                  <span className="text-gray-600 capitalize">{key.replace(/_/g, ' ')}</span>
-                  <span className={`font-medium ${val === 'healthy' || val === true ? 'text-green-600' : val === 'unhealthy' || val === false ? 'text-red-500' : 'text-amber-500'}`}>
-                    {typeof val === 'boolean' ? (val ? '✓ Yes' : '✗ No') : String(val)}
-                  </span>
-                </div>
-              ))}
+            <div className="space-y-3 text-sm">
+              {/* Top-level scalar fields */}
+              {Object.entries(health)
+                .filter(([, val]) => typeof val !== 'object' || val === null)
+                .map(([key, val]: any) => (
+                  <div key={key} className="flex items-center justify-between">
+                    <span className="text-gray-600 capitalize">{key.replace(/_/g, ' ')}</span>
+                    <span className={`font-medium ${
+                      String(val).startsWith('healthy') || val === true  ? 'text-green-600' :
+                      String(val).startsWith('unhealthy') || val === false ? 'text-red-500' :
+                      val === 'degraded' ? 'text-amber-500' : 'text-gray-700'
+                    }`}>
+                      {typeof val === 'boolean' ? (val ? '✓ Yes' : '✗ No') : String(val)}
+                    </span>
+                  </div>
+                ))}
+              {/* Nested check objects (e.g. checks: { database: "healthy", redis: "unhealthy: ..." }) */}
+              {Object.entries(health)
+                .filter(([, val]) => val !== null && typeof val === 'object')
+                .map(([groupKey, groupVal]: any) => (
+                  <div key={groupKey}>
+                    <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1 mt-2">
+                      {groupKey.replace(/_/g, ' ')}
+                    </p>
+                    <div className="space-y-1 pl-2 border-l-2 border-gray-100">
+                      {Object.entries(groupVal).map(([checkKey, checkVal]: any) => {
+                        const strVal = String(checkVal)
+                        const isHealthy = strVal.startsWith('healthy')
+                        const isUnhealthy = strVal.startsWith('unhealthy') || strVal.startsWith('error')
+                        // Split "healthy: 29.7% free" into status + detail
+                        const [status, ...rest] = strVal.split(':')
+                        const detail = rest.join(':').trim()
+                        return (
+                          <div key={checkKey} className="flex items-start justify-between gap-4">
+                            <span className="text-gray-600 capitalize">{checkKey.replace(/_/g, ' ')}</span>
+                            <div className="text-right">
+                              <span className={`font-medium ${isHealthy ? 'text-green-600' : isUnhealthy ? 'text-red-500' : 'text-amber-500'}`}>
+                                {isHealthy ? '✓' : isUnhealthy ? '✗' : '⚠'} {status.trim()}
+                              </span>
+                              {detail && <p className="text-xs text-gray-400 mt-0.5">{detail}</p>}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))}
             </div>
           </div>
         </div>
