@@ -391,11 +391,10 @@ async def _sync_response(
 
 async def _save_messages(db, conversation_id: str, user_content: str, assistant_content: str,
                          model_id=None, input_tokens=0, output_tokens=0, latency_ms=0, estimated_cost=0.0):
-    """Persist user + assistant messages to the database using a fresh session."""
+    """Persist user + assistant messages to the database and write a context snapshot."""
     from app.database import AsyncSessionLocal
     try:
         async with AsyncSessionLocal() as fresh_db:
-            # Use string for conversation_id to avoid UUID type mismatch with SQLite
             conv_str = str(conversation_id)
             model_str = str(model_id) if model_id else None
             user_msg = Message(
@@ -417,6 +416,51 @@ async def _save_messages(db, conversation_id: str, user_content: str, assistant_
             fresh_db.add(asst_msg)
             await fresh_db.commit()
             logger.info(f"Saved messages for conv {conversation_id[:8]}")
+
+            # Write context snapshot — load all messages for this conversation
+            try:
+                from sqlalchemy import select as _select
+                from app.models import Message as _Msg, Conversation as _Conv
+                from app.services.context_snapshot import write_snapshot, maybe_distill_memory
+
+                # Fetch conversation title + all messages
+                conv = await fresh_db.get(_Conv, uuid.UUID(conv_str))
+                title = conv.title if conv else ""
+
+                all_msgs_result = await fresh_db.execute(
+                    _select(_Msg)
+                    .where(_Msg.conversation_id == conv_str)
+                    .order_by(_Msg.created_at)
+                )
+                all_msgs = all_msgs_result.scalars().all()
+                msg_dicts = [{"role": m.role, "content": m.content} for m in all_msgs]
+
+                # Resolve model name
+                model_name = None
+                if model_id:
+                    from app.models import Model as _Model
+                    m_obj = await fresh_db.get(_Model, model_id)
+                    model_name = m_obj.model_id if m_obj else str(model_id)
+
+                write_snapshot(
+                    conversation_id=conv_str,
+                    title=title or "",
+                    messages=msg_dicts,
+                    model_name=model_name or "",
+                )
+
+                # Periodically distill memory from the conversation
+                import asyncio as _asyncio
+                _asyncio.create_task(maybe_distill_memory(
+                    conversation_id=conv_str,
+                    messages=msg_dicts,
+                    model_name=model_name or "",
+                    message_count=len(all_msgs),
+                ))
+
+            except Exception as snap_err:
+                logger.warning(f"Snapshot write failed (non-fatal): {snap_err}")
+
     except Exception as e:
         logger.error(f"Failed to save messages: {e}")
 

@@ -90,5 +90,5 @@ health_status.json
 start.bat
 backend/health_status.json
 
-# Generated data directory (images, identity files, state)
+# Generated data directory (images, identity files, state, snapshots)
 data/

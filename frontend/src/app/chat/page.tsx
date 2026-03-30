@@ -1022,9 +1022,12 @@ export default function ChatPage() {
   }, [input])
 
   // ── Load session ──────────────────────────────────────────────────────────
+  const [recoverySnapshot, setRecoverySnapshot] = useState<{conversationId: string, summary: string, messageCount: number} | null>(null)
+
   const loadSession = useCallback(async (id: string, convList?: Conversation[]) => {
     setActiveConvId(id)
     setLoadingMessages(true)
+    setRecoverySnapshot(null)
     localStorage.setItem('devforge_last_session', id)
     router.replace(`/chat?session=${id}`, { scroll: false })
 
@@ -1042,6 +1045,23 @@ export default function ChatPage() {
         created_at: m.created_at,
       }))
       setMessages(msgs)
+
+      // If DB came back empty, check for a context snapshot to offer recovery
+      if (msgs.length === 0) {
+        try {
+          const snapRes = await fetch(`${API_BASE}/v1/context/recover/${id}`, { headers: AUTH })
+          if (snapRes.ok) {
+            const snapData = await snapRes.json()
+            if (snapData.message_count > 0 || snapData.snapshot) {
+              setRecoverySnapshot({
+                conversationId: id,
+                summary: snapData.recovery_summary || '',
+                messageCount: snapData.message_count || 0,
+              })
+            }
+          }
+        } catch { /* no snapshot available, that's fine */ }
+      }
     } catch (e) {
       console.error('Failed to load messages:', e)
       setMessages([])
@@ -1397,6 +1417,45 @@ export default function ChatPage() {
             )}
           </div>
         </div>
+
+        {/* Session recovery banner */}
+        {recoverySnapshot && (
+          <div className="flex-shrink-0 mx-4 mt-3 p-3 rounded-xl border border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-700">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">
+                  🔄 Previous session found — {recoverySnapshot.messageCount} messages
+                </p>
+                {recoverySnapshot.summary && (
+                  <p className="text-xs text-amber-700 dark:text-amber-400 mt-1 line-clamp-2">
+                    {recoverySnapshot.summary}
+                  </p>
+                )}
+              </div>
+              <button
+                onClick={() => {
+                  // Inject a system message summarising the last session
+                  setMessages([{
+                    id: `recovery-${Date.now()}`,
+                    role: 'assistant',
+                    content: `🔄 **Session resumed from snapshot**\n\nI found a previous session with ${recoverySnapshot.messageCount} messages. Here's a brief summary of where we left off:\n\n${recoverySnapshot.summary || '_No summary available._'}\n\nFeel free to continue from where we left off!`,
+                    created_at: new Date().toISOString(),
+                  }])
+                  setRecoverySnapshot(null)
+                }}
+                className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg bg-amber-500 hover:bg-amber-600 text-white"
+              >
+                Resume
+              </button>
+              <button
+                onClick={() => setRecoverySnapshot(null)}
+                className="flex-shrink-0 text-amber-600 hover:text-amber-800 dark:text-amber-400 text-lg leading-none"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto px-4 py-5 space-y-5 min-h-0">
