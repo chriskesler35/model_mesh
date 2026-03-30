@@ -538,7 +538,7 @@ function ServerTab() {
             </div>
           </div>
 
-          {processes?.pm2 && processes.processes.length > 0 ? (
+          {processes?.processes && processes.processes.length > 0 ? (
             <div className="divide-y divide-gray-100">
               {processes.processes.map((p: any) => (
                 <div key={p.name} className="flex items-center justify-between py-2.5 text-sm">
@@ -562,11 +562,7 @@ function ServerTab() {
               ))}
             </div>
           ) : (
-            <div className="text-sm text-gray-500 py-3">
-              {processes?.pm2 === false
-                ? <span>⚠️ PM2 not running — <code className="bg-gray-100 px-1 rounded">pm2 start ecosystem.config.js</code> to start in background mode</span>
-                : 'No DevForgeAI processes found in PM2.'}
-            </div>
+            <div className="text-sm text-gray-500 py-3">No process info available.</div>
           )}
         </div>
       </div>
@@ -578,8 +574,13 @@ function ServerTab() {
             <h3 className="text-base font-semibold text-gray-900 mb-3">Backend Info</h3>
             {info ? (
               <div className="space-y-2 text-sm">
-                {[['Status', info.status, 'text-green-600'], ['Uptime', info.uptime, ''], ['PID', info.pid, 'font-mono'], ['Python', info.python_version, 'font-mono']].map(([label, val, cls]) => (
-                  <div key={label as string} className="flex justify-between">
+                {([
+                  ['Status',  info.status,          'text-green-600'],
+                  ['Uptime',  info.uptime,           ''],
+                  ['PID',     info.pid,              'font-mono'],
+                  ['Python',  info.python_version,   'font-mono'],
+                ] as [string, any, string][]).filter(([, val]) => val != null).map(([label, val, cls]) => (
+                  <div key={label} className="flex justify-between">
                     <span className="text-gray-400">{label}</span>
                     <span className={`font-medium text-gray-800 ${cls}`}>{String(val)}</span>
                   </div>
