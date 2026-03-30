@@ -3,7 +3,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from app.middleware.auth import verify_api_key
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/methods", tags=["methods"], dependencies=[Depends(verify_api_key)])
 
-_DATA_DIR = Path(r"G:\Model_Mesh\data")
+_DATA_DIR = Path(__file__).parent.parent.parent.parent / "data"
 _METHODS_STATE = _DATA_DIR / "methods_state.json"
 
 # ─── Built-in methods ─────────────────────────────────────────────────────────

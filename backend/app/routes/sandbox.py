@@ -15,11 +15,11 @@ from app.middleware.auth import verify_api_key
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/sandbox", tags=["sandbox"], dependencies=[Depends(verify_api_key)])
 
-_DATA_DIR = Path(r"G:\Model_Mesh\data")
+_DATA_DIR = Path(__file__).parent.parent.parent.parent / "data"
 _PROJECTS_FILE = _DATA_DIR / "projects.json"
 _SANDBOX_FILE = _DATA_DIR / "sandbox_state.json"
 
-PYTHON_EXE = r"C:\Python314\python.exe"
+PYTHON_EXE = r"C:\Python313\python.exe"
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────

@@ -14,7 +14,7 @@ from app.middleware.auth import verify_api_key
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/collab", tags=["collaboration"], dependencies=[Depends(verify_api_key)])
 
-_DATA_DIR = Path(r"G:\Model_Mesh\data")
+_DATA_DIR = Path(__file__).parent.parent.parent.parent / "data"
 _USERS_FILE = _DATA_DIR / "collab_users.json"
 _AUDIT_FILE = _DATA_DIR / "audit_log.json"
 _SESSIONS_FILE = _DATA_DIR / "collab_sessions.json"

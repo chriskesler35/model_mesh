@@ -122,7 +122,7 @@ async def _stream_response(
             try:
                 from pathlib import Path as _Path
                 from app.routes.methods import _load_state as _load_method_state, BUILT_IN_METHODS as _METHODS
-                _data = _Path(r"G:\Model_Mesh\data")
+                _data = _Path(__file__).parent.parent.parent.parent / "data"
                 _soul = _data / "soul.md"
                 _user = _data / "user.md"
                 identity_parts = []

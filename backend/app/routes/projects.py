@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/projects", tags=["projects"], dependencies=[Depends(verify_api_key)])
 
-_DATA_DIR = Path(r"G:\Model_Mesh\data")
+_DATA_DIR = Path(__file__).parent.parent.parent.parent / "data"
 _PROJECTS_FILE = _DATA_DIR / "projects.json"
 
 # ─── Templates ────────────────────────────────────────────────────────────────

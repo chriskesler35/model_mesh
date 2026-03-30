@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # ─── ComfyUI auto-launch ──────────────────────────────────────────────────────
 
 COMFYUI_DIR = Path(r"E:\AI_Models\ComfyUI")
-COMFYUI_PYTHON = Path(r"C:\Python314\python.exe")
+COMFYUI_PYTHON = Path(r"C:\Python313\python.exe")
 _comfyui_proc: Optional[subprocess.Popen] = None
 
 
@@ -119,7 +119,7 @@ class ImageListResponse(BaseModel):
 
 # In-memory storage for generated images (use proper storage in production)
 # Persistent image storage on disk
-_IMAGE_DIR = Path(r"G:\Model_Mesh\data\images")
+_IMAGE_DIR = Path(__file__).parent.parent.parent.parent / "data" / "images"
 _IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 _IMAGE_META = _IMAGE_DIR / "_meta.json"
 
