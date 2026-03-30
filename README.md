@@ -280,8 +280,8 @@ netsh advfirewall firewall add rule name="DevForgeAI Frontend" dir=in action=all
 ```
 
 Access from any Tailnet device:
-- Frontend: `http://100.106.217.99:3001`
-- API: `http://100.106.217.99:19000`
+- Frontend: `http://[tailscale-IP]:3001`
+- API: `http://[tailscale-IP]:19000`
 
 ---
 
