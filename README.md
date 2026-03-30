@@ -99,16 +99,15 @@ npm install
 
 ### 5. Start
 
-**Option A — Background (no terminal windows, recommended):**
-```bash
+**Option A — Background, no windows (recommended on Windows):**
+```
 # Install PM2 once
 npm install -g pm2
+pm2 set pm2:windowsHide true
 
-# Start both services in the background
-pm2 start ecosystem.config.js
-
-# Save so they restart automatically after a reboot
-pm2 save
+# Then just double-click:
+start-hidden.vbs   ← starts everything silently, shows a small confirmation popup
+stop-hidden.vbs    ← stops everything
 ```
 
 Manage from the **Settings → ⚙️ Server** tab in the UI, or via CLI:
@@ -117,7 +116,6 @@ pm2 list              # see status
 pm2 logs              # tail live logs
 pm2 restart all       # restart both
 pm2 stop all          # stop both
-pm2 start ecosystem.config.js   # start again after stop
 ```
 
 **Option B — Terminal windows (easier for development/debugging):**
