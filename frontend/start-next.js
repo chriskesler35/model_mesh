@@ -1,14 +1,18 @@
 // PM2 launcher for Next.js dev server on Windows
-// Uses shell:true so .cmd scripts work correctly
-const { spawn } = require('child_process')
+// Uses execFile with the .cmd path directly — no shell window spawned
+const { execFile } = require('child_process')
 const path = require('path')
 
-const child = spawn('npm', ['run', 'dev'], {
-  stdio: 'inherit',
-  shell: true,          // required on Windows for .cmd scripts
+const nextCmd = path.join(__dirname, 'node_modules', '.bin', 'next.cmd')
+
+const child = execFile(nextCmd, ['dev', '-p', '3001'], {
   cwd: __dirname,
+  stdio: 'inherit',
+  windowsHide: true,   // suppress any cmd windows
 })
 
+child.stdout?.pipe(process.stdout)
+child.stderr?.pipe(process.stderr)
 child.on('exit', (code) => process.exit(code ?? 0))
-process.on('SIGINT',  () => child.kill('SIGINT'))
-process.on('SIGTERM', () => child.kill('SIGTERM'))
+process.on('SIGINT',  () => child.kill())
+process.on('SIGTERM', () => child.kill())

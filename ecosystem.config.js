@@ -20,8 +20,9 @@ module.exports = {
     },
     {
       name: 'devforgeai-frontend',
-      script: './frontend/start-next.js',
-      cwd: '.',
+      script: 'node_modules/next/dist/bin/next',
+      args: 'dev -p 3001',
+      cwd: './frontend',
       interpreter: 'node',
       watch: false,
       autorestart: true,
