@@ -229,6 +229,27 @@ async def get_default_agents():
 
 @router.get("/{agent_id}", response_model=AgentResponse)
 async def get_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
+    # Handle default-* IDs (hardcoded agents not yet saved to DB)
+    if agent_id.startswith("default-"):
+        agent_type = agent_id[len("default-"):]
+        for d in DEFAULT_AGENTS:
+            if d["agent_type"] == agent_type:
+                return AgentResponse(
+                    id=agent_id,
+                    name=d["name"],
+                    agent_type=d["agent_type"],
+                    description=d.get("description"),
+                    system_prompt=d["system_prompt"],
+                    tools=d.get("tools", []),
+                    max_iterations=d.get("max_iterations", 10),
+                    timeout_seconds=d.get("timeout_seconds", 300),
+                    memory_enabled=True,
+                    is_active=True,
+                    created_at="default",
+                    updated_at="default"
+                )
+        raise HTTPException(status_code=404, detail="Agent not found")
+
     try:
         result = await db.execute(select(Agent).where(Agent.id == uuid.UUID(agent_id)))
     except ValueError:
@@ -244,6 +265,40 @@ async def get_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.patch("/{agent_id}", response_model=AgentResponse)
 async def update_agent(agent_id: str, updates: AgentUpdate, db: AsyncSession = Depends(get_db)):
+    # If editing a default agent, promote it to a real DB record first
+    if agent_id.startswith("default-"):
+        agent_type = agent_id[len("default-"):]
+        default_data = next((d for d in DEFAULT_AGENTS if d["agent_type"] == agent_type), None)
+        if not default_data:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        from app.models import UserProfile
+        user_result = await db.execute(select(UserProfile).limit(1))
+        user = user_result.scalar_one_or_none()
+
+        agent = Agent(
+            id=uuid.uuid4(),
+            name=updates.name or default_data["name"],
+            agent_type=updates.agent_type or default_data["agent_type"],
+            description=updates.description if updates.description is not None else default_data.get("description"),
+            system_prompt=updates.system_prompt or default_data["system_prompt"],
+            tools=updates.tools if updates.tools is not None else default_data.get("tools", []),
+            memory_enabled=updates.memory_enabled if updates.memory_enabled is not None else True,
+            max_iterations=updates.max_iterations or default_data.get("max_iterations", 10),
+            timeout_seconds=updates.timeout_seconds or default_data.get("timeout_seconds", 300),
+            is_active=True,
+            user_id=user.id if user else None,
+            model_id=uuid.UUID(updates.model_id) if updates.model_id else None,
+            persona_id=uuid.UUID(updates.persona_id) if updates.persona_id else None,
+        )
+        db.add(agent)
+        await db.commit()
+        await db.refresh(agent)
+        d = _agent_to_dict(agent)
+        resolved = await _resolve_agent_model(agent, db)
+        d.update(resolved)
+        return AgentResponse(**d)
+
     try:
         result = await db.execute(select(Agent).where(Agent.id == uuid.UUID(agent_id)))
     except ValueError:

@@ -92,6 +92,10 @@ export default function AgentDetailPage() {
         const res = await fetch(`${API_BASE}/v1/agents/${agentId}`, {
           method: 'PATCH', headers: AUTH, body: JSON.stringify(body)
         }).then(r => r.json())
+        // If a default-* agent was promoted to a real DB record, update the URL
+        if (res.id && res.id !== agentId) {
+          router.replace(`/agents/${res.id}`)
+        }
         setAgent(res)
         setEditing(false)
       }
