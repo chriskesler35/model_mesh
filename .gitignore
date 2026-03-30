@@ -83,3 +83,11 @@ data/_meta.json
 # (keep the template but not personal copies)
 agent_task.txt
 check_db.py
+
+# Runtime / process files
+.devforgeai.pids
+health_status.json
+start.bat
+
+# Generated data directory (images, identity files, state)
+data/
