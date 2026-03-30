@@ -10,6 +10,7 @@ interface Project {
   id: string; name: string; path: string; template: string
   description: string; agents: string[]; created_at: string
   updated_at: string; path_exists: boolean; file_count: number; scaffolded: boolean
+  sandbox_mode?: 'restricted' | 'full'
 }
 interface Template { id: string; name: string; description: string }
 
@@ -23,7 +24,7 @@ export default function ProjectsPage() {
   const [templates, setTemplates] = useState<Template[]>([])
   const [loading, setLoading] = useState(true)
   const [showNew, setShowNew] = useState(false)
-  const [form, setForm] = useState({ name: '', path: '', template: 'blank', description: '' })
+  const [form, setForm] = useState({ name: '', path: '', template: 'blank', description: '', sandbox_mode: 'restricted' })
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
 
@@ -50,7 +51,7 @@ export default function ProjectsPage() {
       const p = await res.json()
       setProjects(prev => [p, ...prev])
       setShowNew(false)
-      setForm({ name: '', path: '', template: 'blank', description: '' })
+      setForm({ name: '', path: '', template: 'blank', description: '', sandbox_mode: 'restricted' })
       router.push(`/projects/${p.id}`)
     } catch (e: any) { setError(e.message) }
     finally { setCreating(false) }
@@ -109,6 +110,9 @@ export default function ProjectsPage() {
                   <span>{p.file_count} files</span>
                   <span>{p.template}</span>
                   {p.agents?.length > 0 && <span>{p.agents.length} agents</span>}
+                  <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${p.sandbox_mode === 'full' ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}`}>
+                    {p.sandbox_mode === 'full' ? '🔓 Full Access' : '🔒 Restricted'}
+                  </span>
                 </div>
               </div>
               <div className="border-t border-gray-100 dark:border-gray-700 px-4 py-2.5 flex items-center gap-3 bg-gray-50 dark:bg-gray-900/50 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -177,6 +181,25 @@ export default function ProjectsPage() {
                 <input value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
                   placeholder="What is this project about?"
                   className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400" />
+              </div>
+
+              {/* Sandbox mode */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Access Mode</label>
+                <div className="grid grid-cols-2 gap-3">
+                  <button type="button"
+                    onClick={() => setForm(f => ({ ...f, sandbox_mode: 'restricted' }))}
+                    className={`p-3 rounded-lg border-2 text-left transition-colors ${form.sandbox_mode === 'restricted' ? 'border-green-400 bg-green-50 dark:bg-green-900/20' : 'border-gray-200 dark:border-gray-700 hover:border-gray-300'}`}>
+                    <p className="text-sm font-semibold text-gray-800 dark:text-white">🔒 Restricted</p>
+                    <p className="text-xs text-gray-500 mt-0.5">Agent confined to project folder. No shell commands or outside file access.</p>
+                  </button>
+                  <button type="button"
+                    onClick={() => setForm(f => ({ ...f, sandbox_mode: 'full' }))}
+                    className={`p-3 rounded-lg border-2 text-left transition-colors ${form.sandbox_mode === 'full' ? 'border-amber-400 bg-amber-50 dark:bg-amber-900/20' : 'border-gray-200 dark:border-gray-700 hover:border-gray-300'}`}>
+                    <p className="text-sm font-semibold text-gray-800 dark:text-white">🔓 Full Access</p>
+                    <p className="text-xs text-gray-500 mt-0.5">Agent has full system read/write/execute. Use for trusted projects only.</p>
+                  </button>
+                </div>
               </div>
               {error && <p className="text-sm text-red-500">{error}</p>}
             </div>

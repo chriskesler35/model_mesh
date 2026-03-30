@@ -64,12 +64,14 @@ class ProjectCreate(BaseModel):
     template: str = "blank"
     description: Optional[str] = None
     agents: Optional[List[str]] = None
+    sandbox_mode: str = "restricted"  # "restricted" | "full"
 
 
 class ProjectUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     agents: Optional[List[str]] = None
+    sandbox_mode: Optional[str] = None  # "restricted" | "full"
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -129,6 +131,7 @@ async def create_project(body: ProjectCreate):
         "template": body.template,
         "description": body.description or "",
         "agents": body.agents or [],
+        "sandbox_mode": body.sandbox_mode if body.sandbox_mode in ("restricted", "full") else "restricted",
         "created_at": datetime.utcnow().isoformat(),
         "updated_at": datetime.utcnow().isoformat(),
         "scaffolded": scaffold,
@@ -160,9 +163,41 @@ async def update_project(project_id: str, body: ProjectUpdate):
         projects[project_id]["description"] = body.description
     if body.agents is not None:
         projects[project_id]["agents"] = body.agents
+    if body.sandbox_mode is not None:
+        if body.sandbox_mode not in ("restricted", "full"):
+            raise HTTPException(status_code=400, detail="sandbox_mode must be 'restricted' or 'full'")
+        projects[project_id]["sandbox_mode"] = body.sandbox_mode
     projects[project_id]["updated_at"] = datetime.utcnow().isoformat()
     _save_projects(projects)
     return projects[project_id]
+
+
+@router.get("/{project_id}/sandbox")
+async def get_sandbox_policy(project_id: str):
+    """Get the current sandbox policy for a project."""
+    projects = _load_projects()
+    if project_id not in projects:
+        raise HTTPException(status_code=404, detail="Project not found")
+    from app.services.sandbox_guard import get_guard
+    guard = get_guard(projects[project_id])
+    return guard.summary()
+
+
+@router.post("/{project_id}/sandbox")
+async def set_sandbox_mode(project_id: str, body: dict):
+    """Set sandbox mode for a project. Body: {"mode": "restricted"|"full"}"""
+    mode = body.get("mode")
+    if mode not in ("restricted", "full"):
+        raise HTTPException(status_code=400, detail="mode must be 'restricted' or 'full'")
+    projects = _load_projects()
+    if project_id not in projects:
+        raise HTTPException(status_code=404, detail="Project not found")
+    projects[project_id]["sandbox_mode"] = mode
+    projects[project_id]["updated_at"] = datetime.utcnow().isoformat()
+    _save_projects(projects)
+    from app.services.sandbox_guard import get_guard
+    guard = get_guard(projects[project_id])
+    return {"ok": True, **guard.summary()}
 
 
 @router.delete("/{project_id}")

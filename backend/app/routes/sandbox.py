@@ -53,6 +53,11 @@ def _get_project(project_id: str) -> Dict[str, Any]:
     return projects[project_id]
 
 
+def _get_guard(project: Dict[str, Any]):
+    from app.services.sandbox_guard import get_guard
+    return get_guard(project)
+
+
 def _run_cmd(cmd: List[str], cwd: Optional[str] = None, timeout: int = 60) -> Dict[str, Any]:
     """Run a subprocess and return stdout/stderr/returncode."""
     try:
@@ -185,6 +190,8 @@ async def delete_venv(project_id: str):
 async def install_packages(project_id: str, body: EnvCreate):
     """Install packages into the project's venv."""
     project = _get_project(project_id)
+    guard = _get_guard(project)
+    # pip install is allowed in both modes — it only affects the project's venv
     path = Path(project["path"])
     pip_exe = path / ".venv" / "Scripts" / "pip.exe"
 
@@ -299,7 +306,14 @@ async def get_env_vars(project_id: str):
 async def set_env_vars(project_id: str, body: Dict[str, str]):
     """Set environment variables for a project (writes .env file)."""
     project = _get_project(project_id)
+    guard = _get_guard(project)
     env_path = Path(project["path"]) / ".env"
+    # Validate the .env path stays within project root
+    from app.services.sandbox_guard import SandboxViolation
+    try:
+        guard.check_path(env_path)
+    except SandboxViolation as e:
+        raise HTTPException(status_code=403, detail=str(e))
     lines = [f"{k}={v}" for k, v in body.items()]
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"ok": True, "env_vars": body}

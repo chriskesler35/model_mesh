@@ -71,6 +71,19 @@ export default function ProjectDetailPage() {
   const [fileContent, setFileContent] = useState<string | null>(null)
   const [loadingFile, setLoadingFile] = useState(false)
   const [activeTab, setActiveTab] = useState<'files' | 'sandbox'>('files')
+  const [sandboxSaving, setSandboxSaving] = useState(false)
+
+  const setSandboxMode = async (mode: 'restricted' | 'full') => {
+    setSandboxSaving(true)
+    try {
+      await fetch(`${API_BASE}/v1/projects/${id}/sandbox`, {
+        method: 'POST', headers: AUTH, body: JSON.stringify({ mode })
+      })
+      setProject((p: any) => ({ ...p, sandbox_mode: mode }))
+    } finally {
+      setSandboxSaving(false)
+    }
+  }
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState(false)
   const [editName, setEditName] = useState('')
@@ -152,6 +165,31 @@ export default function ProjectDetailPage() {
           <span className={`text-xs px-2 py-0.5 rounded-full ${project.path_exists ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`}>
             {project.path_exists ? '✓ path found' : '✗ path missing'}
           </span>
+
+          {/* Sandbox mode toggle */}
+          <div className="flex items-center gap-1 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+            <button
+              onClick={() => setSandboxMode('restricted')}
+              disabled={sandboxSaving}
+              title="Restricted: agent confined to project folder"
+              className={`px-2 py-1 text-xs font-medium transition-colors ${
+                project.sandbox_mode !== 'full'
+                  ? 'bg-green-100 text-green-700 dark:bg-green-900/40'
+                  : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800'
+              }`}
+            >🔒 Restricted</button>
+            <button
+              onClick={() => setSandboxMode('full')}
+              disabled={sandboxSaving}
+              title="Full Access: agent has unrestricted system access"
+              className={`px-2 py-1 text-xs font-medium transition-colors ${
+                project.sandbox_mode === 'full'
+                  ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40'
+                  : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800'
+              }`}
+            >🔓 Full</button>
+          </div>
+
           <button onClick={() => router.push(`/workbench?project=${id}`)}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-orange-500 hover:bg-orange-600 text-white text-xs font-medium rounded-lg transition-colors">
             🚀 Open in Workbench

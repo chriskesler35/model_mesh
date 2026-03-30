@@ -1,3 +1,7 @@
 Set oShell = CreateObject("WScript.Shell")
-oShell.Run "cmd /c pm2 stop all", 0, True
+Set oFSO = CreateObject("Scripting.FileSystemObject")
+scriptDir = oFSO.GetParentFolderName(WScript.ScriptFullName)
+
+oShell.Run "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File """ & scriptDir & "\Stop-DevForgeAI.ps1""", 0, True
+
 MsgBox "DevForgeAI stopped.", 64, "DevForgeAI"
