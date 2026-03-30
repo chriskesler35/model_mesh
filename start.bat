@@ -12,6 +12,8 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3001 " ^| findstr LISTENING
 
 timeout /t 2 /nobreak >nul
 
+if not exist logs mkdir logs
+
 echo Starting PM2 processes...
 pm2 start ecosystem.config.js
 

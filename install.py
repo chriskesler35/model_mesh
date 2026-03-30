@@ -143,6 +143,9 @@ def setup_env():
     DATA_DIR.mkdir(exist_ok=True)
     ok("data/ directory ready")
 
+    (ROOT / "logs").mkdir(exist_ok=True)
+    ok("logs/ directory ready")
+
     if ENV_FILE.exists():
         ok(".env already exists — skipping (edit manually if needed)")
         return

@@ -2,7 +2,16 @@ module.exports = {
   apps: [
     {
       name: 'devforgeai-backend',
-      script: 'venv\\Scripts\\python.exe',
+      // Use venv python if it exists, otherwise fall back to system python
+      script: (() => {
+        const fs = require('fs')
+        const path = require('path')
+        const venvWin   = path.join(__dirname, 'backend', 'venv', 'Scripts', 'python.exe')
+        const venvUnix  = path.join(__dirname, 'backend', 'venv', 'bin', 'python')
+        if (fs.existsSync(venvWin))  return venvWin
+        if (fs.existsSync(venvUnix)) return venvUnix
+        return process.platform === 'win32' ? 'python' : 'python3'
+      })(),
       args: '-m uvicorn app.main:app --host 0.0.0.0 --port 19000 --reload',
       cwd: './backend',
       interpreter: 'none',
