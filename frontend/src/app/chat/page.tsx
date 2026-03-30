@@ -842,30 +842,64 @@ export default function ChatPage() {
     setShowImageGen(false)
     setImagePrompt('')
 
-    // Add a user message showing the request
+    // Add user + placeholder messages to local state
     const userMsg: Message = {
       id: `img-user-${Date.now()}`,
-      role: 'user',
-      content: `🎨 Generate image: ${prompt}`,
+      role: 'user' as const,
+      content: `🖼️ Generate image: ${prompt}`,
       created_at: new Date().toISOString(),
     }
     const assistantId = `img-${Date.now()}`
     const assistantMsg: Message = {
       id: assistantId,
-      role: 'assistant',
-      content: '🖼️ Image generation submitted — you\'ll get a notification when it\'s ready. Feel free to keep chatting!',
+      role: 'assistant' as const,
+      content: '🎨 Image generation submitted — you\'ll get a notification when it\'s ready!',
       streaming: false,
       created_at: new Date().toISOString(),
     }
     setMessages(prev => [...prev, userMsg, assistantMsg])
 
+    // Save to conversation — post image request as a real chat message so it persists
     try {
+      let convId = activeConvId
+      const defaultPersonaId = personas.find((p: any) => p.is_default)?.id || selectedPersonaId
+      try {
+        const saveBody: any = {
+          model: defaultPersonaId,
+          messages: [{ role: 'user', content: `🖼️ Generate image: ${prompt}` }],
+          stream: false,
+        }
+        if (convId) saveBody.conversation_id = convId
+        const saveRes = await fetch(`${API_BASE}/v1/chat/completions`, {
+          method: 'POST', headers: AUTH, body: JSON.stringify(saveBody)
+        }).then(r => r.json())
+        const newConvId = saveRes.conversation_id || saveRes.modelmesh?.conversation_id || null
+        if (newConvId && newConvId !== convId) {
+          convId = newConvId
+          setActiveConvId(convId)
+          localStorage.setItem('devforge_last_session', convId)
+          router.replace(`/chat?session=${convId}`, { scroll: false })
+        }
+        // Update sidebar title to reflect image request
+        if (convId) {
+          const autoTitle = `🖼️ ${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}`
+          await fetch(`${API_BASE}/v1/conversations/${convId}`, {
+            method: 'PATCH', headers: AUTH, body: JSON.stringify({ title: autoTitle })
+          }).catch(() => {})
+          setConversations(prev => prev.map(c =>
+            c.id === convId ? { ...c, title: autoTitle, last_message_at: new Date().toISOString() } : c
+          ))
+          setTitleValue(autoTitle)
+        }
+        refreshConversations()
+      } catch { /* non-fatal - image still generates */ }
+
       await submitTask('image_gen', {
         prompt,
         model: 'comfyui-local',
         size: '1024x1024',
         format: 'png',
-      }, activeConvId || undefined)
+      }, convId || undefined)
     } catch (e: any) {
       addToast({
         type: 'error',
@@ -877,7 +911,6 @@ export default function ChatPage() {
       setGeneratingImage(false)
     }
   }
-
   const refreshConversations = async () => {
     try {
       const res = await fetch(`${API_BASE}/v1/conversations?limit=100&pinned_first=true`, { headers: AUTH })
@@ -974,14 +1007,18 @@ export default function ChatPage() {
           {/* Title */}
           <div className="flex-1 min-w-0">
             {editingTitle ? (
-              <form onSubmit={e => { e.preventDefault(); saveTitle() }} className="flex items-center gap-1">
+              <form onSubmit={e => { e.preventDefault(); saveTitle() }} className="flex items-center gap-1.5">
                 <input
                   autoFocus
                   value={titleValue}
                   onChange={e => setTitleValue(e.target.value)}
-                  onBlur={saveTitle}
+                  onKeyDown={e => { if (e.key === 'Escape') setEditingTitle(false) }}
                   className="text-sm font-medium rounded border border-orange-400 px-2 py-0.5 dark:bg-gray-800 dark:text-white min-w-0 flex-1"
                 />
+                <button type="submit" className="flex-shrink-0 px-2 py-0.5 text-xs font-medium bg-orange-500 hover:bg-orange-600 text-white rounded">
+                  Save
+                </button>
+                <button type="button" onClick={() => setEditingTitle(false)} className="flex-shrink-0 text-xs text-gray-400 hover:text-gray-600 px-1">✕</button>
               </form>
             ) : (
               <button
