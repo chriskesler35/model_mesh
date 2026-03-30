@@ -47,7 +47,6 @@ from app.routes.api_keys import router as api_keys_router
 from app.routes.model_validate import router as model_validate_router
 from app.routes.tasks import router as tasks_router
 from app.routes.model_sync import router as model_sync_router
-from app.routes.settings import router as settings_router
 from app.routes.context import router as context_router
 
 
@@ -159,7 +158,6 @@ app.include_router(api_keys_router)
 app.include_router(model_validate_router)
 app.include_router(tasks_router)
 app.include_router(model_sync_router)
-app.include_router(settings_router)
 app.include_router(context_router)
 
 

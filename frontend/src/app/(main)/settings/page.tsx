@@ -647,7 +647,37 @@ export default function SettingsPage() {
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [memoryFiles, setMemoryFiles] = useState<MemoryFile[]>([])
   const [loading, setLoading] = useState(true)
+  const [profileSaving, setProfileSaving] = useState(false)
+  const [profileSaved, setProfileSaved] = useState(false)
   const [activeTab, setActiveTab] = useState<'identity' | 'profile' | 'memory' | 'preferences' | 'conversations' | 'apikeys' | 'remote' | 'server'>('identity')
+
+  const saveProfile = async () => {
+    if (!profile) return
+    setProfileSaving(true)
+    try {
+      // Save to DB
+      await fetch('http://localhost:19000/v1/user', {
+        method: 'PATCH',
+        headers: { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: profile.name, email: profile.email })
+      })
+
+      // Also update USER.md memory file so the AI knows about the user
+      const userMdContent = `# USER.md — About You\n\n## Personal Info\n- Name: ${profile.name || ''}\n- Email: ${profile.email || ''}\n\n## Notes\n- Update this file with more context about yourself via Settings → Identity → Your Profile\n`
+      await fetch('http://localhost:19000/v1/identity/user', {
+        method: 'PUT',
+        headers: { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: userMdContent })
+      })
+
+      setProfileSaved(true)
+      setTimeout(() => setProfileSaved(false), 2500)
+    } catch (e) {
+      console.error('Failed to save profile:', e)
+    } finally {
+      setProfileSaving(false)
+    }
+  }
   const [editingFile, setEditingFile] = useState<MemoryFile | null>(null)
   const [newFileName, setNewFileName] = useState('')
 
@@ -779,11 +809,14 @@ export default function SettingsPage() {
       {activeTab === 'profile' && (
         <div className="bg-white shadow sm:rounded-lg">
           <div className="px-4 py-5 sm:p-6">
-            <h3 className="text-lg font-medium text-gray-900">User Profile</h3>
-            <p className="mt-1 text-sm text-gray-500">
-              This information helps personalize your AI interactions.
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="text-lg font-medium text-gray-900">User Profile</h3>
+              {profileSaved && <span className="text-sm text-green-600 font-medium animate-pulse">Saved!</span>}
+            </div>
+            <p className="mt-1 text-sm text-gray-500 mb-4">
+              Saved here and synced to your AI's USER.md so it knows who you are.
             </p>
-            <div className="mt-4 space-y-4">
+            <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700">Name</label>
                 <input
@@ -802,12 +835,19 @@ export default function SettingsPage() {
                   className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
                 />
               </div>
-              <button
-                type="button"
-                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700"
-              >
-                Save Profile
-              </button>
+              <div className="pt-1">
+                <p className="text-xs text-gray-400 mb-3">
+                  💡 For richer context (timezone, preferences, projects), use <strong>Settings → Identity → Your Profile</strong> to edit USER.md directly.
+                </p>
+                <button
+                  type="button"
+                  onClick={saveProfile}
+                  disabled={profileSaving}
+                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-300"
+                >
+                  {profileSaving ? 'Saving…' : 'Save Profile'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
