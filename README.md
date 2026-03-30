@@ -36,11 +36,13 @@ DevForgeAI brings together everything you need to build with AI:
 
 ## Quick Start
 
+> **Full installation guide:** [INSTALL.md](INSTALL.md)
+
 ### Prerequisites
 
-- Python 3.11+ at `C:\Python314\python.exe` (or update the path in startup scripts)
-- Node.js 18+
-- At least one AI provider API key (Ollama works locally with no key)
+- Python 3.11+ — https://www.python.org/downloads/
+- Node.js 18+ — https://nodejs.org/
+- At least one AI provider API key *(Ollama works locally with no key)*
 
 ### 1. Clone
 
@@ -49,57 +51,40 @@ git clone https://github.com/chriskesler35/model_mesh.git
 cd model_mesh
 ```
 
-### 2. Configure
+### 2. Install
 
 ```bash
-cp backend/.env.example backend/.env
+python install.py
 ```
 
-Edit `backend/.env`:
+This creates the virtual environment, installs all dependencies, and generates start scripts.
+
+### 3. Configure
+
+Edit `backend/.env` and add at least one API key:
 
 ```env
-# At least one of these is required
 ANTHROPIC_API_KEY=sk-ant-...
 GOOGLE_API_KEY=AIza...
-GEMINI_API_KEY=AIza...
 OPENROUTER_API_KEY=sk-or-v1-...
-
-# Optional
+# or just run Ollama locally — no key needed
 OLLAMA_BASE_URL=http://localhost:11434
-COMFYUI_URL=http://localhost:8188
-MODELMESH_API_KEY=modelmesh_local_dev_key
-
-# Telegram bot (optional)
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_CHAT_IDS=...
 ```
 
-### 3. Start
-
-**Option A — Double-click the startup script (Windows):**
-```
-devforgeai_startup.bat   ← on your Desktop
-```
-
-**Option B — Manual:**
+### 4. Start
 
 ```bash
-# Terminal 1 — Backend
-cd backend
-python -m uvicorn app.main:app --host 0.0.0.0 --port 19000
-
-# Terminal 2 — Frontend
-cd frontend
-npm install
-npm run dev
+python devforgeai.py start
 ```
 
-### 4. Open
+Or double-click `start.bat` (Windows) / run `./start.sh` (macOS/Linux).
+
+### 5. Open
 
 - **App:** http://localhost:3001
 - **API docs:** http://localhost:19000/docs
 
-First launch will run onboarding — the AI introduces itself and asks 3 questions to set up your profile.
+First launch runs onboarding — the AI asks a few questions to set up your profile.
 
 ---
 
