@@ -85,8 +85,12 @@ class MemoryContext:
             self.db.add(user)
             await self.db.commit()
             await self.db.refresh(user)
-            
-            # Create default memory files
+
+        # Create default memory files if none exist yet (handles existing users too)
+        files_result = await self.db.execute(
+            select(MemoryFile).where(MemoryFile.user_id == user.id).limit(1)
+        )
+        if not files_result.scalar_one_or_none():
             await self._create_default_files(user.id)
         
         return user

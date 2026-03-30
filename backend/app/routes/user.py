@@ -74,19 +74,23 @@ async def update_user_profile(
 
 @router.get("/memory", response_model=MemoryFileList)
 async def list_memory_files(db: AsyncSession = Depends(get_db)):
-    """List all memory files for the user."""
-    # Get user profile
+    """List all memory files for the user. Auto-seeds defaults if none exist."""
+    from app.services.memory_context import MemoryContext
+    # This auto-creates the user and seeds default files if none exist
+    ctx = MemoryContext(db)
+    await ctx.get_or_create_user()
+
     result = await db.execute(select(UserProfile).limit(1))
     profile = result.scalar_one_or_none()
-    
+
     if not profile:
         raise HTTPException(status_code=404, detail="User profile not found")
-    
+
     result = await db.execute(
         select(MemoryFile).where(MemoryFile.user_id == profile.id)
     )
     files = result.scalars().all()
-    
+
     return MemoryFileList(data=files, total=len(files))
 
 
