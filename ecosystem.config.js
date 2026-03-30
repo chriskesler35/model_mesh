@@ -10,6 +10,7 @@ module.exports = {
       autorestart: true,
       restart_delay: 2000,
       max_restarts: 10,
+      windowsHide: true,
       env: {
         PYTHONUNBUFFERED: '1',
       },
@@ -28,6 +29,7 @@ module.exports = {
       autorestart: true,
       restart_delay: 2000,
       max_restarts: 10,
+      windowsHide: true,
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: '../logs/frontend-error.log',
       out_file: '../logs/frontend-out.log',
