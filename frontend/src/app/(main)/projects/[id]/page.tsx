@@ -1,8 +1,12 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { SandboxPanel } from './sandbox'
 import { useParams, useRouter } from 'next/navigation'
+
+// SandboxPanel stub — sandbox.tsx not yet implemented
+const SandboxPanel = ({ projectId }: { projectId: string }) => (
+  <div className="text-sm text-gray-500 py-8 text-center">Sandbox coming soon.</div>
+)
 
 const API_BASE = 'http://localhost:19000'
 const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
@@ -201,7 +205,7 @@ export default function ProjectDetailPage() {
       <div className="flex items-center gap-1 px-6 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
         {([['files', '📁 Files'], ['sandbox', '🔒 Sandbox']] as const).map(([tab, label]) => (
           <button key={tab} onClick={() => setActiveTab(tab)}
-            className={px-4 py-2.5 text-sm font-medium border-b-2 transition-colors }>
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${activeTab === tab ? 'border-orange-500 text-orange-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
             {label}
           </button>
         ))}
@@ -273,7 +277,6 @@ export default function ProjectDetailPage() {
             </>
           )}
         </div>
-      </>
         )}
       </div>
     </div>
