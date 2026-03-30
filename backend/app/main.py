@@ -46,6 +46,7 @@ from app.routes.hardware import router as hardware_router
 from app.routes.api_keys import router as api_keys_router
 from app.routes.model_validate import router as model_validate_router
 from app.routes.tasks import router as tasks_router
+from app.routes.model_sync import router as model_sync_router
 
 
 @asynccontextmanager
@@ -85,6 +86,20 @@ async def lifespan(app: FastAPI):
     from app.seed import seed_database
     async with AsyncSessionLocal() as session:
         await seed_database(session)
+
+    # Auto-sync Ollama models + key-gated paid models on every startup
+    try:
+        from app.routes.model_sync import run_model_sync
+        async with AsyncSessionLocal() as session:
+            result = await run_model_sync(session)
+            import logging as _log
+            _log.getLogger(__name__).info(
+                f"Startup model sync: {len(result['added'])} new, "
+                f"ollama={'yes' if result['ollama_available'] else 'no'}"
+            )
+    except Exception as _e:
+        import logging as _log
+        _log.getLogger(__name__).warning(f"Startup model sync failed (non-fatal): {_e}")
     
     # Start Telegram polling (non-blocking background task)
     from app.routes.telegram_bot import start_polling as _start_telegram
@@ -141,6 +156,7 @@ app.include_router(hardware_router)
 app.include_router(api_keys_router)
 app.include_router(model_validate_router)
 app.include_router(tasks_router)
+app.include_router(model_sync_router)
 
 
 @app.get("/")

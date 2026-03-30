@@ -61,6 +61,11 @@ function formatContext(tokens: number | undefined): string {
   return tokens.toString()
 }
 
+interface SyncStatus {
+  ollama: { reachable: boolean; model_count: number; in_db: number }
+  providers: Record<string, { key_set: boolean; in_db: number }>
+}
+
 export default function ModelsPage() {
   const [models, setModels] = useState<Model[]>([])
   const [providers, setProviders] = useState<Provider[]>([])
@@ -73,6 +78,9 @@ export default function ModelsPage() {
   const [validation, setValidation] = useState<ValidationResult | null>(null)
   const [validationError, setValidationError] = useState<string | null>(null)
   const validateTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
+  const [syncing, setSyncing] = useState(false)
+  const [syncResult, setSyncResult] = useState<string | null>(null)
   const [formData, setFormData] = useState({
     model_id: '',
     display_name: '',
@@ -84,19 +92,48 @@ export default function ModelsPage() {
     is_active: true
   })
 
+  const fetchModels = async () => {
+    try {
+      const [modelsRes, providersRes] = await Promise.all([
+        fetch(`${API_BASE}/v1/models`, { headers: AUTH_HEADERS }).then(r => r.json()),
+        fetch(`${API_BASE}/v1/providers`, { headers: AUTH_HEADERS }).then(r => r.json()),
+      ])
+      setModels(modelsRes.data || [])
+      setProviders(providersRes.data || [])
+    } catch (e) {
+      console.error('Failed to fetch models:', e)
+    }
+  }
+
+  const fetchSyncStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/v1/models/sync/status`, { headers: AUTH_HEADERS })
+      if (res.ok) setSyncStatus(await res.json())
+    } catch { /* non-fatal */ }
+  }
+
+  const runSync = async () => {
+    setSyncing(true)
+    setSyncResult(null)
+    try {
+      const res = await fetch(`${API_BASE}/v1/models/sync`, { method: 'POST', headers: AUTH_HEADERS })
+      const data = await res.json()
+      setSyncResult(data.message || 'Sync complete')
+      await fetchModels()
+      await fetchSyncStatus()
+    } catch (e: any) {
+      setSyncResult('Sync failed — check backend logs')
+    } finally {
+      setSyncing(false)
+      setTimeout(() => setSyncResult(null), 5000)
+    }
+  }
+
   useEffect(() => {
     async function fetchData() {
       try {
-        const [modelsRes, providersRes] = await Promise.all([
-          fetch('http://localhost:19000/v1/models', {
-            headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
-          }).then(r => r.json()),
-          fetch('http://localhost:19000/v1/providers', {
-            headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
-          }).then(r => r.json())
-        ])
-        setModels(modelsRes.data || [])
-        setProviders(providersRes.data || [])
+        await fetchModels()
+        await fetchSyncStatus()
       } catch (e) {
         console.error('Failed to fetch:', e)
       } finally {
@@ -329,23 +366,83 @@ export default function ModelsPage() {
 
   return (
     <div>
-      <div className="sm:flex sm:items-center sm:justify-between mb-8">
+      <div className="sm:flex sm:items-center sm:justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Models</h1>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
             Available AI models from all providers
           </p>
         </div>
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700"
-        >
-          <svg className="-ml-1 mr-2 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-          Add Model
-        </button>
+        <div className="flex items-center gap-3 mt-4 sm:mt-0">
+          <button
+            onClick={runSync}
+            disabled={syncing}
+            className="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 text-sm font-medium rounded-md text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+          >
+            <svg className={`-ml-1 mr-2 h-4 w-4 ${syncing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            {syncing ? 'Syncing…' : 'Sync Models'}
+          </button>
+          <button
+            onClick={() => setShowAddModal(true)}
+            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700"
+          >
+            <svg className="-ml-1 mr-2 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            Add Model
+          </button>
+        </div>
       </div>
+
+      {/* Sync result toast */}
+      {syncResult && (
+        <div className="mb-4 px-4 py-3 rounded-lg bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-700 text-sm text-green-800 dark:text-green-300">
+          ✓ {syncResult}
+        </div>
+      )}
+
+      {/* Sync status banner */}
+      {syncStatus && (
+        <div className="mb-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {/* Ollama card */}
+          <div className={`rounded-lg border p-3 text-sm flex items-start gap-3 ${
+            syncStatus.ollama.reachable
+              ? 'bg-green-50 dark:bg-green-900/10 border-green-200 dark:border-green-700'
+              : 'bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700'
+          }`}>
+            <span className="text-lg mt-0.5">{syncStatus.ollama.reachable ? '🟢' : '⚪'}</span>
+            <div className="flex-1">
+              <p className="font-medium text-gray-900 dark:text-white">Ollama</p>
+              <p className="text-gray-500 dark:text-gray-400 text-xs">
+                {syncStatus.ollama.reachable
+                  ? `${syncStatus.ollama.model_count} local models · ${syncStatus.ollama.in_db} in DB`
+                  : 'Not running — install Ollama to use local models'}
+              </p>
+            </div>
+          </div>
+
+          {/* Paid provider cards */}
+          {Object.entries(syncStatus.providers).map(([name, info]) => (
+            <div key={name} className={`rounded-lg border p-3 text-sm flex items-start gap-3 ${
+              info.key_set
+                ? 'bg-blue-50 dark:bg-blue-900/10 border-blue-200 dark:border-blue-700'
+                : 'bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700 opacity-60'
+            }`}>
+              <span className="text-lg mt-0.5">{info.key_set ? '🔑' : '🔒'}</span>
+              <div className="flex-1">
+                <p className="font-medium text-gray-900 dark:text-white capitalize">{name}</p>
+                <p className="text-gray-500 dark:text-gray-400 text-xs">
+                  {info.key_set
+                    ? `API key set · ${info.in_db} models in DB`
+                    : 'No API key — add one in Settings → API Keys'}
+                </p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {Object.entries(grouped).map(([provider, providerModels]) => (
         <div key={provider} className="mb-8">
