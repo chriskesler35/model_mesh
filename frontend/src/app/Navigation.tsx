@@ -18,13 +18,14 @@ const NAV_ITEMS = [
   { href: '/models',          label: 'Models',      icon: '⚡' },
   { href: '/stats',           label: 'Stats',       icon: '📊' },
   { href: '/settings',        label: 'Settings',    icon: '⚙️' },
+  { href: '/help',            label: 'Help',         icon: '❓' },
 ]
 
 const GROUPS = [
   { label: 'MAIN',   items: ['/', '/chat'] },
   { label: 'BUILD',  items: ['/agents', '/agents/sessions', '/workbench', '/projects'] },
   { label: 'CREATE', items: ['/gallery', '/methods'] },
-  { label: 'MANAGE', items: ['/collaborate', '/personas', '/models', '/stats', '/settings'] },
+  { label: 'MANAGE', items: ['/collaborate', '/personas', '/models', '/stats', '/settings', '/help'] },
 ]
 
 function ThemeToggle({ collapsed }: { collapsed: boolean }) {
