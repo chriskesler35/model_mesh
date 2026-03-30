@@ -1061,10 +1061,30 @@ export default function ChatPage() {
   }
 
   // ── Send message ──────────────────────────────────────────────────────────
+  // Detect image generation intent from natural language
+  const detectImageIntent = (text: string): string | null => {
+    const lower = text.toLowerCase()
+    const imageVerbs = ['generate', 'create', 'make', 'draw', 'paint', 'render', 'design', 'produce', 'show me']
+    const imageNouns = ['image', 'picture', 'photo', 'illustration', 'artwork', 'drawing', 'painting', 'portrait', 'wallpaper', 'logo', 'icon', 'banner']
+    const hasVerb = imageVerbs.some(v => lower.includes(v))
+    const hasNoun = imageNouns.some(n => lower.includes(n))
+    if (hasVerb && hasNoun) return text
+    // Also catch "/imagine" style
+    if (lower.startsWith('/imagine ') || lower.startsWith('/img ')) return text.split(' ').slice(1).join(' ')
+    return null
+  }
+
   const sendMessage = async () => {
     if (!input.trim() || loading) return
     const text = input.trim()
     setInput('')
+
+    // Route to image generation if intent detected
+    const imagePromptDetected = detectImageIntent(text)
+    if (imagePromptDetected) {
+      generateImage(imagePromptDetected)
+      return
+    }
 
     const userMsg: Message = {
       id: `tmp-${Date.now()}`,
@@ -1150,8 +1170,8 @@ export default function ChatPage() {
     }
   }
 
-  const generateImage = async () => {
-    const prompt = imagePrompt.trim()
+  const generateImage = async (overridePrompt?: string) => {
+    const prompt = (overridePrompt ?? imagePrompt).trim()
     if (!prompt || generatingImage) return
     setGeneratingImage(true)
     setShowImageGen(false)
