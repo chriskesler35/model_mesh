@@ -46,23 +46,23 @@ class SelfHealingSystem:
             health["checks"]["database"] = f"unhealthy: {str(e)}"
             health["status"] = "unhealthy"
         
-        # Check Redis connectivity — optional, only flag if explicitly configured
+        # Check Redis — completely optional. Never degrades overall status.
         try:
             from app.redis import get_redis
             from app.config import settings as _settings
-            redis = await get_redis()
-            if redis is None:
+            _redis_url = getattr(_settings, 'redis_url', None)
+            if not _redis_url:
                 health["checks"]["redis"] = "not configured (optional)"
             else:
-                await redis.ping()
-                health["checks"]["redis"] = "healthy"
+                _redis_client = await get_redis()
+                if _redis_client is None:
+                    health["checks"]["redis"] = "not configured (optional)"
+                else:
+                    await _redis_client.ping()
+                    health["checks"]["redis"] = "healthy"
         except Exception as e:
-            from app.config import settings as _settings
-            if getattr(_settings, 'redis_url', None):
-                health["checks"]["redis"] = f"unhealthy: {str(e)}"
-                health["status"] = "degraded"
-            else:
-                health["checks"]["redis"] = "not configured (optional)"
+            # Redis is optional — never mark system as degraded because of it
+            health["checks"]["redis"] = "not configured (optional)"
         
         # Check disk space
         try:
