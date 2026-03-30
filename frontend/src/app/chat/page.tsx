@@ -1099,6 +1099,12 @@ export default function ChatPage() {
     const text = input.trim()
     setInput('')
 
+    // Intercept slash commands before sending to AI
+    if (text.startsWith('/')) {
+      await executeSlashCommand(text)
+      return
+    }
+
     // Route to image generation if intent detected
     const imagePromptDetected = detectImageIntent(text)
     if (imagePromptDetected) {
