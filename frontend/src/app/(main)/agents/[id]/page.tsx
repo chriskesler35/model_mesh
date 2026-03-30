@@ -27,7 +27,9 @@ interface Persona { id: string; name: string; description?: string; is_default?:
 interface AgentData {
   id: string; name: string; agent_type: string; description?: string
   system_prompt: string; model_id?: string; persona_id?: string
-  persona_name?: string; resolved_model_name?: string; resolved_via?: string
+  persona_name?: string; persona_system_prompt?: string
+  effective_system_prompt?: string
+  resolved_model_name?: string; resolved_via?: string
   tools: string[]; memory_enabled: boolean; max_iterations: number
   timeout_seconds: number; is_active: boolean
 }
@@ -251,10 +253,40 @@ export default function AgentDetailPage() {
 
           {/* System prompt */}
           <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-5">
-            <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">System Prompt</h3>
-            <pre className="text-xs text-gray-600 dark:text-gray-400 whitespace-pre-wrap font-mono bg-gray-50 dark:bg-gray-900 rounded-lg p-3 max-h-48 overflow-y-auto">
-              {agent.system_prompt}
-            </pre>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">System Prompt</h3>
+              {agent.persona_id && (
+                <span className="text-xs px-2 py-0.5 rounded-full bg-orange-100 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400">
+                  merged from persona + agent
+                </span>
+              )}
+            </div>
+
+            {agent.persona_id && agent.persona_system_prompt ? (
+              <div className="space-y-3">
+                <div>
+                  <p className="text-xs text-gray-400 mb-1">🎭 From persona <span className="font-medium text-orange-500">{agent.persona_name}</span></p>
+                  <pre className="text-xs text-gray-500 dark:text-gray-400 whitespace-pre-wrap font-mono bg-gray-50 dark:bg-gray-900 rounded-lg p-3 max-h-32 overflow-y-auto border border-gray-100 dark:border-gray-700">
+                    {agent.persona_system_prompt}
+                  </pre>
+                </div>
+                {agent.system_prompt && (
+                  <div>
+                    <p className="text-xs text-gray-400 mb-1">🤖 Agent-specific additions</p>
+                    <pre className="text-xs text-gray-600 dark:text-gray-300 whitespace-pre-wrap font-mono bg-blue-50 dark:bg-blue-900/10 rounded-lg p-3 max-h-32 overflow-y-auto border border-blue-100 dark:border-blue-800">
+                      {agent.system_prompt}
+                    </pre>
+                  </div>
+                )}
+                {!agent.system_prompt && (
+                  <p className="text-xs text-gray-400 italic">No agent-specific additions — persona prompt used as-is.</p>
+                )}
+              </div>
+            ) : (
+              <pre className="text-xs text-gray-600 dark:text-gray-400 whitespace-pre-wrap font-mono bg-gray-50 dark:bg-gray-900 rounded-lg p-3 max-h-48 overflow-y-auto">
+                {agent.system_prompt}
+              </pre>
+            )}
           </div>
         </div>
       )}
@@ -327,10 +359,26 @@ export default function AgentDetailPage() {
 
           {/* System prompt */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">System Prompt</label>
-            <textarea value={form.system_prompt} onChange={e => setForm(f => ({ ...f, system_prompt: e.target.value }))}
-              rows={8} placeholder="You are an expert..."
-              className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-orange-400 resize-none" />
+            {form.persona_id ? (
+              <>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Additional Instructions <span className="text-gray-400 font-normal">(optional)</span>
+                </label>
+                <div className="mb-2 p-3 rounded-lg bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-700 text-xs text-orange-700 dark:text-orange-300">
+                  🎭 The <span className="font-semibold">{selectedPersona?.name}</span> persona prompt is already applied. Add role-specific instructions here that will be appended to it — or leave blank to use the persona prompt alone.
+                </div>
+                <textarea value={form.system_prompt} onChange={e => setForm(f => ({ ...f, system_prompt: e.target.value }))}
+                  rows={5} placeholder="e.g. Always write unit tests. Follow PEP8. Use type hints."
+                  className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-orange-400 resize-none" />
+              </>
+            ) : (
+              <>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">System Prompt</label>
+                <textarea value={form.system_prompt} onChange={e => setForm(f => ({ ...f, system_prompt: e.target.value }))}
+                  rows={8} placeholder="You are an expert..."
+                  className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-orange-400 resize-none" />
+              </>
+            )}
           </div>
 
           {/* Tools */}

@@ -21,15 +21,20 @@ router = APIRouter(prefix="/v1/agents", tags=["agents"], dependencies=[Depends(v
 
 async def _resolve_agent_model(agent: Agent, db: AsyncSession) -> dict:
     """
-    Resolve the effective model for an agent.
-    Priority: persona_id → persona.primary_model → agent.model_id → None
-    Returns a dict with resolved model info to attach to the response.
+    Resolve the effective model and system prompt for an agent.
+
+    Model priority:  persona.primary_model → agent.model_id → None
+    Prompt strategy: persona.system_prompt is the foundation;
+                     agent.system_prompt (if set) is appended as role-specific
+                     additional instructions.  If no persona, agent prompt is used alone.
     """
     resolved = {
         "resolved_model_id": None,
         "resolved_model_name": None,
         "resolved_via": None,
         "persona_name": None,
+        "persona_system_prompt": None,
+        "effective_system_prompt": agent.system_prompt or "",
     }
 
     # Try persona first
@@ -41,6 +46,12 @@ async def _resolve_agent_model(agent: Agent, db: AsyncSession) -> dict:
             persona = persona_result.scalar_one_or_none()
             if persona:
                 resolved["persona_name"] = persona.name
+                resolved["persona_system_prompt"] = persona.system_prompt or ""
+
+                # Build effective prompt: persona is the base, agent adds role specifics
+                parts = [p.strip() for p in [persona.system_prompt or "", agent.system_prompt or ""] if p and p.strip()]
+                resolved["effective_system_prompt"] = "\n\n".join(parts)
+
                 if persona.primary_model_id:
                     model_result = await db.execute(
                         select(Model).where(Model.id == persona.primary_model_id)
@@ -125,6 +136,8 @@ class AgentResponse(BaseModel):
     model_id: Optional[str] = None
     persona_id: Optional[str] = None
     persona_name: Optional[str] = None
+    persona_system_prompt: Optional[str] = None   # persona's own prompt, for UI display
+    effective_system_prompt: Optional[str] = None # merged prompt used at runtime
     resolved_model_id: Optional[str] = None
     resolved_model_name: Optional[str] = None
     resolved_via: Optional[str] = None  # "persona" | "direct" | None
