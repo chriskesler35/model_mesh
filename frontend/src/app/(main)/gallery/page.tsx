@@ -147,12 +147,18 @@ export default function GalleryPage() {
         headers: { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({})
       })
-      if (!response.ok) throw new Error('Failed to generate variation')
       const data = await response.json()
-      if (data.data?.[0]) setImages(prev => [data.data[0], ...prev])
-    } catch (e) {
+      if (!response.ok) throw new Error(data.detail || 'Failed to generate variation')
+      if (data.data?.[0]) {
+        // Normalize URL — backend may return /v1/images/{id} or /v1/img/{id}
+        const img = data.data[0]
+        img.url = `/v1/img/${img.id}`
+        setImages(prev => [img, ...prev])
+        setSelectedImage(null)
+      }
+    } catch (e: any) {
       console.error('Failed to generate variation:', e)
-      alert('Failed to generate variation. Make sure the backend is running.')
+      alert('Variation failed: ' + e.message)
     } finally {
       setGenerating(null)
     }
@@ -271,11 +277,11 @@ export default function GalleryPage() {
                   </button>
                   <button
                     onClick={(e) => { e.stopPropagation(); generateVariation(image.id) }}
-                    className="p-2 bg-white rounded-full text-orange-600 hover:bg-gray-100"
+                    className="p-2 bg-white rounded-full text-orange-600 hover:bg-gray-100 disabled:opacity-50"
                     title="Generate Variation"
                     disabled={generating === image.id}
                   >
-                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <svg className={`w-5 h-5 ${generating === image.id ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                     </svg>
                   </button>

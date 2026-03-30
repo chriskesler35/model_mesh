@@ -636,10 +636,12 @@ async def generate_variation(
         
         width, height = map(int, size.split('x'))
         
+        _store_image(variation_id, IMAGE_STORAGE[variation_id])
+
         return ImageListResponse(
             data=[ImageResponse(
                 id=variation_id,
-                url=f"/v1/images/{variation_id}",
+                url=f"/v1/img/{variation_id}",
                 revised_prompt=result.get("revised_prompt"),
                 width=width,
                 height=height,
