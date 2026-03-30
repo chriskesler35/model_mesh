@@ -122,20 +122,53 @@ First launch runs an onboarding wizard — the AI asks a few questions to set up
 
 ---
 
-## After a `git pull`
+## Updating an Existing Install
 
-If you pull new changes, you only need to re-run:
+If you already have DevForgeAI installed and just want the latest changes:
 
 ```bash
-# Backend — if requirements changed
-cd backend && pip install -r requirements.txt
+# 1. Pull latest code
+git pull origin main
 
-# Frontend — if package.json changed
-cd frontend && npm install
+# 2. Update backend dependencies (always run this after a pull)
+cd backend
+venv\Scripts\activate        # Windows
+# source venv/bin/activate  # macOS/Linux
+pip install -r requirements.txt
+
+# 3. Update frontend dependencies (run this after a pull)
+cd ../frontend
+npm install
+
+# 4. Restart both servers (stop them first if already running)
+# Terminal 1:
+cd backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 19000 --reload
+# Terminal 2:
+cd frontend && npm run dev
 ```
 
-The database migrates automatically on startup (no manual `alembic upgrade` needed).  
-Your `backend/.env`, `data/` folder, and generated images are never touched by a pull.
+**What happens automatically on restart — you don't need to do these:**
+- ✅ Database schema updates (new columns/tables added without losing data)
+- ✅ Ollama model re-sync (any newly pulled models appear automatically)
+- ✅ Default memory files created if missing
+
+**What is never touched by a pull — your data is safe:**
+- ✅ `backend/.env` — your API keys stay intact
+- ✅ `data/` folder — images, snapshots, identity files, database all preserved
+- ✅ `data/devforgeai.db` — your conversations, personas, agents stay untouched
+
+**Common errors after a pull and how to fix them:**
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `ModuleNotFoundError: No module named 'redis'` | New package added, pip not re-run | `pip install -r requirements.txt` |
+| `ModuleNotFoundError: No module named 'X'` | Any missing package | `pip install -r requirements.txt` |
+| `Cannot find module '...'` (frontend) | New npm package added | `npm install` in `frontend/` |
+| `address already in use :19000` | Old backend still running | Kill the old process then restart |
+| `address already in use :3001` | Old frontend still running | Kill the old process then restart |
+| Blank page or 404 in browser | Frontend not rebuilt | Stop and restart `npm run dev` |
+
+> **Rule of thumb:** after every `git pull`, always run `pip install -r requirements.txt` and `npm install` before restarting. It's fast when nothing changed and prevents 99% of post-update errors.
 
 ---
 
