@@ -1,5 +1,6 @@
 'use client'
 
+import { ModelFitnessCheck } from '@/components/ModelFitnessCheck'
 import { useState, useEffect } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
@@ -221,6 +222,11 @@ export default function PersonaDetailPage() {
                   </option>
                 ))}
               </select>
+              {/* VRAM / hardware fitness check */}
+              {persona.primary_model_id && (() => {
+                const m = models.find(x => x.id === persona.primary_model_id)
+                return m ? <ModelFitnessCheck modelId={m.model_id} /> : null
+              })()}
             </div>
             
             <div>

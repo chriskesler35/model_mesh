@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
+import { GpuStatusWidget } from '@/components/ModelFitnessCheck'
 import { api } from '@/lib/api'
 
 interface Persona {
@@ -123,6 +124,9 @@ export default function Home() {
         <StatCard label="Conversations" value={conversations.length} sub="View history →" href="/conversations" />
         <StatCard label="Status" value="Healthy" sub="All systems operational" />
       </div>
+
+      {/* GPU Status */}
+      <GpuStatusWidget />
 
       {/* Quick Actions */}
       <div>
