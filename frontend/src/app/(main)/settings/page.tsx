@@ -428,173 +428,214 @@ function IdentityTab() {
 }
 // ─── Server Tab ───────────────────────────────────────────────────────────────
 function ServerTab() {
-  const [info, setInfo] = useState<{ status: string; pid: number; python_version: string; uptime: string; started_at: string } | null>(null)
+  const [info, setInfo] = useState<any>(null)
   const [health, setHealth] = useState<any>(null)
+  const [processes, setProcesses] = useState<any>(null)
+  const [logs, setLogs] = useState<{ out: string[]; err: string[] }>({ out: [], err: [] })
+  const [logService, setLogService] = useState<'backend' | 'frontend'>('backend')
   const [loading, setLoading] = useState(true)
   const [restarting, setRestarting] = useState(false)
   const [restartMsg, setRestartMsg] = useState('')
+  const [actionMsg, setActionMsg] = useState('')
 
-  const fetchInfo = useCallback(async () => {
+  const fetchAll = useCallback(async () => {
     try {
-      const [infoRes, healthRes] = await Promise.all([
-        fetch(`${API_BASE}/v1/system/info`, { headers: AUTH }).then(r => r.json()),
-        fetch(`${API_BASE}/v1/system/health`, { headers: AUTH }).then(r => r.json()),
+      const [infoRes, healthRes, procRes] = await Promise.all([
+        fetch(`${API_BASE}/v1/system/info`, { headers: AUTH }).then(r => r.json()).catch(() => null),
+        fetch(`${API_BASE}/v1/system/health`, { headers: AUTH }).then(r => r.json()).catch(() => null),
+        fetch(`${API_BASE}/v1/system/processes`, { headers: AUTH }).then(r => r.json()).catch(() => null),
       ])
       setInfo(infoRes)
       setHealth(healthRes)
-    } catch {
-      setInfo(null)
+      setProcesses(procRes)
     } finally {
       setLoading(false)
     }
   }, [])
 
-  useEffect(() => { fetchInfo() }, [fetchInfo])
+  const fetchLogs = useCallback(async (service: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/v1/system/logs?service=${service}&lines=80`, { headers: AUTH })
+      const data = await res.json()
+      setLogs({ out: data.out || [], err: data.err || [] })
+    } catch { setLogs({ out: [], err: [] }) }
+  }, [])
+
+  useEffect(() => { fetchAll() }, [fetchAll])
+  useEffect(() => { fetchLogs(logService) }, [logService, fetchLogs])
 
   const restart = async () => {
     if (!confirm('Restart the backend server? It will be unavailable for a few seconds.')) return
     setRestarting(true)
     setRestartMsg('Sending restart signal…')
-    try {
-      await fetch(`${API_BASE}/v1/system/restart`, { method: 'POST', headers: AUTH })
-    } catch { /* expected — process dies */ }
-
+    try { await fetch(`${API_BASE}/v1/system/restart`, { method: 'POST', headers: AUTH }) } catch {}
     setRestartMsg('Restarting… waiting for server to come back online.')
-    // Poll until it responds again
     for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 1000))
       try {
-        const res = await fetch(`${API_BASE}/health`, { headers: AUTH })
-        if (res.ok) {
-          setRestartMsg('✅ Server is back online!')
-          setRestarting(false)
-          fetchInfo()
-          return
-        }
-      } catch { /* still down, keep waiting */ }
+        const res = await fetch(`${API_BASE}/health`)
+        if (res.ok) { setRestartMsg('✅ Back online!'); setRestarting(false); fetchAll(); return }
+      } catch {}
     }
-    setRestartMsg('⚠️ Server took longer than expected — check the terminal.')
+    setRestartMsg('⚠️ Taking longer than expected — check logs below.')
     setRestarting(false)
   }
 
-  if (loading) return <div className="text-sm text-gray-500 py-8 text-center">Loading server info…</div>
+  const pmControl = async (action: string, service = 'all') => {
+    setActionMsg(`${action}ing ${service}…`)
+    try {
+      await fetch(`${API_BASE}/v1/system/processes/${action}?service=${service}`, { method: 'POST', headers: AUTH })
+      setTimeout(() => { fetchAll(); setActionMsg('') }, 2000)
+    } catch { setActionMsg('Failed — is PM2 running?') }
+  }
+
+  const statusColor = (s: string) => s === 'online' ? 'text-green-600' : s === 'stopped' ? 'text-gray-400' : 'text-red-500'
+  const statusIcon  = (s: string) => s === 'online' ? '●' : s === 'stopped' ? '○' : '✗'
+
+  if (loading) return <div className="text-sm text-gray-500 py-8 text-center">Loading…</div>
 
   return (
-    <div className="space-y-6">
-      {/* Info card */}
+    <div className="space-y-5">
+
+      {/* PM2 Processes */}
       <div className="bg-white shadow sm:rounded-lg overflow-hidden">
-        <div className="px-4 py-5 sm:p-6">
-          <h3 className="text-base font-semibold text-gray-900 mb-4">Server Status</h3>
-          {info ? (
-            <div className="grid grid-cols-2 gap-4 text-sm">
-              <div>
-                <p className="text-xs text-gray-400">Status</p>
-                <p className="font-semibold text-green-600 capitalize">{info.status}</p>
-              </div>
-              <div>
-                <p className="text-xs text-gray-400">Uptime</p>
-                <p className="font-semibold text-gray-800">{info.uptime}</p>
-              </div>
-              <div>
-                <p className="text-xs text-gray-400">Process ID</p>
-                <p className="font-mono text-gray-700">{info.pid}</p>
-              </div>
-              <div>
-                <p className="text-xs text-gray-400">Python</p>
-                <p className="font-mono text-gray-700">{info.python_version}</p>
-              </div>
-              <div className="col-span-2">
-                <p className="text-xs text-gray-400">Started</p>
-                <p className="font-mono text-gray-700">{new Date(info.started_at).toLocaleString()}</p>
-              </div>
+        <div className="px-4 py-4 sm:px-6">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-base font-semibold text-gray-900">Processes</h3>
+            <div className="flex gap-2">
+              {actionMsg && <span className="text-xs text-gray-500 self-center">{actionMsg}</span>}
+              <button onClick={() => pmControl('restart')} className="text-xs px-2.5 py-1 rounded border border-amber-300 text-amber-700 hover:bg-amber-50">⟳ Restart All</button>
+              <button onClick={() => pmControl('stop')}    className="text-xs px-2.5 py-1 rounded border border-gray-300 text-gray-600 hover:bg-gray-50">■ Stop All</button>
+              <button onClick={() => pmControl('start', 'ecosystem.config.js')} className="text-xs px-2.5 py-1 rounded border border-green-300 text-green-700 hover:bg-green-50">▶ Start All</button>
+              <button onClick={fetchAll} className="text-xs px-2.5 py-1 rounded border border-gray-200 text-gray-500 hover:bg-gray-50">↻</button>
+            </div>
+          </div>
+
+          {processes?.pm2 && processes.processes.length > 0 ? (
+            <div className="divide-y divide-gray-100">
+              {processes.processes.map((p: any) => (
+                <div key={p.name} className="flex items-center justify-between py-2.5 text-sm">
+                  <div className="flex items-center gap-2">
+                    <span className={`text-lg leading-none ${statusColor(p.status)}`}>{statusIcon(p.status)}</span>
+                    <div>
+                      <p className="font-medium text-gray-900">{p.name}</p>
+                      <p className="text-xs text-gray-400">PID {p.pid || '—'} · {p.restarts} restart{p.restarts !== 1 ? 's' : ''}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-4 text-xs text-gray-500">
+                    {p.cpu != null && <span>{p.cpu}% CPU</span>}
+                    {p.memory_mb != null && <span>{p.memory_mb} MB</span>}
+                    <span className={`font-medium capitalize ${statusColor(p.status)}`}>{p.status}</span>
+                    <div className="flex gap-1">
+                      <button onClick={() => pmControl('restart', p.name)} className="px-2 py-0.5 rounded border border-amber-200 text-amber-600 hover:bg-amber-50">⟳</button>
+                      <button onClick={() => pmControl('stop', p.name)}    className="px-2 py-0.5 rounded border border-gray-200 text-gray-500 hover:bg-gray-50">■</button>
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
           ) : (
-            <p className="text-sm text-red-500">⚠️ Could not reach backend</p>
+            <div className="text-sm text-gray-500 py-3">
+              {processes?.pm2 === false
+                ? <span>⚠️ PM2 not running — <code className="bg-gray-100 px-1 rounded">pm2 start ecosystem.config.js</code> to start in background mode</span>
+                : 'No DevForgeAI processes found in PM2.'}
+            </div>
           )}
         </div>
       </div>
 
-      {/* Health card */}
-      {health && (
+      {/* Info + Health side by side */}
+      <div className="grid grid-cols-2 gap-5">
         <div className="bg-white shadow sm:rounded-lg overflow-hidden">
-          <div className="px-4 py-5 sm:p-6">
-            <h3 className="text-base font-semibold text-gray-900 mb-3">Health</h3>
-            <div className="space-y-3 text-sm">
-              {/* Top-level scalar fields */}
-              {Object.entries(health)
-                .filter(([, val]) => typeof val !== 'object' || val === null)
-                .map(([key, val]: any) => (
-                  <div key={key} className="flex items-center justify-between">
-                    <span className="text-gray-600 capitalize">{key.replace(/_/g, ' ')}</span>
-                    <span className={`font-medium ${
-                      String(val).startsWith('healthy') || val === true  ? 'text-green-600' :
-                      String(val).startsWith('unhealthy') || val === false ? 'text-red-500' :
-                      val === 'degraded' ? 'text-amber-500' : 'text-gray-700'
-                    }`}>
-                      {typeof val === 'boolean' ? (val ? '✓ Yes' : '✗ No') : String(val)}
-                    </span>
+          <div className="px-4 py-4 sm:px-6">
+            <h3 className="text-base font-semibold text-gray-900 mb-3">Backend Info</h3>
+            {info ? (
+              <div className="space-y-2 text-sm">
+                {[['Status', info.status, 'text-green-600'], ['Uptime', info.uptime, ''], ['PID', info.pid, 'font-mono'], ['Python', info.python_version, 'font-mono']].map(([label, val, cls]) => (
+                  <div key={label as string} className="flex justify-between">
+                    <span className="text-gray-400">{label}</span>
+                    <span className={`font-medium text-gray-800 ${cls}`}>{String(val)}</span>
                   </div>
                 ))}
-              {/* Nested check objects (e.g. checks: { database: "healthy", redis: "unhealthy: ..." }) */}
-              {Object.entries(health)
-                .filter(([, val]) => val !== null && typeof val === 'object')
-                .map(([groupKey, groupVal]: any) => (
-                  <div key={groupKey}>
-                    <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1 mt-2">
-                      {groupKey.replace(/_/g, ' ')}
-                    </p>
-                    <div className="space-y-1 pl-2 border-l-2 border-gray-100">
-                      {Object.entries(groupVal).map(([checkKey, checkVal]: any) => {
-                        const strVal = String(checkVal)
-                        const isHealthy = strVal.startsWith('healthy')
-                        const isUnhealthy = strVal.startsWith('unhealthy') || strVal.startsWith('error')
-                        // Split "healthy: 29.7% free" into status + detail
-                        const [status, ...rest] = strVal.split(':')
-                        const detail = rest.join(':').trim()
-                        return (
-                          <div key={checkKey} className="flex items-start justify-between gap-4">
-                            <span className="text-gray-600 capitalize">{checkKey.replace(/_/g, ' ')}</span>
-                            <div className="text-right">
-                              <span className={`font-medium ${isHealthy ? 'text-green-600' : isUnhealthy ? 'text-red-500' : 'text-amber-500'}`}>
-                                {isHealthy ? '✓' : isUnhealthy ? '✗' : '⚠'} {status.trim()}
-                              </span>
-                              {detail && <p className="text-xs text-gray-400 mt-0.5">{detail}</p>}
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </div>
-                ))}
-            </div>
+              </div>
+            ) : <p className="text-sm text-red-500">⚠️ Backend unreachable</p>}
           </div>
         </div>
-      )}
 
-      {/* Restart card */}
+        <div className="bg-white shadow sm:rounded-lg overflow-hidden">
+          <div className="px-4 py-4 sm:px-6">
+            <h3 className="text-base font-semibold text-gray-900 mb-3">Health</h3>
+            {health ? (
+              <div className="space-y-2 text-sm">
+                {Object.entries(health).filter(([,v]) => typeof v !== 'object').map(([k, v]: any) => (
+                  <div key={k} className="flex justify-between">
+                    <span className="text-gray-400 capitalize">{k.replace(/_/g,' ')}</span>
+                    <span className={`font-medium ${String(v).startsWith('healthy')||v===true?'text-green-600':v==='degraded'?'text-amber-500':'text-gray-700'}`}>{String(v)}</span>
+                  </div>
+                ))}
+                {Object.entries(health).filter(([,v]) => v && typeof v === 'object').map(([gk, gv]: any) => (
+                  Object.entries(gv).map(([ck, cv]: any) => {
+                    const s = String(cv); const ok = s.startsWith('healthy'); const bad = s.startsWith('unhealthy')||s.startsWith('error')
+                    const [status, ...rest] = s.split(':'); const detail = rest.join(':').trim()
+                    return (
+                      <div key={ck} className="flex justify-between">
+                        <span className="text-gray-400 capitalize">{ck.replace(/_/g,' ')}</span>
+                        <div className="text-right">
+                          <span className={`font-medium ${ok?'text-green-600':bad?'text-red-500':'text-amber-500'}`}>{ok?'✓':bad?'✗':'⚠'} {status.trim()}</span>
+                          {detail && <p className="text-xs text-gray-400">{detail}</p>}
+                        </div>
+                      </div>
+                    )
+                  })
+                ))}
+              </div>
+            ) : <p className="text-sm text-gray-400">—</p>}
+          </div>
+        </div>
+      </div>
+
+      {/* Logs */}
+      <div className="bg-white shadow sm:rounded-lg overflow-hidden">
+        <div className="px-4 py-4 sm:px-6">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-base font-semibold text-gray-900">Logs</h3>
+            <div className="flex gap-2">
+              <select value={logService} onChange={e => setLogService(e.target.value as any)}
+                className="text-xs border border-gray-300 rounded px-2 py-1 text-gray-600">
+                <option value="backend">Backend</option>
+                <option value="frontend">Frontend</option>
+              </select>
+              <button onClick={() => fetchLogs(logService)} className="text-xs px-2.5 py-1 rounded border border-gray-200 text-gray-500 hover:bg-gray-50">↻ Refresh</button>
+            </div>
+          </div>
+          <div className="bg-gray-950 rounded-lg p-3 max-h-64 overflow-y-auto font-mono text-xs text-gray-300 space-y-0.5">
+            {[...logs.out, ...logs.err].length > 0
+              ? [...logs.out, ...logs.err].map((line, i) => (
+                  <div key={i} className={line.toLowerCase().includes('error') || line.toLowerCase().includes('traceback') ? 'text-red-400' : line.toLowerCase().includes('warn') ? 'text-yellow-400' : 'text-gray-300'}>
+                    {line}
+                  </div>
+                ))
+              : <span className="text-gray-500">No logs yet — start the app with PM2 to see output here.</span>
+            }
+          </div>
+        </div>
+      </div>
+
+      {/* Restart backend worker */}
       <div className="bg-white shadow sm:rounded-lg overflow-hidden border border-amber-100">
-        <div className="px-4 py-5 sm:p-6">
-          <h3 className="text-base font-semibold text-gray-900 mb-1">Restart Backend</h3>
-          <p className="text-sm text-gray-500 mb-4">
-            Sends a graceful shutdown signal to the worker process. Since the server runs with{' '}
-            <code className="font-mono bg-gray-100 px-1 rounded text-xs">--reload</code>, it will
-            automatically restart in a few seconds. Useful after changing <code className="font-mono bg-gray-100 px-1 rounded text-xs">.env</code> or config files.
+        <div className="px-4 py-4 sm:px-6">
+          <h3 className="text-base font-semibold text-gray-900 mb-1">Restart Backend Worker</h3>
+          <p className="text-sm text-gray-500 mb-3">
+            Triggers a graceful worker reload (touches <code className="bg-gray-100 px-1 rounded text-xs">main.py</code>). Useful after editing <code className="bg-gray-100 px-1 rounded text-xs">.env</code>. Use the PM2 controls above to start/stop the entire process.
           </p>
           {restartMsg && (
-            <div className={`mb-4 text-sm px-3 py-2 rounded-lg ${restartMsg.startsWith('✅') ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}>
+            <div className={`mb-3 text-sm px-3 py-2 rounded-lg ${restartMsg.startsWith('✅') ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}>
               {restartMsg}
             </div>
           )}
-          <button
-            onClick={restart}
-            disabled={restarting || !info}
-            className="inline-flex items-center gap-2 px-4 py-2 border border-amber-300 text-sm font-medium rounded-md text-amber-700 bg-white hover:bg-amber-50 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {restarting ? (
-              <><span className="animate-spin">⟳</span> Restarting…</>
-            ) : (
-              <>⟳ Restart Backend</>
-            )}
+          <button onClick={restart} disabled={restarting || !info}
+            className="inline-flex items-center gap-2 px-4 py-2 border border-amber-300 text-sm font-medium rounded-md text-amber-700 bg-white hover:bg-amber-50 disabled:opacity-50">
+            {restarting ? <><span className="animate-spin">⟳</span> Restarting…</> : <>⟳ Reload Worker</>}
           </button>
         </div>
       </div>

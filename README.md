@@ -99,7 +99,30 @@ npm install
 
 ### 5. Start
 
-**Terminal 1 — Backend:**
+**Option A — Background (no terminal windows, recommended):**
+```bash
+# Install PM2 once
+npm install -g pm2
+
+# Start both services in the background
+pm2 start ecosystem.config.js
+
+# Save so they restart automatically after a reboot
+pm2 save
+```
+
+Manage from the **Settings → ⚙️ Server** tab in the UI, or via CLI:
+```bash
+pm2 list              # see status
+pm2 logs              # tail live logs
+pm2 restart all       # restart both
+pm2 stop all          # stop both
+pm2 start ecosystem.config.js   # start again after stop
+```
+
+**Option B — Terminal windows (easier for development/debugging):**
+
+Terminal 1 — Backend:
 ```bash
 cd backend
 venv\Scripts\activate          # Windows
@@ -107,7 +130,7 @@ venv\Scripts\activate          # Windows
 python -m uvicorn app.main:app --host 0.0.0.0 --port 19000 --reload
 ```
 
-**Terminal 2 — Frontend:**
+Terminal 2 — Frontend:
 ```bash
 cd frontend
 npm run dev
@@ -140,11 +163,11 @@ pip install -r requirements.txt
 cd ../frontend
 npm install
 
-# 4. Restart both servers (stop them first if already running)
-# Terminal 1:
-cd backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 19000 --reload
-# Terminal 2:
-cd frontend && npm run dev
+# 4. Restart
+# If running via PM2 (background mode):
+pm2 restart all
+
+# If running in terminal windows: stop them (Ctrl+C) and start again
 ```
 
 **What happens automatically on restart — you don't need to do these:**

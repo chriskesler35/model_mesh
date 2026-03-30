@@ -1,0 +1,36 @@
+module.exports = {
+  apps: [
+    {
+      name: 'devforgeai-backend',
+      script: 'venv\\Scripts\\python.exe',
+      args: '-m uvicorn app.main:app --host 0.0.0.0 --port 19000 --reload',
+      cwd: './backend',
+      interpreter: 'none',
+      watch: false,
+      autorestart: true,
+      restart_delay: 2000,
+      max_restarts: 10,
+      env: {
+        PYTHONUNBUFFERED: '1',
+      },
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '../logs/backend-error.log',
+      out_file: '../logs/backend-out.log',
+      merge_logs: true,
+    },
+    {
+      name: 'devforgeai-frontend',
+      script: './frontend/start-next.js',
+      cwd: '.',
+      interpreter: 'node',
+      watch: false,
+      autorestart: true,
+      restart_delay: 2000,
+      max_restarts: 10,
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: '../logs/frontend-error.log',
+      out_file: '../logs/frontend-out.log',
+      merge_logs: true,
+    },
+  ],
+}

@@ -50,6 +50,80 @@ async def rollback_to_snapshot(snapshot_name: str):
     return await self_healing.restore_snapshot(snapshot_name)
 
 
+@router.get("/processes")
+async def get_processes():
+    """Get PM2 process status for all DevForgeAI services."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["pm2", "jlist"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            return {"pm2": False, "processes": [], "error": "PM2 not running or not found"}
+
+        import json as _json
+        procs = _json.loads(result.stdout)
+        # Filter to devforgeai processes only
+        filtered = [
+            {
+                "name": p.get("name"),
+                "status": p.get("pm2_env", {}).get("status"),
+                "pid": p.get("pid"),
+                "uptime": p.get("pm2_env", {}).get("pm_uptime"),
+                "restarts": p.get("pm2_env", {}).get("restart_time", 0),
+                "cpu": p.get("monit", {}).get("cpu"),
+                "memory_mb": round(p.get("monit", {}).get("memory", 0) / 1024 / 1024, 1),
+            }
+            for p in procs
+            if "devforgeai" in p.get("name", "")
+        ]
+        return {"pm2": True, "processes": filtered}
+    except FileNotFoundError:
+        return {"pm2": False, "processes": [], "error": "PM2 not installed"}
+    except Exception as e:
+        return {"pm2": False, "processes": [], "error": str(e)}
+
+
+@router.get("/logs")
+async def get_logs(lines: int = 50, service: str = "backend"):
+    """Read recent log lines from PM2 log files."""
+    log_dir = Path(__file__).parent.parent.parent.parent / "logs"
+    log_file = log_dir / f"{service}-out.log"
+    err_file = log_dir / f"{service}-error.log"
+
+    out_lines, err_lines = [], []
+    if log_file.exists():
+        all_lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        out_lines = all_lines[-lines:]
+    if err_file.exists():
+        all_lines = err_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        err_lines = all_lines[-lines:]
+
+    return {
+        "service": service,
+        "out": out_lines,
+        "err": err_lines,
+        "log_dir": str(log_dir),
+    }
+
+
+@router.post("/processes/{action}")
+async def control_process(action: str, service: str = "all"):
+    """Control PM2 processes: start, stop, restart."""
+    import subprocess
+    if action not in ("start", "stop", "restart"):
+        raise HTTPException(status_code=400, detail="action must be start, stop, or restart")
+    try:
+        result = subprocess.run(
+            ["pm2", action, service],
+            capture_output=True, text=True, timeout=15
+        )
+        return {"ok": result.returncode == 0, "output": result.stdout + result.stderr}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/info")
 async def server_info():
     """Return server uptime, Python version, and process info."""

@@ -87,8 +87,13 @@ check_db.py
 # Runtime / process files
 .devforgeai.pids
 health_status.json
-start.bat
 backend/health_status.json
+
+# PM2 logs (runtime output, not source)
+logs/
 
 # Generated data directory (images, identity files, state, snapshots)
 data/
+# PM2 startup scripts (machine-specific)
+.pm2/
+
