@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 
 const API_BASE = 'http://localhost:19000'
 const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
@@ -15,6 +15,7 @@ interface Session { id: string; task: string; agent_type: string; model: string;
 
 export default function WorkbenchListPage() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const [sessions, setSessions] = useState<Session[]>([])
   const [loading, setLoading] = useState(true)
   const [showNew, setShowNew] = useState(false)
@@ -22,6 +23,7 @@ export default function WorkbenchListPage() {
   const [agentType, setAgentType] = useState('coder')
   const [model, setModel] = useState('ollama/glm4:latest')
   const [creating, setCreating] = useState(false)
+  const [projectId, setProjectId] = useState<string | null>(null)
 
   const fetchSessions = useCallback(async () => {
     const res = await fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH }).then(r => r.json()).catch(() => ({ data: [] }))
@@ -31,12 +33,23 @@ export default function WorkbenchListPage() {
 
   useEffect(() => { fetchSessions() }, [fetchSessions])
 
+  // Auto-open new session modal if coming from a project
+  useEffect(() => {
+    const pid = searchParams?.get('project')
+    if (pid) {
+      setProjectId(pid)
+      setShowNew(true)
+    }
+  }, [searchParams])
+
   const createSession = async () => {
     if (!task.trim() || creating) return
     setCreating(true)
+    const body: any = { task: task.trim(), agent_type: agentType, model }
+    if (projectId) body.project_id = projectId
     const res = await fetch(`${API_BASE}/v1/workbench/sessions`, {
       method: 'POST', headers: AUTH,
-      body: JSON.stringify({ task: task.trim(), agent_type: agentType, model }),
+      body: JSON.stringify(body),
     }).then(r => r.json())
     router.push(`/workbench/${res.id}`)
   }
