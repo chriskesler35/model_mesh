@@ -195,58 +195,36 @@ export function RemoteAccessTab() {
         </div>
       )}
 
-      {/* Backend Control */}
-      <Card icon="⚙️" title="Backend Process" subtitle="Start, stop or restart the Python backend (port 19000)">
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className={`w-3 h-3 rounded-full flex-shrink-0 ${
-                backendStatus?.healthy ? 'bg-green-500' :
-                backendStatus?.running ? 'bg-yellow-400 animate-pulse' :
-                'bg-red-500'
-              }`} />
-              <div>
-                <p className="text-sm font-medium text-gray-900 dark:text-white">
-                  {backendStatus?.healthy ? 'Running & healthy' :
-                   backendStatus?.running ? 'Running (not responding)' :
-                   backendStatus === null ? 'Checking...' :
-                   'Stopped'}
-                </p>
-                {backendStatus?.pid && (
-                  <p className="text-xs text-gray-400">PID {backendStatus.pid} · port {19000}</p>
-                )}
-              </div>
-            </div>
-            <div className="flex gap-2">
-              {!backendStatus?.running ? (
-                <button onClick={() => controlBackend('start')} disabled={!!controlling}
-                  className="px-3 py-1.5 text-xs font-medium bg-green-600 hover:bg-green-700 text-white rounded-lg disabled:opacity-40 transition-colors">
-                  {controlling === 'start' ? '...' : '▶ Start'}
-                </button>
-              ) : (
-                <>
-                  <button onClick={() => controlBackend('restart')} disabled={!!controlling}
-                    className="px-3 py-1.5 text-xs font-medium bg-orange-500 hover:bg-orange-600 text-white rounded-lg disabled:opacity-40 transition-colors">
-                    {controlling === 'restart' ? '...' : '↺ Restart'}
-                  </button>
-                  <button onClick={() => controlBackend('stop')} disabled={!!controlling}
-                    className="px-3 py-1.5 text-xs font-medium border border-red-300 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg disabled:opacity-40 transition-colors">
-                    {controlling === 'stop' ? '...' : '■ Stop'}
-                  </button>
-                </>
+      {/* Backend Status — controls live in Settings → Server tab */}
+      <Card icon="⚙️" title="Backend Process" subtitle="Python backend status (port 19000)">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className={`w-3 h-3 rounded-full flex-shrink-0 ${
+              backendStatus?.healthy ? 'bg-green-500' :
+              backendStatus?.running ? 'bg-yellow-400 animate-pulse' :
+              'bg-red-500'
+            }`} />
+            <div>
+              <p className="text-sm font-medium text-gray-900 dark:text-white">
+                {backendStatus?.healthy ? 'Running & healthy' :
+                 backendStatus?.running ? 'Running (not responding)' :
+                 backendStatus === null ? 'Checking...' : 'Stopped'}
+              </p>
+              {backendStatus?.pid && (
+                <p className="text-xs text-gray-400">PID {backendStatus.pid} · port 19000</p>
               )}
-              <button onClick={fetchBackendStatus} disabled={!!controlling}
-                className="px-3 py-1.5 text-xs border border-gray-300 dark:border-gray-600 text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800 rounded-lg disabled:opacity-40 transition-colors">
-                ↻
-              </button>
             </div>
           </div>
-          {!backendStatus?.healthy && backendStatus?.running === false && (
-            <p className="text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 px-3 py-2 rounded-lg">
-              Backend is down — most app features won't work until it's restarted. Click ▶ Start above.
-            </p>
-          )}
+          <a href="/settings?tab=server"
+            className="text-xs text-orange-600 hover:text-orange-700 font-medium">
+            Manage in ⚙️ Server →
+          </a>
         </div>
+        {!backendStatus?.running && backendStatus !== null && (
+          <p className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 px-3 py-2 rounded-lg mt-3">
+            Backend is down — go to <strong>Settings → ⚙️ Server</strong> to restart it.
+          </p>
+        )}
       </Card>
 
       {/* Remote / Tailscale status */}
