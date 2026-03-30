@@ -12,6 +12,7 @@ const AGENT_ICONS: Record<string, string> = {
 }
 
 interface Session { id: string; task: string; agent_type: string; model: string; status: string; created_at: string }
+interface Model { id: string; model_id: string; display_name?: string; provider_name?: string }
 
 export default function WorkbenchListPage() {
   const router = useRouter()
@@ -24,6 +25,8 @@ export default function WorkbenchListPage() {
   const [model, setModel] = useState('ollama/glm4:latest')
   const [creating, setCreating] = useState(false)
   const [projectId, setProjectId] = useState<string | null>(null)
+  const [models, setModels] = useState<Model[]>([])
+  const [loadingModels, setLoadingModels] = useState(false)
 
   const fetchSessions = useCallback(async () => {
     const res = await fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH }).then(r => r.json()).catch(() => ({ data: [] }))
@@ -41,6 +44,24 @@ export default function WorkbenchListPage() {
       setShowNew(true)
     }
   }, [searchParams])
+
+  // Fetch available models for the dropdown
+  useEffect(() => {
+    if (!showNew || models.length > 0) return
+    setLoadingModels(true)
+    fetch(`${API_BASE}/v1/models?limit=100`, { headers: AUTH })
+      .then(r => r.json())
+      .then(d => {
+        const list: Model[] = (d.data || []).filter((m: any) =>
+          m.capabilities?.chat !== false && !m.capabilities?.image_generation
+        )
+        setModels(list)
+        // Default to first chat-capable model
+        if (list.length > 0 && !model) setModel(list[0].model_id)
+      })
+      .catch(() => {})
+      .finally(() => setLoadingModels(false))
+  }, [showNew])
 
   const createSession = async () => {
     if (!task.trim() || creating) return
@@ -132,8 +153,33 @@ export default function WorkbenchListPage() {
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Model</label>
-                  <input value={model} onChange={e => setModel(e.target.value)}
-                    className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                  {loadingModels ? (
+                    <div className="w-full rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-2 text-sm text-gray-400">Loading models…</div>
+                  ) : models.length > 0 ? (
+                    <select value={model} onChange={e => setModel(e.target.value)}
+                      className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400">
+                      {Object.entries(
+                        models.reduce((acc, m) => {
+                          const p = m.provider_name || 'other'
+                          if (!acc[p]) acc[p] = []
+                          acc[p].push(m)
+                          return acc
+                        }, {} as Record<string, Model[]>)
+                      ).map(([provider, pModels]) => (
+                        <optgroup key={provider} label={provider.charAt(0).toUpperCase() + provider.slice(1)}>
+                          {pModels.map(m => (
+                            <option key={m.id} value={m.model_id}>
+                              {m.display_name || m.model_id}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ))}
+                    </select>
+                  ) : (
+                    <input value={model} onChange={e => setModel(e.target.value)}
+                      placeholder="e.g. llama3.1:8b"
+                      className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400" />
+                  )}
                 </div>
               </div>
             </div>
