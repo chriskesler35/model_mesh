@@ -363,75 +363,359 @@ function MessageBubble({ msg }: { msg: Message }) {
   )
 }
 
-// ─── Onboarding overlay ───────────────────────────────────────────────────────
-interface OnboardMsg { role: 'ai' | 'user'; content: string }
+// ─── Identity Wizard ──────────────────────────────────────────────────────────
+// Handles three modes:
+//   'firstrun'  — full first-run setup (soul + user + identity, 8 questions)
+//   'soul'      — re-configure AI soul/personality only
+//   'user'      — re-configure user profile only
+//   'identity'  — re-configure AI identity/name only
 
-const ONBOARD_QUESTIONS = [
-  (name?: string) => name ? `Hey! I'm Aria. What should I call you?` : `Hey! I'm Aria. What should I call you?`,
-  (name: string) => `Nice to meet you, ${name}! How do you like to work — casual and relaxed, or direct and straight to the point?`,
-  (_name: string) => `Got it. What are you mainly using me for? Work stuff, coding, creative projects, just chatting, or a mix of everything?`,
+export type WizardMode = 'firstrun' | 'soul' | 'user' | 'identity'
+
+interface WizardMsg { role: 'ai' | 'user'; content: string }
+
+interface WizardStep {
+  key: string
+  question: (answers: Record<string, string>) => string
+  placeholder: string
+}
+
+// ── Step definitions ──────────────────────────────────────────────────────────
+
+const FIRST_RUN_STEPS: WizardStep[] = [
+  // --- About you (user.md) ---
+  {
+    key: 'user_name',
+    question: () => `Hey! I'm your AI assistant. Before we get started, let me learn a bit about you.\n\nWhat's your name?`,
+    placeholder: 'Your name…',
+  },
+  {
+    key: 'user_tone',
+    question: (a) => `Nice to meet you, ${a.user_name}! How do you like to communicate — casual and relaxed, or direct and straight to the point?`,
+    placeholder: 'e.g. casual, direct, mix of both…',
+  },
+  {
+    key: 'user_use',
+    question: () => `What are you mainly going to use me for? (coding, writing, research, general chat, work tasks…)`,
+    placeholder: 'e.g. coding and work tasks…',
+  },
+  // --- About the AI (soul.md + identity.md) ---
+  {
+    key: 'ai_name',
+    question: (a) => `Got it! Now let's set up how I present myself.\n\nWhat do you want to call me? (default is "Aria")`,
+    placeholder: 'e.g. Aria, Max, Nova…',
+  },
+  {
+    key: 'ai_role',
+    question: (a) => `Great — I'll go by ${a.ai_name || 'Aria'}. How do you think of me? (e.g. assistant, co-pilot, coding partner, creative collaborator)`,
+    placeholder: 'e.g. coding partner, assistant…',
+  },
+  {
+    key: 'ai_personality',
+    question: () => `How should I come across? Pick words that fit. (e.g. warm and witty, professional and precise, casual and encouraging)`,
+    placeholder: 'e.g. warm and direct, a little snarky…',
+  },
+  {
+    key: 'ai_boundaries',
+    question: () => `Any topics or behaviours I should avoid? (or just say "none")`,
+    placeholder: 'e.g. none, keep things professional…',
+  },
+  {
+    key: 'ai_extra',
+    question: (a) => `Almost done! Anything else I should know — about you or about how you want ${a.ai_name || 'Aria'} to behave? (or say "that's it")`,
+    placeholder: 'Anything else…',
+  },
 ]
 
-function OnboardingOverlay({ aiName, onComplete }: { aiName: string; onComplete: () => void }) {
-  const [msgs, setMsgs] = useState<OnboardMsg[]>([{ role: 'ai', content: `Hey! I'm ${aiName}. What should I call you?` }])
-  const [step, setStep] = useState(0)
-  const [answers, setAnswers] = useState<string[]>([])
+const SOUL_STEPS: WizardStep[] = [
+  {
+    key: 'ai_name',
+    question: () => `Let's update my personality. What do you want to call me?`,
+    placeholder: 'e.g. Aria, Nova, Max…',
+  },
+  {
+    key: 'ai_role',
+    question: (a) => `How do you think of ${a.ai_name || 'me'}? (e.g. assistant, coding partner, creative collaborator)`,
+    placeholder: 'e.g. coding partner…',
+  },
+  {
+    key: 'ai_personality',
+    question: () => `How should I come across? (e.g. warm and witty, direct and precise, casual and snarky)`,
+    placeholder: 'e.g. warm and direct…',
+  },
+  {
+    key: 'ai_boundaries',
+    question: () => `Any topics or behaviours I should avoid? (or say "none")`,
+    placeholder: 'e.g. none…',
+  },
+]
+
+const USER_STEPS: WizardStep[] = [
+  {
+    key: 'user_name',
+    question: () => `Let's update your profile. What's your name?`,
+    placeholder: 'Your name…',
+  },
+  {
+    key: 'user_tone',
+    question: (a) => `How do you like to communicate, ${a.user_name}? (casual, direct, formal, mix…)`,
+    placeholder: 'e.g. direct and casual…',
+  },
+  {
+    key: 'user_use',
+    question: () => `What do you mainly use me for?`,
+    placeholder: 'e.g. coding, writing, research…',
+  },
+  {
+    key: 'user_extra',
+    question: (a) => `Anything else I should know about you, ${a.user_name}? (or say "nothing else")`,
+    placeholder: 'Anything else…',
+  },
+]
+
+const IDENTITY_STEPS: WizardStep[] = [
+  {
+    key: 'ai_name',
+    question: () => `What do you want to call me?`,
+    placeholder: 'e.g. Aria, Nova, Max…',
+  },
+  {
+    key: 'ai_role',
+    question: (a) => `How do you think of ${a.ai_name || 'me'}? Give me a one-liner. (e.g. "your AI wife", "coding co-pilot")`,
+    placeholder: 'e.g. AI co-pilot…',
+  },
+  {
+    key: 'ai_vibe',
+    question: () => `One sentence for my vibe / tagline?`,
+    placeholder: 'e.g. Warm but direct. Gets stuff done.',
+  },
+]
+
+// ── Content builders ──────────────────────────────────────────────────────────
+
+function buildSoulMd(a: Record<string, string>): string {
+  const name = a.ai_name || 'Aria'
+  const role = a.ai_role || 'AI assistant'
+  const personality = a.ai_personality || 'helpful and direct'
+  const boundaries = (!a.ai_boundaries || a.ai_boundaries.toLowerCase() === 'none') ? 'None specified.' : a.ai_boundaries
+  const extra = a.ai_extra && !['nothing', "that's it", 'nope', 'no'].some(s => a.ai_extra.toLowerCase().includes(s))
+    ? `\n## Extra Context\n${a.ai_extra}` : ''
+
+  return `# SOUL.md — ${name}'s Personality
+
+## Core Identity
+- **Name:** ${name}
+- **Role:** ${role}
+- **Personality:** ${personality}
+
+## Behaviour
+Be ${personality}. Skip filler phrases like "Great question!" — just do the thing. Have opinions. Be resourceful before asking.
+
+## Boundaries
+${boundaries}
+${extra}
+
+## Continuity
+Each session, read the user profile and memory files to pick up where you left off.
+`
+}
+
+function buildUserMd(a: Record<string, string>): string {
+  const name = a.user_name || 'User'
+  const tone = a.user_tone || 'direct'
+  const use = a.user_use || 'general tasks'
+  const extra = a.user_extra && !['nothing', 'nothing else', 'nope', 'no'].some(s => a.user_extra.toLowerCase().includes(s))
+    ? `\n## Notes\n${a.user_extra}` : ''
+
+  return `# USER.md — About the User
+
+- **Name:** ${name}
+- **What to call them:** ${name}
+- **Communication style:** ${tone}
+- **Primary use:** ${use}
+- **Onboarded:** ${new Date().toISOString()}
+${extra}
+`
+}
+
+function buildIdentityMd(a: Record<string, string>): string {
+  const name = a.ai_name || 'Aria'
+  const role = a.ai_role || 'AI assistant'
+  const vibe = a.ai_vibe || 'Helpful, direct, gets stuff done.'
+
+  return `# IDENTITY.md
+
+- **Name:** ${name}
+- **Creature:** ${role}
+- **Vibe:** ${vibe}
+`
+}
+
+// ── Wizard component ──────────────────────────────────────────────────────────
+
+function IdentityWizard({
+  mode,
+  aiName: initialAiName,
+  onComplete,
+  onDismiss,
+}: {
+  mode: WizardMode
+  aiName: string
+  onComplete: (aiName?: string) => void
+  onDismiss?: () => void
+}) {
+  const steps = mode === 'firstrun' ? FIRST_RUN_STEPS
+    : mode === 'soul' ? SOUL_STEPS
+    : mode === 'user' ? USER_STEPS
+    : IDENTITY_STEPS
+
+  const titles: Record<WizardMode, string> = {
+    firstrun: 'Welcome! Let\'s get set up',
+    soul: 'Update AI Personality',
+    user: 'Update Your Profile',
+    identity: 'Update AI Identity',
+  }
+  const subtitles: Record<WizardMode, string> = {
+    firstrun: `${steps.length} quick questions`,
+    soul: `${steps.length} questions`,
+    user: `${steps.length} questions`,
+    identity: `${steps.length} questions`,
+  }
+
+  const [msgs, setMsgs] = useState<WizardMsg[]>([{
+    role: 'ai',
+    content: steps[0].question({}),
+  }])
+  const [stepIdx, setStepIdx] = useState(0)
+  const [answers, setAnswers] = useState<Record<string, string>>({})
   const [input, setInput] = useState('')
   const [saving, setSaving] = useState(false)
+  const [done, setDone] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [msgs])
+  useEffect(() => { if (!saving) inputRef.current?.focus() }, [stepIdx, saving])
 
   const submit = async () => {
     const val = input.trim()
-    if (!val || saving) return
+    if (!val || saving || done) return
     setInput('')
 
-    const newMsgs: OnboardMsg[] = [...msgs, { role: 'user', content: val }]
-    const newAnswers = [...answers, val]
-    setMsgs(newMsgs)
+    const step = steps[stepIdx]
+    const newAnswers = { ...answers, [step.key]: val }
     setAnswers(newAnswers)
+    setMsgs(prev => [...prev, { role: 'user', content: val }])
 
-    if (step < 2) {
-      const nextStep = step + 1
-      setStep(nextStep)
+    const nextIdx = stepIdx + 1
+    if (nextIdx < steps.length) {
+      setStepIdx(nextIdx)
       setTimeout(() => {
-        setMsgs(prev => [...prev, { role: 'ai', content: ONBOARD_QUESTIONS[nextStep](newAnswers[0]) }])
-      }, 400)
+        setMsgs(prev => [...prev, { role: 'ai', content: steps[nextIdx].question(newAnswers) }])
+      }, 350)
     } else {
-      // All answered — finish up
-      const [name, tone, use] = newAnswers
+      // All answered — build files and save
+      const finalAiName = newAnswers.ai_name || initialAiName
+
       setTimeout(async () => {
-        setMsgs(prev => [...prev, { role: 'ai', content: `Perfect. Let's get to it, ${name}.` }])
+        const outro = mode === 'firstrun'
+          ? `Perfect. Everything's set up, ${newAnswers.user_name || 'friend'}. Let's go.`
+          : mode === 'user'
+          ? `Got it. Your profile is updated.`
+          : mode === 'soul'
+          ? `Done. I'll act accordingly from now on.`
+          : `Done. I'm ${finalAiName} now.`
+
+        setMsgs(prev => [...prev, { role: 'ai', content: outro }])
         setSaving(true)
-        const content = `# USER.md\n\n- **Name:** ${name}\n- **What to call them:** ${name}\n- **Tone preference:** ${tone}\n- **Primary use:** ${use}\n- **Onboarded:** ${new Date().toISOString()}\n`
-        await fetch(`${API_BASE}/v1/identity/user`, {
-          method: 'PUT',
-          headers: { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content }),
-        })
-        setTimeout(onComplete, 1500)
-      }, 400)
+
+        try {
+          if (mode === 'firstrun') {
+            await fetch(`${API_BASE}/v1/identity/setup`, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                soul: buildSoulMd(newAnswers),
+                user: buildUserMd(newAnswers),
+                identity: buildIdentityMd(newAnswers),
+              }),
+            })
+          } else if (mode === 'soul') {
+            await fetch(`${API_BASE}/v1/identity/soul`, {
+              method: 'PUT',
+              headers: { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ content: buildSoulMd(newAnswers) }),
+            })
+            // Also update identity if name changed
+            await fetch(`${API_BASE}/v1/identity/identity-file`, {
+              method: 'PUT',
+              headers: { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ content: buildIdentityMd(newAnswers) }),
+            })
+          } else if (mode === 'user') {
+            await fetch(`${API_BASE}/v1/identity/user`, {
+              method: 'PUT',
+              headers: { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ content: buildUserMd(newAnswers) }),
+            })
+          } else if (mode === 'identity') {
+            await fetch(`${API_BASE}/v1/identity/identity-file`, {
+              method: 'PUT',
+              headers: { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ content: buildIdentityMd(newAnswers) }),
+            })
+            // Keep soul in sync with any name change
+            await fetch(`${API_BASE}/v1/identity/soul`, {
+              method: 'PUT',
+              headers: { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ content: buildSoulMd(newAnswers) }),
+            })
+          }
+        } catch (e) {
+          console.error('Wizard save failed', e)
+        }
+
+        setDone(true)
+        setTimeout(() => onComplete(finalAiName), 1200)
+      }, 350)
     }
   }
 
+  const progress = Math.round(((stepIdx) / steps.length) * 100)
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/80 backdrop-blur-sm p-4">
-      <div className="w-full max-w-lg bg-white dark:bg-gray-900 rounded-2xl shadow-2xl flex flex-col overflow-hidden" style={{ maxHeight: '80vh' }}>
+      <div className="w-full max-w-lg bg-white dark:bg-gray-900 rounded-2xl shadow-2xl flex flex-col overflow-hidden" style={{ maxHeight: '85vh' }}>
+
         {/* Header */}
-        <div className="px-6 py-4 border-b border-gray-100 dark:border-gray-800 flex items-center gap-3">
-          <div className="w-9 h-9 rounded-full bg-orange-100 dark:bg-orange-900/40 flex items-center justify-center text-lg">✦</div>
-          <div>
-            <p className="text-sm font-semibold text-gray-900 dark:text-white">{aiName}</p>
-            <p className="text-xs text-gray-400">Quick setup — just 3 questions</p>
+        <div className="px-6 py-4 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-full bg-orange-100 dark:bg-orange-900/40 flex items-center justify-center text-lg">✦</div>
+            <div>
+              <p className="text-sm font-semibold text-gray-900 dark:text-white">{titles[mode]}</p>
+              <p className="text-xs text-gray-400">{subtitles[mode]}</p>
+            </div>
           </div>
+          {onDismiss && !saving && (
+            <button onClick={onDismiss} className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-400 text-lg leading-none">✕</button>
+          )}
         </div>
+
+        {/* Progress bar */}
+        {!done && (
+          <div className="h-1 bg-gray-100 dark:bg-gray-800">
+            <div
+              className="h-1 bg-orange-400 transition-all duration-500 ease-out"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+        )}
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3 min-h-0">
           {msgs.map((m, i) => (
             <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+              <div className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
                 m.role === 'ai'
                   ? 'bg-orange-50 dark:bg-orange-900/20 border border-orange-100 dark:border-orange-800 text-gray-800 dark:text-gray-100 rounded-tl-sm'
                   : 'bg-indigo-600 text-white rounded-tr-sm'
@@ -444,15 +728,16 @@ function OnboardingOverlay({ aiName, onComplete }: { aiName: string; onComplete:
         </div>
 
         {/* Input */}
-        {!saving && (
+        {!saving && !done && (
           <div className="px-4 py-3 border-t border-gray-100 dark:border-gray-800 flex gap-2">
             <input
+              ref={inputRef}
               autoFocus
               type="text"
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && submit()}
-              placeholder="Type your answer..."
+              placeholder={steps[stepIdx]?.placeholder || 'Your answer…'}
               className="flex-1 rounded-xl border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-white px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent"
             />
             <button
@@ -466,14 +751,19 @@ function OnboardingOverlay({ aiName, onComplete }: { aiName: string; onComplete:
             </button>
           </div>
         )}
-        {saving && (
+        {(saving || done) && (
           <div className="px-4 py-3 border-t border-gray-100 dark:border-gray-800 text-center text-sm text-gray-400">
-            Setting things up...
+            {done ? '✓ All saved!' : 'Saving…'}
           </div>
         )}
       </div>
     </div>
   )
+}
+
+// Legacy alias so nothing else breaks
+function OnboardingOverlay({ aiName, onComplete }: { aiName: string; onComplete: () => void }) {
+  return <IdentityWizard mode="firstrun" aiName={aiName} onComplete={onComplete} />
 }
 
 // ─── Main page ────────────────────────────────────────────────────────────────
@@ -498,6 +788,9 @@ export default function ChatPage() {
   const [userExists, setUserExists] = useState(true)   // assume true until checked
   const [aiName, setAiName] = useState('Aria')
 
+  // ── Identity wizard state ─────────────────────────────────────────────────
+  const [wizardMode, setWizardMode] = useState<WizardMode | null>(null)
+
   // ── Slash commands ────────────────────────────────────────────────────────
   const [slashOpen, setSlashOpen] = useState(false)
   const [slashFilter, setSlashFilter] = useState('')
@@ -506,7 +799,10 @@ export default function ChatPage() {
   const SLASH_COMMANDS = [
     { cmd: '/help',        hint: '',            desc: 'Show all available commands' },
     { cmd: '/reset',       hint: '',            desc: 'Clear conversation and start fresh' },
-    { cmd: '/onboard',     hint: '',            desc: 'Re-run identity onboarding setup' },
+    { cmd: '/onboard',     hint: '',            desc: 'Re-run full first-time setup wizard' },
+    { cmd: '/soul',        hint: '',            desc: 'Update AI personality & soul' },
+    { cmd: '/identity',    hint: '',            desc: 'Update AI name & identity' },
+    { cmd: '/user',        hint: '',            desc: 'Update your profile (name, tone, use)' },
     { cmd: '/persona',     hint: '<name>',      desc: 'Switch active persona' },
     { cmd: '/model',       hint: '<model-id>',  desc: 'Override model for this conversation' },
     { cmd: '/image',       hint: '<prompt>',    desc: 'Generate an image' },
@@ -549,7 +845,16 @@ export default function ChatPage() {
         setMessages([])
         break
       case '/onboard':
-        setUserExists(false)
+        setWizardMode('firstrun')
+        break
+      case '/soul':
+        setWizardMode('soul')
+        break
+      case '/identity':
+        setWizardMode('identity')
+        break
+      case '/user':
+        setWizardMode('user')
         break
       case '/pin':
         if (activeConvId) {
@@ -650,9 +955,10 @@ export default function ChatPage() {
   useEffect(() => {
     const init = async () => {
       try {
-        const [personasRes, convsRes] = await Promise.all([
+        const [personasRes, convsRes, identityRes] = await Promise.all([
           fetch(`${API_BASE}/v1/personas`, { headers: AUTH }).then(r => r.json()),
           fetch(`${API_BASE}/v1/conversations?limit=100&pinned_first=true`, { headers: AUTH }).then(r => r.json()),
+          fetch(`${API_BASE}/v1/identity/status`, { headers: AUTH }).then(r => r.json()),
         ])
 
         const ps: Persona[] = personasRes.data || []
@@ -664,14 +970,23 @@ export default function ChatPage() {
         const convs: Conversation[] = convsRes.data || []
         setConversations(convs)
 
-        // Restore from URL or last session
-        const sessionParam = searchParams?.get('session')
-        if (sessionParam && convs.find(c => c.id === sessionParam)) {
-          loadSession(sessionParam, convs)
+        // Set AI name from soul.md if available
+        if (identityRes.ai_name) setAiName(identityRes.ai_name)
+
+        // Show first-run wizard if setup is incomplete
+        if (identityRes.first_run) {
+          setWizardMode('firstrun')
         } else {
-          const lastId = localStorage.getItem('devforge_last_session')
-          if (lastId && convs.find(c => c.id === lastId)) {
-            loadSession(lastId, convs)
+          setUserExists(true)
+          // Restore from URL or last session
+          const sessionParam = searchParams?.get('session')
+          if (sessionParam && convs.find(c => c.id === sessionParam)) {
+            loadSession(sessionParam, convs)
+          } else {
+            const lastId = localStorage.getItem('devforge_last_session')
+            if (lastId && convs.find(c => c.id === lastId)) {
+              loadSession(lastId, convs)
+            }
           }
         }
       } catch (e) {
@@ -968,6 +1283,21 @@ export default function ChatPage() {
 
   return (
     <div className="flex h-full w-full overflow-hidden rounded-xl">
+
+      {/* Identity wizard — first-run and /soul /identity /user commands */}
+      {wizardMode && (
+        <IdentityWizard
+          mode={wizardMode}
+          aiName={aiName}
+          onComplete={(newAiName) => {
+            if (newAiName) setAiName(newAiName)
+            setWizardMode(null)
+            setUserExists(true)
+          }}
+          onDismiss={wizardMode !== 'firstrun' ? () => setWizardMode(null) : undefined}
+        />
+      )}
+
       {/* Sidebar */}
       <Sidebar
         conversations={filteredConvs}

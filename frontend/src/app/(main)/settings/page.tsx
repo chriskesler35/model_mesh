@@ -275,117 +275,152 @@ function IdentityTab() {
 
   const [soulContent, setSoulContent] = useState('')
   const [userContent, setUserContent] = useState('')
-  const [savingSoul, setSavingSoul] = useState(false)
-  const [savingUser, setSavingUser] = useState(false)
-  const [soulSaved, setSoulSaved] = useState(false)
-  const [userSaved, setUserSaved] = useState(false)
+  const [identityContent, setIdentityContent] = useState('')
+  const [saving, setSaving] = useState<Record<string, boolean>>({})
+  const [saved, setSaved] = useState<Record<string, boolean>>({})
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const fetchBoth = async () => {
+    const fetchAll = async () => {
       try {
-        const [soulRes, userRes] = await Promise.all([
+        const [soulRes, userRes, identityRes] = await Promise.all([
           fetch(`${API_BASE}/v1/identity/soul`, { headers: AUTH }).then(r => r.json()),
           fetch(`${API_BASE}/v1/identity/user`, { headers: AUTH }).then(r => r.json()),
+          fetch(`${API_BASE}/v1/identity/identity-file`, { headers: AUTH }).then(r => r.json()),
         ])
         setSoulContent(soulRes.content || '')
         setUserContent(userRes.content || '')
+        setIdentityContent(identityRes.content || '')
       } catch (e) {
         console.error('Failed to fetch identity files:', e)
       } finally {
         setLoading(false)
       }
     }
-    fetchBoth()
+    fetchAll()
   }, [])
 
-  const saveSoul = async () => {
-    setSavingSoul(true)
+  const saveFile = async (key: string, url: string, content: string) => {
+    setSaving(s => ({ ...s, [key]: true }))
     try {
-      await fetch(`${API_BASE}/v1/identity/soul`, {
-        method: 'PUT', headers: AUTH, body: JSON.stringify({ content: soulContent })
-      })
-      setSoulSaved(true)
-      setTimeout(() => setSoulSaved(false), 2500)
-    } finally { setSavingSoul(false) }
-  }
-
-  const saveUser = async () => {
-    setSavingUser(true)
-    try {
-      await fetch(`${API_BASE}/v1/identity/user`, {
-        method: 'PUT', headers: AUTH, body: JSON.stringify({ content: userContent })
-      })
-      setUserSaved(true)
-      setTimeout(() => setUserSaved(false), 2500)
-    } finally { setSavingUser(false) }
+      await fetch(url, { method: 'PUT', headers: AUTH, body: JSON.stringify({ content }) })
+      setSaved(s => ({ ...s, [key]: true }))
+      setTimeout(() => setSaved(s => ({ ...s, [key]: false })), 2500)
+    } finally {
+      setSaving(s => ({ ...s, [key]: false }))
+    }
   }
 
   const resetOnboarding = async () => {
+    if (!confirm('This will clear your profile and re-run setup next time you open chat. Continue?')) return
     await fetch(`${API_BASE}/v1/identity/user`, {
       method: 'PUT', headers: AUTH, body: JSON.stringify({ content: '' })
     })
+    await fetch(`${API_BASE}/v1/identity/soul`, {
+      method: 'PUT', headers: AUTH, body: JSON.stringify({ content: '' })
+    })
     setUserContent('')
-    alert('Onboarding reset — refresh the chat page to run setup again.')
+    setSoulContent('')
+    setIdentityContent('')
+    alert('Reset complete — refresh the chat page to run setup again.')
   }
 
   if (loading) return <div className="text-sm text-gray-500 py-8 text-center">Loading...</div>
 
+  const fileCard = (
+    key: string,
+    title: string,
+    description: string,
+    hint: string,
+    value: string,
+    onChange: (v: string) => void,
+    saveUrl: string,
+    rows: number = 10,
+  ) => (
+    <div className="bg-white shadow sm:rounded-lg overflow-hidden">
+      <div className="px-4 py-5 sm:p-6">
+        <div className="flex items-center justify-between mb-1">
+          <div>
+            <h3 className="text-base font-semibold text-gray-900">{title}</h3>
+            <p className="text-xs font-mono text-gray-400 mt-0.5">{hint}</p>
+          </div>
+          {saved[key] && <span className="text-xs text-green-600 font-medium animate-pulse">Saved!</span>}
+        </div>
+        <p className="text-sm text-gray-500 mb-3">{description}</p>
+        <textarea
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          rows={rows}
+          className="block w-full rounded-md border-gray-300 shadow-sm focus:border-orange-500 focus:ring-orange-500 font-mono text-sm"
+        />
+        <button
+          onClick={() => saveFile(key, saveUrl, value)}
+          disabled={saving[key]}
+          className="mt-3 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700 disabled:bg-gray-300"
+        >
+          {saving[key] ? 'Saving...' : `Save`}
+        </button>
+      </div>
+    </div>
+  )
+
   return (
     <div className="space-y-6">
-      {/* Soul */}
-      <div className="bg-white shadow sm:rounded-lg overflow-hidden">
-        <div className="px-4 py-5 sm:p-6">
-          <div className="flex items-center justify-between mb-1">
-            <h3 className="text-base font-semibold text-gray-900">AI Soul (SOUL.md)</h3>
-            {soulSaved && <span className="text-xs text-green-600 font-medium animate-pulse">Saved!</span>}
-          </div>
-          <p className="text-sm text-gray-500 mb-3">Defines your AI personality. Injected as context into every conversation.</p>
-          <textarea
-            value={soulContent}
-            onChange={e => setSoulContent(e.target.value)}
-            rows={12}
-            className="block w-full rounded-md border-gray-300 shadow-sm focus:border-orange-500 focus:ring-orange-500 font-mono text-sm"
-          />
-          <button
-            onClick={saveSoul}
-            disabled={savingSoul}
-            className="mt-3 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700 disabled:bg-gray-300"
-          >
-            {savingSoul ? 'Saving...' : 'Save Soul'}
-          </button>
-        </div>
+
+      <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-800">
+        <strong>Tip:</strong> You can also update these from chat using slash commands:{' '}
+        <code className="font-mono bg-blue-100 px-1 rounded">/soul</code>,{' '}
+        <code className="font-mono bg-blue-100 px-1 rounded">/identity</code>,{' '}
+        <code className="font-mono bg-blue-100 px-1 rounded">/user</code>.
+        Each starts a guided wizard to walk you through the questions.
       </div>
 
-      {/* User profile */}
-      <div className="bg-white shadow sm:rounded-lg overflow-hidden">
+      {fileCard(
+        'soul',
+        'AI Soul',
+        'Defines your AI\'s personality, tone, and behaviour. Injected as context into every conversation.',
+        'data/soul.md',
+        soulContent,
+        setSoulContent,
+        `${API_BASE}/v1/identity/soul`,
+        12,
+      )}
+
+      {fileCard(
+        'identity',
+        'AI Identity',
+        'Name, creature/role, and vibe tagline. Quick-reference identity card.',
+        'data/identity.md',
+        identityContent,
+        setIdentityContent,
+        `${API_BASE}/v1/identity/identity-file`,
+        5,
+      )}
+
+      {fileCard(
+        'user',
+        'Your Profile',
+        'What the AI knows about you — name, communication style, and primary use. Built during setup, editable anytime.',
+        'data/user.md',
+        userContent,
+        setUserContent,
+        `${API_BASE}/v1/identity/user`,
+        8,
+      )}
+
+      {/* Danger zone */}
+      <div className="bg-white shadow sm:rounded-lg overflow-hidden border border-red-100">
         <div className="px-4 py-5 sm:p-6">
-          <div className="flex items-center justify-between mb-1">
-            <h3 className="text-base font-semibold text-gray-900">Your Profile (USER.md)</h3>
-            {userSaved && <span className="text-xs text-green-600 font-medium animate-pulse">Saved!</span>}
-          </div>
-          <p className="text-sm text-gray-500 mb-3">What the AI knows about you. Built during onboarding, editable anytime.</p>
-          <textarea
-            value={userContent}
-            onChange={e => setUserContent(e.target.value)}
-            rows={8}
-            className="block w-full rounded-md border-gray-300 shadow-sm focus:border-orange-500 focus:ring-orange-500 font-mono text-sm"
-          />
-          <div className="mt-3 flex gap-3">
-            <button
-              onClick={saveUser}
-              disabled={savingUser}
-              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700 disabled:bg-gray-300"
-            >
-              {savingUser ? 'Saving...' : 'Save Profile'}
-            </button>
-            <button
-              onClick={resetOnboarding}
-              className="inline-flex items-center px-4 py-2 border border-red-300 text-sm font-medium rounded-md text-red-600 bg-white hover:bg-red-50"
-            >
-              Reset Onboarding
-            </button>
-          </div>
+          <h3 className="text-base font-semibold text-red-700 mb-1">Reset Setup</h3>
+          <p className="text-sm text-gray-500 mb-3">
+            Clears all three identity files. The setup wizard will run again next time you open chat.
+          </p>
+          <button
+            onClick={resetOnboarding}
+            className="inline-flex items-center px-4 py-2 border border-red-300 text-sm font-medium rounded-md text-red-600 bg-white hover:bg-red-50"
+          >
+            Reset Onboarding
+          </button>
         </div>
       </div>
     </div>
