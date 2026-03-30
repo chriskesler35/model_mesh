@@ -426,11 +426,149 @@ function IdentityTab() {
     </div>
   )
 }
+// ─── Server Tab ───────────────────────────────────────────────────────────────
+function ServerTab() {
+  const [info, setInfo] = useState<{ status: string; pid: number; python_version: string; uptime: string; started_at: string } | null>(null)
+  const [health, setHealth] = useState<any>(null)
+  const [loading, setLoading] = useState(true)
+  const [restarting, setRestarting] = useState(false)
+  const [restartMsg, setRestartMsg] = useState('')
+
+  const fetchInfo = useCallback(async () => {
+    try {
+      const [infoRes, healthRes] = await Promise.all([
+        fetch(`${API_BASE}/v1/system/info`, { headers: AUTH }).then(r => r.json()),
+        fetch(`${API_BASE}/v1/system/health`, { headers: AUTH }).then(r => r.json()),
+      ])
+      setInfo(infoRes)
+      setHealth(healthRes)
+    } catch {
+      setInfo(null)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { fetchInfo() }, [fetchInfo])
+
+  const restart = async () => {
+    if (!confirm('Restart the backend server? It will be unavailable for a few seconds.')) return
+    setRestarting(true)
+    setRestartMsg('Sending restart signal…')
+    try {
+      await fetch(`${API_BASE}/v1/system/restart`, { method: 'POST', headers: AUTH })
+    } catch { /* expected — process dies */ }
+
+    setRestartMsg('Restarting… waiting for server to come back online.')
+    // Poll until it responds again
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 1000))
+      try {
+        const res = await fetch(`${API_BASE}/health`, { headers: AUTH })
+        if (res.ok) {
+          setRestartMsg('✅ Server is back online!')
+          setRestarting(false)
+          fetchInfo()
+          return
+        }
+      } catch { /* still down, keep waiting */ }
+    }
+    setRestartMsg('⚠️ Server took longer than expected — check the terminal.')
+    setRestarting(false)
+  }
+
+  if (loading) return <div className="text-sm text-gray-500 py-8 text-center">Loading server info…</div>
+
+  return (
+    <div className="space-y-6">
+      {/* Info card */}
+      <div className="bg-white shadow sm:rounded-lg overflow-hidden">
+        <div className="px-4 py-5 sm:p-6">
+          <h3 className="text-base font-semibold text-gray-900 mb-4">Server Status</h3>
+          {info ? (
+            <div className="grid grid-cols-2 gap-4 text-sm">
+              <div>
+                <p className="text-xs text-gray-400">Status</p>
+                <p className="font-semibold text-green-600 capitalize">{info.status}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-400">Uptime</p>
+                <p className="font-semibold text-gray-800">{info.uptime}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-400">Process ID</p>
+                <p className="font-mono text-gray-700">{info.pid}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-400">Python</p>
+                <p className="font-mono text-gray-700">{info.python_version}</p>
+              </div>
+              <div className="col-span-2">
+                <p className="text-xs text-gray-400">Started</p>
+                <p className="font-mono text-gray-700">{new Date(info.started_at).toLocaleString()}</p>
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-red-500">⚠️ Could not reach backend</p>
+          )}
+        </div>
+      </div>
+
+      {/* Health card */}
+      {health && (
+        <div className="bg-white shadow sm:rounded-lg overflow-hidden">
+          <div className="px-4 py-5 sm:p-6">
+            <h3 className="text-base font-semibold text-gray-900 mb-3">Health</h3>
+            <div className="space-y-2 text-sm">
+              {Object.entries(health).map(([key, val]: any) => (
+                <div key={key} className="flex items-center justify-between">
+                  <span className="text-gray-600 capitalize">{key.replace(/_/g, ' ')}</span>
+                  <span className={`font-medium ${val === 'healthy' || val === true ? 'text-green-600' : val === 'unhealthy' || val === false ? 'text-red-500' : 'text-amber-500'}`}>
+                    {typeof val === 'boolean' ? (val ? '✓ Yes' : '✗ No') : String(val)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Restart card */}
+      <div className="bg-white shadow sm:rounded-lg overflow-hidden border border-amber-100">
+        <div className="px-4 py-5 sm:p-6">
+          <h3 className="text-base font-semibold text-gray-900 mb-1">Restart Backend</h3>
+          <p className="text-sm text-gray-500 mb-4">
+            Sends a graceful shutdown signal to the worker process. Since the server runs with{' '}
+            <code className="font-mono bg-gray-100 px-1 rounded text-xs">--reload</code>, it will
+            automatically restart in a few seconds. Useful after changing <code className="font-mono bg-gray-100 px-1 rounded text-xs">.env</code> or config files.
+          </p>
+          {restartMsg && (
+            <div className={`mb-4 text-sm px-3 py-2 rounded-lg ${restartMsg.startsWith('✅') ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}>
+              {restartMsg}
+            </div>
+          )}
+          <button
+            onClick={restart}
+            disabled={restarting || !info}
+            className="inline-flex items-center gap-2 px-4 py-2 border border-amber-300 text-sm font-medium rounded-md text-amber-700 bg-white hover:bg-amber-50 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {restarting ? (
+              <><span className="animate-spin">⟳</span> Restarting…</>
+            ) : (
+              <>⟳ Restart Backend</>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function SettingsPage() {
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [memoryFiles, setMemoryFiles] = useState<MemoryFile[]>([])
   const [loading, setLoading] = useState(true)
-  const [activeTab, setActiveTab] = useState<'identity' | 'profile' | 'memory' | 'preferences' | 'conversations' | 'apikeys' | 'remote'>('identity')
+  const [activeTab, setActiveTab] = useState<'identity' | 'profile' | 'memory' | 'preferences' | 'conversations' | 'apikeys' | 'remote' | 'server'>('identity')
   const [editingFile, setEditingFile] = useState<MemoryFile | null>(null)
   const [newFileName, setNewFileName] = useState('')
 
@@ -530,6 +668,7 @@ export default function SettingsPage() {
             ['conversations', 'Conversations', 'border-indigo-500 text-indigo-600'],
             ['apikeys', 'API Keys', 'border-indigo-500 text-indigo-600'],
             ['remote', '🌐 Remote', 'border-orange-500 text-orange-600'],
+            ['server', '⚙️ Server', 'border-gray-500 text-gray-700'],
           ] as const).map(([tab, label, activeClass]) => (
             <button
               key={tab}
@@ -736,6 +875,17 @@ export default function SettingsPage() {
             <p className="text-sm text-gray-500 mt-1">Manage provider API keys. Changes are applied immediately.</p>
           </div>
           <ApiKeysTab />
+        </div>
+      )}
+
+      {/* Server Tab */}
+      {activeTab === 'server' && (
+        <div>
+          <div className="mb-6">
+            <h2 className="text-lg font-semibold text-gray-900">Server</h2>
+            <p className="text-sm text-gray-500 mt-1">Backend process info, health status, and controls.</p>
+          </div>
+          <ServerTab />
         </div>
       )}
     </div>
