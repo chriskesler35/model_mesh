@@ -37,8 +37,10 @@ export default function WorkbenchListPage() {
   useEffect(() => { fetchSessions() }, [fetchSessions])
 
   // Auto-open new session modal if coming from a project
+  // Also check window.location as fallback (searchParams can be null on first render)
   useEffect(() => {
-    const pid = searchParams?.get('project')
+    const pid = searchParams?.get('project') ||
+      new URLSearchParams(typeof window !== 'undefined' ? window.location.search : '').get('project')
     if (pid) {
       setProjectId(pid)
       setShowNew(true)
@@ -137,6 +139,13 @@ export default function WorkbenchListPage() {
               </button>
             </div>
             <div className="px-6 py-5 space-y-4">
+              {projectId && (
+                <div className="flex items-center gap-2 px-3 py-2 bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-700 rounded-lg text-xs text-orange-700 dark:text-orange-300">
+                  <span>📁</span>
+                  <span>Project linked — files will be written to disk</span>
+                  <code className="ml-auto font-mono opacity-60">{projectId.slice(0,8)}…</code>
+                </div>
+              )}
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Task</label>
                 <textarea value={task} onChange={e => setTask(e.target.value)} rows={4}
