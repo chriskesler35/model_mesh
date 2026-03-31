@@ -1,6 +1,6 @@
 'use client'
 
-import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+import { API_BASE, API_KEY, AUTH_HEADERS } from '@/lib/config'
 
 import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'

@@ -1,4 +1,4 @@
-import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+import { API_BASE, API_KEY, AUTH_HEADERS } from '@/lib/config'
 
 // API_URL uses the shared dynamic config (auto-detects hostname for remote access)
 const API_URL = API_BASE
