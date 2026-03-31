@@ -1,37 +1,43 @@
 /**
- * Dynamic API base URL - auto-detects backend from browser hostname.
+ * Dynamic API configuration for DevForgeAI.
+ * 
+ * Auto-detects backend URL from the browser's current hostname.
+ * This means remote access (Tailscale, LAN) works automatically.
  *
- * When accessing DevForgeAI locally:    http://localhost:3001  → http://localhost:19000
- * When accessing via Tailscale/LAN:     http://100.106.217.99:3001 → http://100.106.217.99:19000
- * When accessing via custom domain:     http://forge.example.com:3001 → http://forge.example.com:19000
- *
- * Override with NEXT_PUBLIC_API_URL env var if needed.
+ * Override: set NEXT_PUBLIC_API_URL in .env.local
  */
+
+const BACKEND_PORT = '19000'
 
 /**
- * Lazy getter — recomputes on every access so it always reflects
- * the current browser hostname (important for remote/Tailscale access).
- * On the server side (SSR), falls back to localhost.
+ * Returns the backend API base URL. Always call this — don't cache the result
+ * at module scope, or Next.js will inline the SSR value.
  */
 export function getApiBase(): string {
-  if (process.env.NEXT_PUBLIC_API_URL) {
-    return process.env.NEXT_PUBLIC_API_URL
+  if (typeof window !== 'undefined') {
+    return `${window.location.protocol}//${window.location.hostname}:${BACKEND_PORT}`
   }
-  if (typeof window === 'undefined') {
-    return 'http://localhost:19000'
-  }
-  const { protocol, hostname } = window.location
-  return `${protocol}//${hostname}:19000`
+  return `http://localhost:${BACKEND_PORT}`
 }
 
-// For backward compat — most files import API_BASE as a const.
-// This is fine for client components (window exists at import time).
-// For SSR-sensitive code, call getApiBase() directly.
-export const API_BASE = typeof window !== 'undefined'
-  ? getApiBase()
-  : 'http://localhost:19000'
+/** Shorthand — use in 'use client' components. */
+export const API_KEY = 'modelmesh_local_dev_key'
 
-export const API_KEY = process.env.NEXT_PUBLIC_MODELMESH_API_KEY || 'modelmesh_local_dev_key'
+/** Build auth headers. Call at request time, not module scope. */
+export function getAuthHeaders(): Record<string, string> {
+  return {
+    'Authorization': `Bearer ${API_KEY}`,
+    'Content-Type': 'application/json',
+  }
+}
+
+// Legacy compat — these are evaluated at import time.
+// In 'use client' components, window exists so they work.
+// In SSR, they fall back to localhost (but SSR doesn't make API calls).
+export const API_BASE = typeof window !== 'undefined'
+  ? `${window.location.protocol}//${window.location.hostname}:${BACKEND_PORT}`
+  : `http://localhost:${BACKEND_PORT}`
+
 export const AUTH_HEADERS = {
   'Authorization': `Bearer ${API_KEY}`,
   'Content-Type': 'application/json',

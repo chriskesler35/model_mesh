@@ -1,7 +1,4 @@
-import { getApiBase, API_KEY, AUTH_HEADERS } from '@/lib/config'
-
-// Use lazy getter so the URL is always correct even if module loads during SSR
-const API_URL = getApiBase()
+import { getApiBase, API_KEY } from '@/lib/config'
 
 
 class ApiClient {
@@ -203,4 +200,11 @@ class ApiClient {
   }
 }
 
-export const api = new ApiClient(API_URL, API_KEY)
+// Lazy singleton — getApiBase() is called on first use, not at import time
+let _api: ApiClient | null = null
+export const api = new Proxy({} as ApiClient, {
+  get(_target, prop) {
+    if (!_api) _api = new ApiClient(getApiBase(), API_KEY)
+    return (_api as any)[prop]
+  }
+})
