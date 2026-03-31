@@ -120,21 +120,49 @@ class MemoryContext:
         return {f.name: f.content for f in files}
     
     async def build_context_prompt(self) -> str:
-        """Build a context prompt from all memory files."""
+        """Build a context prompt from all memory files + active preferences."""
         files = await self.get_memory_files()
-        
-        if not files:
-            return ""
         
         context_parts = []
         
         # Add each memory file as a section
-        for name, content in files.items():
-            # Remove the .md extension for display
-            section_name = name.replace(".md", "")
-            context_parts.append(f"\n## {section_name}\n{content}")
+        if files:
+            for name, content in files.items():
+                section_name = name.replace(".md", "")
+                context_parts.append(f"\n## {section_name}\n{content}")
         
-        return "\n".join(context_parts)
+        # Add active learned preferences
+        prefs_text = await self._build_preferences_context()
+        if prefs_text:
+            context_parts.append(prefs_text)
+        
+        return "\n".join(context_parts) if context_parts else ""
+
+    async def _build_preferences_context(self) -> str:
+        """Build context string from active learned preferences."""
+        try:
+            from app.models.preference import Preference
+            result = await self.db.execute(
+                select(Preference)
+                .where(Preference.is_active == True)
+                .order_by(Preference.category)
+            )
+            prefs = result.scalars().all()
+            if not prefs:
+                return ""
+
+            lines = ["\n## Learned Preferences"]
+            current_cat = None
+            for p in prefs:
+                if p.category != current_cat:
+                    current_cat = p.category
+                    lines.append(f"\n### {current_cat.title()}")
+                lines.append(f"- **{p.key}**: {p.value}")
+
+            return "\n".join(lines)
+        except Exception as e:
+            logger.debug(f"Could not load preferences: {e}")
+            return ""
     
     async def inject_context(self, system_prompt: str, persona_name: str = None) -> str:
         """Inject memory context into a system prompt."""

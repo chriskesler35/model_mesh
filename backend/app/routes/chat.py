@@ -458,11 +458,104 @@ async def _save_messages(db, conversation_id: str, user_content: str, assistant_
                     message_count=len(all_msgs),
                 ))
 
+                # Periodically detect preferences (every 10 messages)
+                if len(all_msgs) > 0 and len(all_msgs) % 10 == 0:
+                    _asyncio.create_task(_maybe_detect_preferences(msg_dicts[-20:]))
+
             except Exception as snap_err:
                 logger.warning(f"Snapshot write failed (non-fatal): {snap_err}")
 
     except Exception as e:
         logger.error(f"Failed to save messages: {e}")
+
+
+async def _maybe_detect_preferences(messages: list[dict]):
+    """Background task: use LLM to detect preferences from recent messages."""
+    try:
+        import json
+        from app.database import AsyncSessionLocal
+        from app.models.preference import Preference
+        from app.services.model_client import ModelClient
+        from app.models.model import Model as ModelORM
+        from app.models.provider import Provider as ProviderORM
+        from sqlalchemy import select as _sel
+
+        async with AsyncSessionLocal() as db:
+            # Use first active local model (cheap/fast)
+            result = await db.execute(
+                _sel(ModelORM, ProviderORM)
+                .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
+                .where(ProviderORM.name.ilike("%ollama%"))
+                .where(ModelORM.is_active == True)
+                .limit(1)
+            )
+            row = result.first()
+            if not row:
+                # Fallback to any active model
+                result = await db.execute(
+                    _sel(ModelORM, ProviderORM)
+                    .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
+                    .where(ModelORM.is_active == True)
+                    .limit(1)
+                )
+                row = result.first()
+            if not row:
+                return
+
+            model_orm, provider_orm = row
+            conv_text = "\n".join(f"{m.get('role','user').upper()}: {m.get('content','')}" for m in messages)
+
+            detect_prompt = (
+                "Analyze this conversation and extract user preferences the AI should remember. "
+                "Return ONLY a JSON array of objects with keys: key (snake_case), value (one sentence), "
+                "category (general|coding|communication|ui|workflow). "
+                "If none found, return []. Do NOT invent preferences."
+            )
+
+            client = ModelClient()
+            response = await client.call_model(
+                model=model_orm, provider=provider_orm,
+                messages=[
+                    {"role": "system", "content": detect_prompt + "\n\n" + conv_text},
+                    {"role": "user", "content": "Extract preferences. JSON array only."},
+                ],
+                stream=False, temperature=0.1, max_tokens=500,
+            )
+
+            raw = response.choices[0].message.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+            detected = json.loads(raw)
+            if not isinstance(detected, list):
+                return
+
+            # Check existing keys
+            existing = await db.execute(_sel(Preference.key))
+            existing_keys = {r[0] for r in existing.fetchall()}
+
+            saved = 0
+            for item in detected:
+                key = item.get("key", "").strip()
+                value = item.get("value", "").strip()
+                if not key or not value or key in existing_keys:
+                    continue
+                pref = Preference(
+                    id=str(uuid.uuid4()),
+                    key=key, value=value,
+                    category=item.get("category", "general").strip(),
+                    source="detected",
+                )
+                db.add(pref)
+                existing_keys.add(key)
+                saved += 1
+
+            if saved:
+                await db.commit()
+                logger.info(f"Auto-detected {saved} new preference(s) from chat")
+
+    except Exception as e:
+        logger.debug(f"Preference detection skipped: {e}")
 
 
 async def _update_conversation_meta(db, conversation_id: str, added_messages: int = 2):

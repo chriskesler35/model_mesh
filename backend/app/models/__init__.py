@@ -11,6 +11,7 @@ from app.models.user_profile import UserProfile, MemoryFile, PreferenceTracking,
 from app.models.agent import Agent
 from app.models.task import Task
 from app.models.workbench import WorkbenchSession
+from app.models.preference import Preference
 
 __all__ = [
     "Base", "BaseMixin", "Provider", "Model", "Persona",
