@@ -145,18 +145,26 @@ export default function AgentsPage() {
 
             <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
               <span>Max: {agent.max_iterations} iterations</span>
-              <Link
-                href={`/agents/${agent.id}`}
-                className="text-orange-600 hover:text-orange-700 dark:text-orange-400"
-              >
-                Configure →
-              </Link>
+              <div className="flex items-center gap-3">
+                <Link
+                  href={`/workbench?agent=${agent.id}&agent_type=${agent.agent_type}`}
+                  className="flex items-center gap-1 px-2 py-1 bg-orange-500 hover:bg-orange-600 text-white rounded text-xs font-medium transition-colors"
+                >
+                  🚀 Launch
+                </Link>
+                <Link
+                  href={`/agents/${agent.id}`}
+                  className="text-orange-600 hover:text-orange-700 dark:text-orange-400"
+                >
+                  Configure →
+                </Link>
                 <button
                   onClick={() => deleteAgent(agent.id, agent.name)}
-                  className="text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 text-sm"
+                  className="text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
                 >
                   Delete
                 </button>
+              </div>
             </div>
           </div>
         ))}

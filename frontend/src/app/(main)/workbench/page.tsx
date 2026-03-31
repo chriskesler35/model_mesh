@@ -36,15 +36,15 @@ export default function WorkbenchListPage() {
 
   useEffect(() => { fetchSessions() }, [fetchSessions])
 
-  // Auto-open new session modal if coming from a project
+  // Auto-open new session modal if coming from a project or agent
   // Also check window.location as fallback (searchParams can be null on first render)
   useEffect(() => {
-    const pid = searchParams?.get('project') ||
-      new URLSearchParams(typeof window !== 'undefined' ? window.location.search : '').get('project')
-    if (pid) {
-      setProjectId(pid)
-      setShowNew(true)
-    }
+    const params = new URLSearchParams(typeof window !== 'undefined' ? window.location.search : '')
+    const pid = searchParams?.get('project') || params.get('project')
+    const agentType = searchParams?.get('agent_type') || params.get('agent_type')
+    if (pid) setProjectId(pid)
+    if (agentType) setAgentType(agentType)
+    if (pid || agentType) setShowNew(true)
   }, [searchParams])
 
   // Fetch available models for the dropdown
