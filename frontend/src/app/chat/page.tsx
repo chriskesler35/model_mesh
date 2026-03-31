@@ -19,6 +19,11 @@ interface Message {
   created_at: string
   streaming?: boolean
   image_url?: string   // inline generated image
+  image_meta?: {       // generation metadata for display
+    provider: string
+    workflow: string
+    checkpoint: string
+  }
 }
 
 interface Conversation {
@@ -389,6 +394,23 @@ function MessageBubble({ msg }: { msg: Message }) {
               className="rounded-xl max-w-xs w-full cursor-zoom-in hover:opacity-90 transition-opacity border border-gray-200 dark:border-gray-700 shadow-sm"
               onClick={() => window.open(msg.image_url, '_blank')}
             />
+            {msg.image_meta && (
+              <div className="flex flex-wrap gap-1.5 px-0.5">
+                <span className="text-xs bg-purple-100 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 px-1.5 py-0.5 rounded">
+                  {msg.image_meta.provider}
+                </span>
+                {msg.image_meta.checkpoint && (
+                  <span className="text-xs bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 px-1.5 py-0.5 rounded truncate max-w-[180px]" title={msg.image_meta.checkpoint}>
+                    {msg.image_meta.checkpoint}
+                  </span>
+                )}
+                {msg.image_meta.workflow && (
+                  <span className="text-xs bg-blue-50 dark:bg-blue-900/20 text-blue-500 dark:text-blue-400 px-1.5 py-0.5 rounded">
+                    {msg.image_meta.workflow}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="flex gap-3 px-0.5">
               <a
                 href={msg.image_url}
@@ -1017,6 +1039,17 @@ export default function ChatPage() {
   const [showImageGen, setShowImageGen] = useState(false)
   const [imagePrompt, setImagePrompt] = useState('')
   const [generatingImage, setGeneratingImage] = useState(false)
+  const [imageProvider, setImageProvider] = useState<'gemini-imagen' | 'comfyui-local'>('comfyui-local')
+  const [imageNegPrompt, setImageNegPrompt] = useState('')
+
+  // Workflow / checkpoint state for ComfyUI
+  const [workflows, setWorkflows] = useState<Array<{id: string, name: string, description: string, category: string, default_checkpoint: string, default_size: string, sizes: string[], compatible_checkpoints: string[]}>>([])
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState('sdxl-standard')
+  const [comfyCheckpoints, setComfyCheckpoints] = useState<string[]>([])
+  const [comfyUnetModels, setComfyUnetModels] = useState<string[]>([])
+  const [selectedCheckpoint, setSelectedCheckpoint] = useState('')
+  const [selectedSize, setSelectedSize] = useState('1024x1024')
+  const [comfyStatus, setComfyStatus] = useState<'online' | 'offline' | 'checking'>('checking')
 
   // Track pending image tasks: taskId → assistantMessageId
   const pendingImageTasksRef = useRef<Map<string, string>>(new Map())
@@ -1024,6 +1057,40 @@ export default function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const searchTimer = useRef<ReturnType<typeof setTimeout>>()
+
+  // ── Fetch workflows + checkpoints when image gen opens ───────────────────
+  useEffect(() => {
+    if (!showImageGen) return
+    const load = async () => {
+      try {
+        const [wfRes, ckRes, stRes] = await Promise.all([
+          fetch(`${API_BASE}/v1/workflows`, { headers: AUTH }).then(r => r.json()).catch(() => ({ data: [] })),
+          fetch(`${API_BASE}/v1/comfyui/checkpoints`, { headers: AUTH }).then(r => r.json()).catch(() => ({ checkpoints: [], unet_models: [], status: 'offline' })),
+          fetch(`${API_BASE}/v1/comfyui/status`, { headers: AUTH }).then(r => r.json()).catch(() => ({ status: 'offline' })),
+        ])
+        setWorkflows(wfRes.data || [])
+        setComfyCheckpoints(ckRes.checkpoints || [])
+        setComfyUnetModels(ckRes.unet_models || [])
+        setComfyStatus(stRes.status === 'online' ? 'online' : 'offline')
+        // Set defaults from first workflow if available
+        if (wfRes.data?.length > 0) {
+          const wf = wfRes.data.find((w: any) => w.id === selectedWorkflowId) || wfRes.data[0]
+          if (!selectedCheckpoint) setSelectedCheckpoint(wf.default_checkpoint || '')
+          setSelectedSize(wf.default_size || '1024x1024')
+        }
+      } catch { /* silent */ }
+    }
+    load()
+  }, [showImageGen])
+
+  // When workflow changes, update defaults
+  useEffect(() => {
+    const wf = workflows.find(w => w.id === selectedWorkflowId)
+    if (wf) {
+      setSelectedCheckpoint(wf.default_checkpoint || '')
+      setSelectedSize(wf.default_size || '1024x1024')
+    }
+  }, [selectedWorkflowId, workflows])
 
   // ── Poll for image task completion → inject inline ────────────────────────
   useEffect(() => {
@@ -1319,7 +1386,16 @@ export default function ChatPage() {
     if (!prompt || generatingImage) return
     setGeneratingImage(true)
     setShowImageGen(false)
+
+    const provider = imageProvider
+    const wfId = provider === 'comfyui-local' ? selectedWorkflowId : undefined
+    const ckpt = provider === 'comfyui-local' ? selectedCheckpoint : undefined
+    const size = provider === 'comfyui-local' ? selectedSize : '1024x1024'
+    const negPrompt = provider === 'comfyui-local' ? imageNegPrompt : undefined
+    const wfName = workflows.find(w => w.id === wfId)?.name
+
     setImagePrompt('')
+    setImageNegPrompt('')
 
     // Add user + placeholder messages to local state
     const userMsg: Message = {
@@ -1332,9 +1408,12 @@ export default function ChatPage() {
     const assistantMsg: Message = {
       id: assistantId,
       role: 'assistant' as const,
-      content: '🎨 Generating image…',
+      content: `🎨 Generating image${wfName ? ` with ${wfName}` : ''}…`,
       streaming: true,
       created_at: new Date().toISOString(),
+      image_meta: provider === 'comfyui-local'
+        ? { provider: 'ComfyUI', workflow: wfName || wfId || '', checkpoint: ckpt || '' }
+        : { provider: 'Gemini', workflow: '', checkpoint: '' },
     }
     setMessages(prev => [...prev, userMsg, assistantMsg])
 
@@ -1373,12 +1452,17 @@ export default function ChatPage() {
         refreshConversations()
       } catch { /* non-fatal - image still generates */ }
 
-      const taskId = await submitTask('image_gen', {
+      const taskPayload: any = {
         prompt,
-        model: 'comfyui-local',
-        size: '1024x1024',
+        model: provider,
+        size,
         format: 'png',
-      }, convId || undefined)
+      }
+      if (wfId) taskPayload.workflow_id = wfId
+      if (ckpt) taskPayload.checkpoint = ckpt
+      if (negPrompt) taskPayload.negative_prompt = negPrompt
+
+      const taskId = await submitTask('image_gen', taskPayload, convId || undefined)
       // Map task → placeholder message so we can inject the image inline when done
       pendingImageTasksRef.current.set(taskId, assistantId)
     } catch (e: any) {
@@ -1619,88 +1703,174 @@ export default function ChatPage() {
 
         {/* Input bar */}
         <div className="flex-shrink-0 bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700 px-4 pt-3 pb-4 rounded-b-xl">
-          <div className="flex gap-2 items-end max-w-4xl mx-auto relative">
-            {/* Toggle: chat ↔ image mode */}
-            <button
-              onClick={() => setShowImageGen(prev => !prev)}
-              title={showImageGen ? 'Switch to chat' : 'Generate an image'}
-              className={`flex-shrink-0 p-2.5 rounded-xl border transition-colors ${
-                showImageGen
-                  ? 'bg-purple-100 dark:bg-purple-900/30 border-purple-300 dark:border-purple-600 text-purple-600 dark:text-purple-400'
-                  : 'border-gray-200 dark:border-gray-700 text-gray-400 hover:text-purple-500 hover:border-purple-300'
-              }`}
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                {showImageGen ? (
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                ) : (
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                )}
-              </svg>
-            </button>
-
-            {showImageGen ? (
-              /* Image mode input */
-              <>
-                <input
-                  type="text"
-                  value={imagePrompt}
-                  onChange={e => setImagePrompt(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && generateImage()}
-                  placeholder="Describe the image you want to create…"
-                  disabled={generatingImage}
-                  autoFocus
-                  className="flex-1 rounded-xl border border-purple-200 dark:border-purple-700 dark:bg-gray-800 dark:text-white px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent disabled:opacity-50"
-                />
-                <button
-                  onClick={generateImage}
-                  disabled={generatingImage || !imagePrompt.trim()}
-                  className="flex-shrink-0 px-4 py-2.5 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-200 dark:disabled:bg-gray-700 text-white disabled:text-gray-400 rounded-xl font-medium text-sm transition-colors"
-                >
-                  {generatingImage ? '…' : '🖼️'}
-                </button>
-              </>
-            ) : (
-              /* Chat mode input */
-              <>
-                <textarea
-                  ref={textareaRef}
-                  value={input}
-                  onChange={e => setInput(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  placeholder="Message… (Ctrl+Enter to send)"
-                  disabled={loading}
-                  rows={1}
-                  className="flex-1 resize-none rounded-xl border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-white px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent disabled:opacity-50 leading-relaxed"
-                  style={{ minHeight: '42px', maxHeight: '144px' }}
-                />
-                <button
-                  onClick={sendMessage}
-                  disabled={loading || !input.trim()}
-                  className="flex-shrink-0 px-4 py-2.5 bg-orange-500 hover:bg-orange-600 disabled:bg-gray-200 dark:disabled:bg-gray-700 text-white disabled:text-gray-400 rounded-xl font-medium text-sm transition-colors"
-                >
-                  {loading ? (
-                    <div className="flex gap-1 items-center">
-                      <div className="w-1.5 h-1.5 bg-white rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                      <div className="w-1.5 h-1.5 bg-white rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                      <div className="w-1.5 h-1.5 bg-white rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                    </div>
+          <div className="max-w-4xl mx-auto">
+            <div className="flex gap-2 items-end relative">
+              {/* Toggle: chat <-> image mode */}
+              <button
+                onClick={() => setShowImageGen(prev => !prev)}
+                title={showImageGen ? 'Switch to chat' : 'Generate an image'}
+                className={`flex-shrink-0 p-2.5 rounded-xl border transition-colors ${
+                  showImageGen
+                    ? 'bg-purple-100 dark:bg-purple-900/30 border-purple-300 dark:border-purple-600 text-purple-600 dark:text-purple-400'
+                    : 'border-gray-200 dark:border-gray-700 text-gray-400 hover:text-purple-500 hover:border-purple-300'
+                }`}
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  {showImageGen ? (
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                   ) : (
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-                    </svg>
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
                   )}
-                </button>
-              </>
-            )}
-          </div>
-          <div className="flex justify-between items-center mt-2 max-w-4xl mx-auto px-1">
-            <span className="text-xs text-gray-400">
-              {showImageGen ? 'Image mode — click 💬 to switch back' : (input.length > 0 ? `${input.length} chars` : '')}
-            </span>
-            <span className="text-xs text-gray-400">
-              {showImageGen ? 'Enter to generate' : 'Ctrl+Enter to send'}
-            </span>
+                </svg>
+              </button>
+
+              {showImageGen ? (
+                /* Image generation dialog */
+                <div className="flex-1 flex flex-col gap-2">
+                  {/* Row 1: Provider + ComfyUI status */}
+                  <div className="flex gap-2 items-center flex-wrap">
+                    <select
+                      value={imageProvider}
+                      onChange={e => setImageProvider(e.target.value as any)}
+                      className="text-xs rounded-lg border border-purple-200 dark:border-purple-700 dark:bg-gray-800 dark:text-gray-200 py-1.5 pl-2 pr-6 focus:ring-purple-400 focus:border-purple-400"
+                    >
+                      <option value="comfyui-local">ComfyUI (Local)</option>
+                      <option value="gemini-imagen">Gemini (Cloud)</option>
+                    </select>
+
+                    {imageProvider === 'comfyui-local' && (
+                      <>
+                        {/* Workflow */}
+                        <select
+                          value={selectedWorkflowId}
+                          onChange={e => setSelectedWorkflowId(e.target.value)}
+                          className="text-xs rounded-lg border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 py-1.5 pl-2 pr-6 focus:ring-purple-400 focus:border-purple-400"
+                        >
+                          {workflows.map(w => (
+                            <option key={w.id} value={w.id}>{w.name}</option>
+                          ))}
+                          {workflows.length === 0 && <option value="sdxl-standard">SDXL Standard</option>}
+                        </select>
+
+                        {/* Checkpoint */}
+                        <select
+                          value={selectedCheckpoint}
+                          onChange={e => setSelectedCheckpoint(e.target.value)}
+                          className="text-xs rounded-lg border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 py-1.5 pl-2 pr-6 focus:ring-purple-400 focus:border-purple-400 max-w-[200px]"
+                          title={selectedCheckpoint}
+                        >
+                          {(() => {
+                            const wf = workflows.find(w => w.id === selectedWorkflowId)
+                            const compatList = wf?.compatible_checkpoints || []
+                            // Merge compatible + all available from ComfyUI
+                            const allCkpts = [...new Set([...compatList, ...comfyCheckpoints, ...comfyUnetModels])]
+                            if (allCkpts.length === 0 && selectedCheckpoint) {
+                              return <option value={selectedCheckpoint}>{selectedCheckpoint}</option>
+                            }
+                            return allCkpts.map(c => (
+                              <option key={c} value={c}>{c}</option>
+                            ))
+                          })()}
+                        </select>
+
+                        {/* Size */}
+                        <select
+                          value={selectedSize}
+                          onChange={e => setSelectedSize(e.target.value)}
+                          className="text-xs rounded-lg border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 py-1.5 pl-2 pr-6 focus:ring-purple-400 focus:border-purple-400"
+                        >
+                          {(() => {
+                            const wf = workflows.find(w => w.id === selectedWorkflowId)
+                            const sizes = wf?.sizes || ['1024x1024']
+                            return sizes.map(s => (
+                              <option key={s} value={s}>{s}</option>
+                            ))
+                          })()}
+                        </select>
+
+                        {/* Status dot */}
+                        <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${
+                          comfyStatus === 'online' ? 'bg-green-400' : comfyStatus === 'checking' ? 'bg-yellow-400 animate-pulse' : 'bg-red-400'
+                        }`} title={`ComfyUI: ${comfyStatus}`} />
+                      </>
+                    )}
+                  </div>
+
+                  {/* Row 2: Prompt + negative prompt + generate button */}
+                  <div className="flex gap-2 items-end">
+                    <div className="flex-1 flex flex-col gap-1.5">
+                      <input
+                        type="text"
+                        value={imagePrompt}
+                        onChange={e => setImagePrompt(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && !e.shiftKey && generateImage()}
+                        placeholder="Describe the image you want to create..."
+                        disabled={generatingImage}
+                        autoFocus
+                        className="w-full rounded-xl border border-purple-200 dark:border-purple-700 dark:bg-gray-800 dark:text-white px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent disabled:opacity-50"
+                      />
+                      {imageProvider === 'comfyui-local' && (
+                        <input
+                          type="text"
+                          value={imageNegPrompt}
+                          onChange={e => setImageNegPrompt(e.target.value)}
+                          placeholder="Negative prompt (optional)"
+                          disabled={generatingImage}
+                          className="w-full rounded-lg border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 px-3 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-purple-300 focus:border-transparent disabled:opacity-50"
+                        />
+                      )}
+                    </div>
+                    <button
+                      onClick={() => generateImage()}
+                      disabled={generatingImage || !imagePrompt.trim()}
+                      className="flex-shrink-0 px-4 py-2.5 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-200 dark:disabled:bg-gray-700 text-white disabled:text-gray-400 rounded-xl font-medium text-sm transition-colors"
+                    >
+                      {generatingImage ? '...' : 'Generate'}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                /* Chat mode input */
+                <>
+                  <textarea
+                    ref={textareaRef}
+                    value={input}
+                    onChange={e => setInput(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="Message... (Ctrl+Enter to send)"
+                    disabled={loading}
+                    rows={1}
+                    className="flex-1 resize-none rounded-xl border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-white px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent disabled:opacity-50 leading-relaxed"
+                    style={{ minHeight: '42px', maxHeight: '144px' }}
+                  />
+                  <button
+                    onClick={sendMessage}
+                    disabled={loading || !input.trim()}
+                    className="flex-shrink-0 px-4 py-2.5 bg-orange-500 hover:bg-orange-600 disabled:bg-gray-200 dark:disabled:bg-gray-700 text-white disabled:text-gray-400 rounded-xl font-medium text-sm transition-colors"
+                  >
+                    {loading ? (
+                      <div className="flex gap-1 items-center">
+                        <div className="w-1.5 h-1.5 bg-white rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                        <div className="w-1.5 h-1.5 bg-white rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                        <div className="w-1.5 h-1.5 bg-white rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                      </div>
+                    ) : (
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                      </svg>
+                    )}
+                  </button>
+                </>
+              )}
+            </div>
+            <div className="flex justify-between items-center mt-2 px-1">
+              <span className="text-xs text-gray-400">
+                {showImageGen ? 'Image mode' : (input.length > 0 ? `${input.length} chars` : '')}
+              </span>
+              <span className="text-xs text-gray-400">
+                {showImageGen ? 'Enter to generate' : 'Ctrl+Enter to send'}
+              </span>
+            </div>
           </div>
         </div>
       </div>

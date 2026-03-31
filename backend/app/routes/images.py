@@ -7,6 +7,8 @@ import logging
 import asyncio
 import subprocess
 import sys
+import json
+import random
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -101,6 +103,8 @@ class ImageGenerationRequest(BaseModel):
     style: Optional[str] = None
     num_variations: int = 1
     negative_prompt: Optional[str] = None
+    workflow_id: Optional[str] = None  # which workflow template to use
+    checkpoint: Optional[str] = None   # which checkpoint/model to use
 
 
 class ImageResponse(BaseModel):
@@ -222,72 +226,109 @@ async def generate_with_gemini_imagen(prompt: str, api_key: str, size: str = "10
         raise HTTPException(status_code=500, detail=f"Image generation failed: {str(e)[:200]}")
 
 
-async def generate_with_comfyui(prompt: str, comfyui_url: str, size: str = "1024x1024", negative_prompt: str = None) -> dict:
-    """Generate image using ComfyUI local installation."""
-    
+_WORKFLOW_DIR = Path(__file__).parent.parent.parent.parent / "data" / "workflows"
+
+
+def _hydrate_workflow(workflow_template: dict, variables: dict) -> dict:
+    """Replace {{placeholder}} variables in a workflow template.
+
+    Handles string values (prompt, checkpoint) and converts width/height to ints.
+    Also randomises seed if it's 0.
+    """
+    raw = json.dumps(workflow_template)
+
+    # Replace string placeholders
+    for key, value in variables.items():
+        raw = raw.replace("{{" + key + "}}", str(value))
+
+    hydrated = json.loads(raw)
+
+    # Walk the tree and fix types: width/height must be int, seed must be int
+    for node_id, node in hydrated.items():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs", {})
+        for field in ("width", "height", "batch_size"):
+            if field in inputs and isinstance(inputs[field], str):
+                try:
+                    inputs[field] = int(inputs[field])
+                except ValueError:
+                    pass
+        if "seed" in inputs:
+            if inputs["seed"] == 0 or inputs["seed"] == "0":
+                inputs["seed"] = random.randint(1, 2**32 - 1)
+            elif isinstance(inputs["seed"], str):
+                try:
+                    inputs["seed"] = int(inputs["seed"])
+                except ValueError:
+                    inputs["seed"] = random.randint(1, 2**32 - 1)
+
+    return hydrated
+
+
+async def generate_with_comfyui(
+    prompt: str,
+    comfyui_url: str,
+    size: str = "1024x1024",
+    negative_prompt: str = None,
+    workflow_id: str = None,
+    checkpoint: str = None,
+) -> dict:
+    """Generate image using ComfyUI local installation.
+
+    If workflow_id is provided, loads the template from data/workflows/{workflow_id}.json
+    and hydrates it with the given parameters. Otherwise falls back to sdxl-standard
+    if it exists, or a minimal hardcoded SDXL workflow.
+    """
+
     width, height = map(int, size.split('x'))
-    
-    # Basic SDXL workflow for ComfyUI
-    workflow = {
-        "3": {
-            "class_type": "KSampler",
-            "inputs": {
-                "cfg": 7.5,
-                "denoise": 1.0,
-                "latent_image": ["5", 0],
-                "model": ["4", 0],
-                "negative": ["7", 0],
-                "positive": ["6", 0],
-                "sampler_name": "euler",
-                "scheduler": "normal",
-                "steps": 20,
-                "seed": 0
-            }
-        },
-        "4": {
-            "class_type": "CheckpointLoaderSimple",
-            "inputs": {
-                "ckpt_name": "sdxl_base.safetensors"  # Default, can be configured
-            }
-        },
-        "5": {
-            "class_type": "EmptyLatentImage",
-            "inputs": {
-                "batch_size": 1,
-                "height": height,
-                "width": width
-            }
-        },
-        "6": {
-            "class_type": "CLIPTextEncode",
-            "inputs": {
-                "clip": ["4", 1],
-                "text": prompt
-            }
-        },
-        "7": {
-            "class_type": "CLIPTextEncode",
-            "inputs": {
-                "clip": ["4", 1],
-                "text": negative_prompt or ""
-            }
-        },
-        "8": {
-            "class_type": "VAEDecode",
-            "inputs": {
-                "samples": ["3", 0],
-                "vae": ["4", 2]
-            }
-        },
-        "9": {
-            "class_type": "SaveImage",
-            "inputs": {
-                "filename_prefix": "modelmesh",
-                "images": ["8", 0]
-            }
+
+    # Try to load a workflow template
+    effective_workflow_id = workflow_id or "sdxl-standard"
+    template_path = _WORKFLOW_DIR / f"{effective_workflow_id}.json"
+    effective_checkpoint = checkpoint
+
+    if template_path.exists():
+        try:
+            template_data = json.loads(template_path.read_text(encoding="utf-8"))
+            if not effective_checkpoint:
+                effective_checkpoint = template_data.get("default_checkpoint", "")
+            workflow_json = template_data.get("workflow", {})
+            workflow = _hydrate_workflow(workflow_json, {
+                "prompt": prompt,
+                "negative_prompt": negative_prompt or "",
+                "width": str(width),
+                "height": str(height),
+                "checkpoint": effective_checkpoint,
+            })
+        except Exception as e:
+            logger.warning(f"Failed to load workflow template {effective_workflow_id}: {e}, using fallback")
+            workflow = None
+    else:
+        workflow = None
+
+    # Fallback: hardcoded minimal SDXL workflow
+    if workflow is None:
+        seed = random.randint(1, 2**32 - 1)
+        workflow = {
+            "3": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "cfg": 7.5, "denoise": 1.0,
+                    "latent_image": ["5", 0], "model": ["4", 0],
+                    "negative": ["7", 0], "positive": ["6", 0],
+                    "sampler_name": "euler", "scheduler": "normal",
+                    "steps": 20, "seed": seed,
+                }
+            },
+            "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": effective_checkpoint or "sdxl_base.safetensors"}},
+            "5": {"class_type": "EmptyLatentImage", "inputs": {"batch_size": 1, "height": height, "width": width}},
+            "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": prompt}},
+            "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": negative_prompt or ""}},
+            "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
+            "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "modelmesh", "images": ["8", 0]}},
         }
-    }
-    
+
     try:
         async with httpx.AsyncClient(timeout=180.0) as client:
             # Queue the prompt
@@ -435,9 +476,11 @@ async def generate_image(
                         request.prompt,
                         comfyui_url,
                         request.size,
-                        request.negative_prompt
+                        request.negative_prompt,
+                        request.workflow_id,
+                        request.checkpoint,
                     )
-                
+
             else:
                 raise HTTPException(
                     status_code=400,
@@ -453,7 +496,9 @@ async def generate_image(
                 "format": request.format,
                 "size": request.size,
                 "model": request.model,
-                "negative_prompt": request.negative_prompt
+                "negative_prompt": request.negative_prompt,
+                "workflow_id": request.workflow_id,
+                "checkpoint": request.checkpoint,
             }
             
             # Parse size

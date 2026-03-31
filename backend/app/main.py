@@ -49,6 +49,7 @@ from app.routes.tasks import router as tasks_router
 from app.routes.model_sync import router as model_sync_router
 from app.routes.context import router as context_router
 from app.routes.preferences import router as preferences_router
+from app.routes.workflows import router as workflows_router
 
 
 @asynccontextmanager
@@ -161,6 +162,7 @@ app.include_router(tasks_router)
 app.include_router(model_sync_router)
 app.include_router(context_router)
 app.include_router(preferences_router)
+app.include_router(workflows_router)
 
 
 @app.get("/")
