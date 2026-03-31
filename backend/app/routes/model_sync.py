@@ -83,14 +83,29 @@ PROVIDER_KEY_MAP = {
 # ---------------------------------------------------------------------------
 
 async def fetch_ollama_models(base_url: str) -> list[dict]:
-    """Return list of models from Ollama /api/tags."""
+    """Return list of models from Ollama /api/tags. Uses httpx if available, falls back to urllib."""
+    url = f"{base_url}/api/tags"
+
+    # Try httpx first (async, preferred)
     try:
+        import httpx
         async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{base_url}/api/tags")
+            r = await client.get(url)
             if r.status_code == 200:
                 return r.json().get("models", [])
+    except ImportError:
+        pass  # httpx not available, fall through to urllib
     except Exception as e:
-        logger.debug(f"Ollama unreachable at {base_url}: {e}")
+        logger.debug(f"Ollama httpx probe failed: {e}")
+
+    # Fallback: urllib (stdlib, always available)
+    try:
+        import urllib.request, json as _json
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            return _json.loads(resp.read()).get("models", [])
+    except Exception as e:
+        logger.debug(f"Ollama urllib probe failed: {e}")
+
     return []
 
 
