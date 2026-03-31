@@ -8,15 +8,17 @@ An intelligent AI development platform for multi-agent orchestration, image gene
 
 - **Chat** with local Ollama models and cloud providers (Anthropic, Google, OpenRouter, OpenAI) through a single interface
 - **Agents** that can code, research, design, review, plan, and write - each backed by a persona
-- **Image Generation** via Gemini Imagen or ComfyUI with gallery management and Telegram delivery
+- **Image Generation** via Gemini Imagen or ComfyUI with workflow selection, checkpoint picker, and gallery management
 - **Telegram Bot** - chat with your AI, generate images, and get notifications remotely
 - **Identity System** - the AI learns who you are (SOUL.md + USER.md) and injects context into every session
 - **Session Snapshots** - every conversation is snapshotted to disk; broken/compacted sessions recover automatically
 - **Rolling Memory** - MEMORY.md accumulates distilled insights across all conversations over time
-- **Live Workbench** - watch agents work in real-time, intervene mid-task
+- **Live Workbench** - watch agents work in real-time, intervene mid-task, replay past sessions
 - **Projects** - point agents at any directory; per-project venvs, git snapshots, rollbacks
 - **Development Methods** - BMAD, GSD, SuperPowers, GTrack (stackable)
-- **Settings UI** - manage API keys, providers, server health, restart backend, and more
+- **Learned Preferences** - the AI detects your preferences from chat and applies them automatically
+- **Remote Access** - access from any device on your network or Tailscale; frontend auto-detects the backend URL
+- **Settings UI** - manage API keys, providers, ComfyUI paths, image generation, server health, and more
 
 ---
 
@@ -206,6 +208,7 @@ pm2 restart all
 - Automatic image generation intent detection - just say "generate an image of..."
 - Multiple personas (each with its own model, system prompt, routing)
 - Conversation history with pin, keep-forever, rename, export
+- **Model override dropdown** - pick a specific model per-conversation (grouped by provider), independent of persona
 - **Slash commands:** `/reset` `/image` `/persona` `/model` `/pin` `/export` `/theme` `/method` `/help`
 
 ### Agents
@@ -215,9 +218,14 @@ pm2 restart all
 - Clicking a default agent opens it for editing; first save promotes it to a real DB record
 
 ### Image Generation
-- Gemini Imagen (cloud) or ComfyUI (local) with auto-fallback
-- Natural language intent detection - no slash command required
+- **Provider choice** - Gemini Imagen (cloud) or ComfyUI (local) with auto-fallback
+- **Workflow templates** - SDXL Standard, Flux Schnell (fast), Flux Dev (quality), SD 1.5 — or add your own
+- **Checkpoint picker** - auto-discovers models from your ComfyUI install, filtered by workflow compatibility
+- **Size & negative prompt** - per-workflow size presets, optional negative prompt
+- **Model info on images** - shows which provider, checkpoint, and workflow was used
+- Natural language intent detection - just say "generate an image of..."
 - Gallery with lightbox, variations, edit-with-AI, download, delete
+- Custom workflows: drop a `.json` file in `data/workflows/` and it appears automatically
 - **Telegram delivery** - generated images are automatically sent to your Telegram chats
 - Generate images directly from Telegram: `/image a golden retriever skiing`
 
@@ -227,10 +235,20 @@ pm2 restart all
 - Every 10 messages, key facts are distilled and appended to `data/context/MEMORY.md`
 - Long-term memory accumulates across all conversations over time
 
+### Learned Preferences
+- Preferences detected automatically from chat every 10 messages (uses local Ollama model)
+- Manual add, toggle on/off, delete from Settings → Preferences
+- Categories: general, coding, communication, UI, workflow
+- Active preferences injected into every chat context — the AI remembers what you like
+- "Detect from Chat" button to manually scan recent conversations
+- On-demand detection endpoint: `POST /v1/preferences/detect`
+
 ### Settings
 - **Identity** - Edit SOUL.md, USER.md, IDENTITY.md; reset onboarding
 - **API Keys** - Set/update/clear provider keys; hot-reloaded instantly (no restart needed)
 - **Memory Files** - USER.md, CONTEXT.md, PREFERENCES.md injected into every chat
+- **Preferences** - View, toggle, add, delete learned preferences; detect from chat
+- **Image Generation** - Configure ComfyUI path, Python executable, URL, GPU devices, default provider/workflow
 - **Conversations** - Browse and delete conversation history
 - **Remote** - Telegram bot config, Tailscale setup
 - **⚙️ Server** - Uptime, health checks, one-click backend restart
@@ -275,17 +293,40 @@ TELEGRAM_CHAT_IDS=
 
 ---
 
-## Remote Access (Tailscale)
+## Remote Access
+
+DevForgeAI automatically works from any device on your network. The frontend detects the backend URL from the browser's hostname — no config needed.
+
+### How it works
+
+| You access from | Frontend auto-connects to |
+|---|---|
+| `http://localhost:3001` | `http://localhost:19000` |
+| `http://192.168.1.50:3001` (LAN) | `http://192.168.1.50:19000` |
+| `http://100.x.x.x:3001` (Tailscale) | `http://100.x.x.x:19000` |
+
+Override: set `NEXT_PUBLIC_API_URL` in `frontend/.env.local` to hardcode a specific backend URL.
+
+### Tailscale setup
+
+If you use [Tailscale](https://tailscale.com) for remote access, add firewall rules (run as Administrator):
 
 ```powershell
-# Windows - allow Tailscale subnet only (run as Administrator)
-netsh advfirewall firewall add rule name="DevForgeAI API" dir=in action=allow protocol=tcp localport=19000 remoteip=100.64.0.0/10
-netsh advfirewall firewall add rule name="DevForgeAI Frontend" dir=in action=allow protocol=tcp localport=3001 remoteip=100.64.0.0/10
+# Windows - allow Tailscale subnet only
+netsh advfirewall firewall add rule name="DevForgeAI API (19000)" dir=in action=allow protocol=tcp localport=19000 remoteip=100.64.0.0/10
+netsh advfirewall firewall add rule name="DevForgeAI Frontend (3001)" dir=in action=allow protocol=tcp localport=3001 remoteip=100.64.0.0/10
 ```
 
-Access from any Tailnet device:
-- Frontend: `http://[tailscale-IP]:3001`
-- API: `http://[tailscale-IP]:19000`
+### LAN access
+
+For local network access without Tailscale, allow your LAN subnet:
+
+```powershell
+netsh advfirewall firewall add rule name="DevForgeAI API (LAN)" dir=in action=allow protocol=tcp localport=19000 remoteip=192.168.0.0/16
+netsh advfirewall firewall add rule name="DevForgeAI Frontend (LAN)" dir=in action=allow protocol=tcp localport=3001 remoteip=192.168.0.0/16
+```
+
+Then access from any device on your network: `http://[server-IP]:3001`
 
 ---
 
@@ -301,21 +342,24 @@ model_mesh/
 │   │   ├── migrate.py           # Idempotent column migrations (runs on startup)
 │   │   ├── models/              # SQLAlchemy ORM models
 │   │   ├── routes/              # API route handlers
-│   │   │   ├── chat.py          # Chat completions + snapshot hooks
+│   │   │   ├── chat.py          # Chat completions + snapshot hooks + preference detection
 │   │   │   ├── agents.py        # Agent CRUD + default agent recovery
-│   │   │   ├── images.py        # Image generation, gallery, variations
+│   │   │   ├── images.py        # Image generation, gallery, variations, ComfyUI workflows
+│   │   │   ├── workflows.py     # Workflow template listing + ComfyUI checkpoint discovery
+│   │   │   ├── preferences.py   # Learned preferences CRUD + LLM detection
+│   │   │   ├── app_settings.py  # App-level settings (ComfyUI paths, defaults)
 │   │   │   ├── model_sync.py    # Ollama + paid provider model sync
 │   │   │   ├── api_keys.py      # API key management (hot-reload)
-│   │   │   ├── settings.py      # Provider/model settings
 │   │   │   ├── context.py       # Snapshot recovery + MEMORY.md
 │   │   │   ├── system.py        # Health, restart, snapshots
 │   │   │   ├── telegram_bot.py  # Telegram polling bot + image delivery
 │   │   │   ├── identity.py      # SOUL.md / USER.md / IDENTITY.md
 │   │   │   └── ...
 │   │   └── services/
-│   │       ├── context_snapshot.py  # Snapshot writer + memory distillation
-│   │       ├── memory_context.py    # Memory files injection
-│   │       ├── ollama_sync.py       # Ollama model discovery
+│   │       ├── context_snapshot.py      # Snapshot writer + memory distillation
+│   │       ├── memory_context.py        # Memory files + preferences injection
+│   │       ├── app_settings_helper.py   # DB settings reader with env fallback
+│   │       ├── ollama_sync.py           # Ollama model discovery
 │   │       └── ...
 │   ├── requirements.txt
 │   └── .env                     # Your keys (never committed)
@@ -332,6 +376,7 @@ model_mesh/
     ├── soul.md                  # AI identity
     ├── user.md                  # Your profile
     ├── images/                  # Generated images
+    ├── workflows/               # ComfyUI workflow templates (.json)
     └── context/                 # Session snapshots + MEMORY.md
 ```
 
