@@ -876,8 +876,11 @@ export default function ChatPage() {
         break
       case '/image':
         if (arg) {
+          // Pre-fill prompt and auto-submit
           setImagePrompt(arg)
           setShowImageGen(true)
+          // Small delay to let state settle, then fire generation
+          setTimeout(() => generateImage(arg), 50)
         } else {
           setShowImageGen(true)
         }
