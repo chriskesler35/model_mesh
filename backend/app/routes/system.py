@@ -219,19 +219,42 @@ async def server_info():
 @router.post("/restart")
 async def restart_server():
     """
-    Trigger a graceful restart by touching app/main.py.
-    uvicorn --reload watches for file changes and will automatically
-    restart the worker — works reliably on Windows and Linux.
+    Restart the backend by spawning a new process and exiting the current one.
+    Works without --reload flag.
     """
-    logger.info("Restart requested via API — touching main.py to trigger reload watcher")
+    logger.info("Restart requested via API — spawning new process and exiting")
 
     async def _do_restart():
-        await asyncio.sleep(0.3)  # Let the HTTP response go out first
-        # Touch main.py — the watchfiles reloader will detect the change
-        # and restart the worker cleanly without killing the parent
-        main_py = Path(__file__).parent.parent / "main.py"
-        main_py.touch()
+        await asyncio.sleep(0.5)  # Let the HTTP response go out first
+
+        import subprocess
+
+        # Get the current Python executable and working directory
+        python_exe = sys.executable
+        backend_dir = str(Path(__file__).parent.parent.parent)
+
+        # Spawn a new uvicorn process (detached)
+        if sys.platform == "win32":
+            subprocess.Popen(
+                [python_exe, "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "19000"],
+                cwd=backend_dir,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            subprocess.Popen(
+                [python_exe, "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "19000"],
+                cwd=backend_dir,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        logger.info("New process spawned — exiting current process")
+        await asyncio.sleep(0.2)
+        os._exit(0)  # Hard exit — the new process takes over
 
     asyncio.create_task(_do_restart())
 
-    return JSONResponse({"status": "restarting", "message": "Reload triggered — server will be back in a few seconds."})
+    return JSONResponse({"status": "restarting", "message": "Server restarting — will be back in a few seconds."})
