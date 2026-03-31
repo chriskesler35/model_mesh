@@ -7,16 +7,16 @@ An intelligent AI development platform for multi-agent orchestration, image gene
 ## What It Does
 
 - **Chat** with local Ollama models and cloud providers (Anthropic, Google, OpenRouter, OpenAI) through a single interface
-- **Agents** that can code, research, design, review, plan, and write — each backed by a persona
+- **Agents** that can code, research, design, review, plan, and write - each backed by a persona
 - **Image Generation** via Gemini Imagen or ComfyUI with gallery management and Telegram delivery
-- **Telegram Bot** — chat with your AI, generate images, and get notifications remotely
-- **Identity System** — the AI learns who you are (SOUL.md + USER.md) and injects context into every session
-- **Session Snapshots** — every conversation is snapshotted to disk; broken/compacted sessions recover automatically
-- **Rolling Memory** — MEMORY.md accumulates distilled insights across all conversations over time
-- **Live Workbench** — watch agents work in real-time, intervene mid-task
-- **Projects** — point agents at any directory; per-project venvs, git snapshots, rollbacks
-- **Development Methods** — BMAD, GSD, SuperPowers, GTrack (stackable)
-- **Settings UI** — manage API keys, providers, server health, restart backend, and more
+- **Telegram Bot** - chat with your AI, generate images, and get notifications remotely
+- **Identity System** - the AI learns who you are (SOUL.md + USER.md) and injects context into every session
+- **Session Snapshots** - every conversation is snapshotted to disk; broken/compacted sessions recover automatically
+- **Rolling Memory** - MEMORY.md accumulates distilled insights across all conversations over time
+- **Live Workbench** - watch agents work in real-time, intervene mid-task
+- **Projects** - point agents at any directory; per-project venvs, git snapshots, rollbacks
+- **Development Methods** - BMAD, GSD, SuperPowers, GTrack (stackable)
+- **Settings UI** - manage API keys, providers, server health, restart backend, and more
 
 ---
 
@@ -24,7 +24,7 @@ An intelligent AI development platform for multi-agent orchestration, image gene
 
 | Layer | Tech |
 |---|---|
-| Backend | Python 3.11–3.13, FastAPI, SQLite (aiosqlite), LiteLLM |
+| Backend | Python 3.11-3.13, FastAPI, SQLite (aiosqlite), LiteLLM |
 | Frontend | Next.js 14, React 18, TailwindCSS |
 | AI Providers | Ollama (local), Anthropic, Google Gemini, OpenRouter, OpenAI |
 | Image Gen | Gemini Imagen, ComfyUI |
@@ -36,8 +36,8 @@ An intelligent AI development platform for multi-agent orchestration, image gene
 
 ### Prerequisites
 
-- **Python 3.11, 3.12, or 3.13** — https://www.python.org/downloads/
-- **Node.js 18+** — https://nodejs.org/
+- **Python 3.11, 3.12, or 3.13** - https://www.python.org/downloads/
+- **Node.js 18+** - https://nodejs.org/
 - At least one AI provider key, *or* [Ollama](https://ollama.ai) installed locally (no key needed)
 
 ### 1. Clone
@@ -72,14 +72,14 @@ cp .env.example .env   # or create backend/.env manually
 Minimum `.env` to get started:
 
 ```env
-# At least one of these — or just run Ollama locally
+# At least one of these - or just run Ollama locally
 ANTHROPIC_API_KEY=sk-ant-...
 GOOGLE_API_KEY=AIza...
 GEMINI_API_KEY=AIza...        # same key as GOOGLE_API_KEY works
 OPENROUTER_API_KEY=sk-or-v1-...
 OPENAI_API_KEY=sk-...
 
-# Ollama (if installed locally — no key needed)
+# Ollama (if installed locally - no key needed)
 OLLAMA_BASE_URL=http://localhost:11434
 
 # App auth key (change this in production)
@@ -99,7 +99,7 @@ npm install
 
 ### 5. Start
 
-**Option A — Background, no windows (recommended on Windows):**
+**Option A - Background, no windows (recommended on Windows):**
 ```
 # Install PM2 once
 npm install -g pm2
@@ -118,17 +118,23 @@ pm2 restart all       # restart both
 pm2 stop all          # stop both
 ```
 
-**Option B — Terminal windows (easier for development/debugging):**
+**Option B - start.bat (Windows, quick):**
+```
+start.bat
+```
+Checks if ports are free, launches backend + frontend in separate windows.
 
-Terminal 1 — Backend:
+**Option C - Terminal windows (easier for development/debugging):**
+
+Terminal 1 - Backend:
 ```bash
 cd backend
 venv\Scripts\activate          # Windows
 # source venv/bin/activate    # macOS/Linux
-python -m uvicorn app.main:app --host 0.0.0.0 --port 19000 --reload
+python -m uvicorn app.main:app --host 0.0.0.0 --port 19000
 ```
 
-Terminal 2 — Frontend:
+Terminal 2 - Frontend:
 ```bash
 cd frontend
 npm run dev
@@ -139,7 +145,7 @@ npm run dev
 - **App:** http://localhost:3001
 - **API docs:** http://localhost:19000/docs
 
-First launch runs an onboarding wizard — the AI asks a few questions to set up your identity profile.
+First launch runs an onboarding wizard - the AI asks a few questions to set up your identity profile.
 
 ---
 
@@ -168,15 +174,15 @@ pm2 restart all
 # If running in terminal windows: stop them (Ctrl+C) and start again
 ```
 
-**What happens automatically on restart — you don't need to do these:**
+**What happens automatically on restart - you don't need to do these:**
 - ✅ Database schema updates (new columns/tables added without losing data)
 - ✅ Ollama model re-sync (any newly pulled models appear automatically)
 - ✅ Default memory files created if missing
 
-**What is never touched by a pull — your data is safe:**
-- ✅ `backend/.env` — your API keys stay intact
-- ✅ `data/` folder — images, snapshots, identity files, database all preserved
-- ✅ `data/devforgeai.db` — your conversations, personas, agents stay untouched
+**What is never touched by a pull - your data is safe:**
+- ✅ `backend/.env` - your API keys stay intact
+- ✅ `data/` folder - images, snapshots, identity files, database all preserved
+- ✅ `data/devforgeai.db` - your conversations, personas, agents stay untouched
 
 **Common errors after a pull and how to fix them:**
 
@@ -197,22 +203,22 @@ pm2 restart all
 
 ### Chat
 - OpenAI-compatible chat completions with streaming
-- Automatic image generation intent detection — just say "generate an image of..."
+- Automatic image generation intent detection - just say "generate an image of..."
 - Multiple personas (each with its own model, system prompt, routing)
 - Conversation history with pin, keep-forever, rename, export
 - **Slash commands:** `/reset` `/image` `/persona` `/model` `/pin` `/export` `/theme` `/method` `/help`
 
 ### Agents
 - 7 built-in types: Coder, Researcher, Designer, Reviewer, Planner, Executor, Writer
-- Persona-based model resolution — persona prompt is the base, agent adds role-specific additions
+- Persona-based model resolution - persona prompt is the base, agent adds role-specific additions
 - Custom tools, iteration limits, memory toggle
 - Clicking a default agent opens it for editing; first save promotes it to a real DB record
 
 ### Image Generation
 - Gemini Imagen (cloud) or ComfyUI (local) with auto-fallback
-- Natural language intent detection — no slash command required
+- Natural language intent detection - no slash command required
 - Gallery with lightbox, variations, edit-with-AI, download, delete
-- **Telegram delivery** — generated images are automatically sent to your Telegram chats
+- **Telegram delivery** - generated images are automatically sent to your Telegram chats
 - Generate images directly from Telegram: `/image a golden retriever skiing`
 
 ### Session Snapshots & Memory
@@ -222,17 +228,17 @@ pm2 restart all
 - Long-term memory accumulates across all conversations over time
 
 ### Settings
-- **Identity** — Edit SOUL.md, USER.md, IDENTITY.md; reset onboarding
-- **API Keys** — Set/update/clear provider keys; hot-reloaded instantly (no restart needed)
-- **Memory Files** — USER.md, CONTEXT.md, PREFERENCES.md injected into every chat
-- **Conversations** — Browse and delete conversation history
-- **Remote** — Telegram bot config, Tailscale setup
-- **⚙️ Server** — Uptime, health checks, one-click backend restart
+- **Identity** - Edit SOUL.md, USER.md, IDENTITY.md; reset onboarding
+- **API Keys** - Set/update/clear provider keys; hot-reloaded instantly (no restart needed)
+- **Memory Files** - USER.md, CONTEXT.md, PREFERENCES.md injected into every chat
+- **Conversations** - Browse and delete conversation history
+- **Remote** - Telegram bot config, Tailscale setup
+- **⚙️ Server** - Uptime, health checks, one-click backend restart
 
 ### Providers & Models
 - On first startup: auto-discovers all locally installed Ollama models
 - Only adds paid provider models (Anthropic, Google, OpenRouter, OpenAI) when API keys are set
-- Add/update keys anytime in Settings → API Keys — models sync automatically
+- Add/update keys anytime in Settings → API Keys - models sync automatically
 - Manual sync: `POST /v1/models/sync`
 
 ---
@@ -253,7 +259,7 @@ OPENAI_API_KEY=
 # Local AI
 OLLAMA_BASE_URL=http://localhost:11434
 
-# Image Generation (optional — falls back to Gemini)
+# Image Generation (optional - falls back to Gemini)
 COMFYUI_URL=http://localhost:8188
 
 # App auth
@@ -263,7 +269,7 @@ MODELMESH_API_KEY=modelmesh_local_dev_key
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_IDS=
 
-# Redis (optional — for multi-turn conversation memory)
+# Redis (optional - for multi-turn conversation memory)
 # REDIS_URL=redis://localhost:6379
 ```
 
@@ -272,7 +278,7 @@ TELEGRAM_CHAT_IDS=
 ## Remote Access (Tailscale)
 
 ```powershell
-# Windows — allow Tailscale subnet only (run as Administrator)
+# Windows - allow Tailscale subnet only (run as Administrator)
 netsh advfirewall firewall add rule name="DevForgeAI API" dir=in action=allow protocol=tcp localport=19000 remoteip=100.64.0.0/10
 netsh advfirewall firewall add rule name="DevForgeAI Frontend" dir=in action=allow protocol=tcp localport=3001 remoteip=100.64.0.0/10
 ```
