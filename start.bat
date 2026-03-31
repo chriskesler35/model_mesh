@@ -1,28 +1,29 @@
 @echo off
 echo Starting DevForgeAI...
-cd /d "%~dp0"
+echo.
 
-echo Clearing ports 19000 and 3001...
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":19000 " ^| findstr LISTENING 2^>nul') do (
-    taskkill /F /PID %%a >nul 2>&1
+:: Check if backend is already running on port 19000
+netstat -ano | findstr ":19000 " | findstr "LISTENING" >nul 2>&1
+if %errorlevel% == 0 (
+    echo [WARN] Port 19000 already in use - backend already running, skipping.
+) else (
+    echo Starting backend...
+    start "DevForgeAI Backend" cmd /k "cd /d "G:\Model_Mesh\backend" && "G:\Model_Mesh\backend\venv\Scripts\python.exe" -m uvicorn app.main:app --host 0.0.0.0 --port 19000"
 )
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3001 " ^| findstr LISTENING 2^>nul') do (
-    taskkill /F /PID %%a >nul 2>&1
+
+:: Check if frontend is already running on port 3001
+netstat -ano | findstr ":3001 " | findstr "LISTENING" >nul 2>&1
+if %errorlevel% == 0 (
+    echo [WARN] Port 3001 already in use - frontend already running, skipping.
+) else (
+    echo Starting frontend...
+    timeout /t 3 /nobreak >nul
+    start "DevForgeAI Frontend" cmd /k "cd /d "G:\Model_Mesh\frontend" && npm run dev"
 )
-
-timeout /t 2 /nobreak >nul
-
-if not exist logs mkdir logs
-
-echo Starting PM2 processes...
-pm2 start ecosystem.config.js
 
 echo.
-echo DevForgeAI is running in the background.
-echo   Frontend: http://localhost:3001
-echo   Backend:  http://localhost:19000
+echo Backend:  http://localhost:19000
+echo Frontend: http://localhost:3001
+echo API Docs: http://localhost:19000/docs
 echo.
-echo To stop:    double-click stop.bat  or  pm2 stop all
-echo To restart: pm2 restart all
-echo To view logs: pm2 logs
 pause

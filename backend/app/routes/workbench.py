@@ -258,6 +258,12 @@ async def _real_agent_run(
     ]
 
     full_response = ""
+    input_tokens = 0
+    output_tokens = 0
+    llm_start = datetime.utcnow()
+    llm_success = True
+    llm_error = None
+
     try:
         stream = await client.call_model(
             model=model_orm,
@@ -289,19 +295,78 @@ async def _real_agent_run(
             except Exception:
                 pass
 
+            # Capture token usage from final chunk (LiteLLM streams usage on last chunk)
+            try:
+                usage = None
+                if hasattr(chunk, "usage") and chunk.usage:
+                    usage = chunk.usage
+                elif isinstance(chunk, dict) and chunk.get("usage"):
+                    usage = chunk["usage"]
+                if usage:
+                    input_tokens = getattr(usage, "prompt_tokens", 0) or (usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0)
+                    output_tokens = getattr(usage, "completion_tokens", 0) or (usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0)
+            except Exception:
+                pass
+
             if delta:
                 full_response += delta
                 chunk_count += 1
-                # Send a thinking pulse every 20 chunks so the UI shows progress
                 if chunk_count % 20 == 0:
                     _push(session_id, "agent_thought",
-                          thought=f"Writing… ({len(full_response)} chars so far)")
+                          thought=f"Writing. ({len(full_response)} chars so far)")
 
     except Exception as e:
         logger.error(f"LLM call failed in workbench session {session_id}: {e}")
+        llm_success = False
+        llm_error = str(e)
         _push(session_id, "error", message=f"LLM error: {str(e)}")
         await _db_update(session_id, status="failed", completed_at=datetime.utcnow())
         _push(session_id, "done", message="Session failed.", status="failed")
+
+    # Estimate tokens if stream did not return usage
+    if input_tokens == 0:
+        input_tokens = client.estimate_tokens(messages, model_orm)
+    if output_tokens == 0 and full_response:
+        try:
+            import tiktoken
+            enc = tiktoken.get_encoding("cl100k_base")
+            output_tokens = len(enc.encode(full_response))
+        except Exception:
+            output_tokens = len(full_response) // 4
+
+    # Estimate cost
+    estimated_cost = client.estimate_cost(input_tokens, output_tokens, model_orm)
+
+    # Write to request_logs so Stats picks it up
+    latency_ms = int((datetime.utcnow() - llm_start).total_seconds() * 1000)
+    try:
+        from app.models.request_log import RequestLog
+        async with AsyncSessionLocal() as db:
+            log = RequestLog(
+                model_id=str(model_orm.id),
+                provider_id=str(provider_orm.id),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                latency_ms=latency_ms,
+                estimated_cost=estimated_cost,
+                success=llm_success,
+                error_message=llm_error,
+            )
+            db.add(log)
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to write request_log for workbench session {session_id}: {e}")
+
+    # Persist token/cost + event log to workbench session record
+    await _db_update(
+        session_id,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        estimated_cost=estimated_cost,
+        events_log=_event_logs.get(session_id, []),
+    )
+
+    if not llm_success:
         return
 
     if _pending_messages.get(session_id) == "cancelled":
@@ -433,9 +498,15 @@ async def stream_session(session_id: str, request: Request):
     async def event_generator() -> AsyncGenerator[str, None]:
         queue = _queues.get(session_id)
         if not queue:
-            # Session exists in DB but not actively running — send final state
-            yield f"data: {json.dumps({'type':'init','payload':session.to_dict()})}\n\n"
-            yield f"data: {json.dumps({'type':'done','payload':{'message':'Session already completed','status':session.status}})}\n\n"
+            # Session exists in DB but not actively running - replay stored events
+            session_dict = session.to_dict()
+            yield f"data: {json.dumps({'type':'init','payload':session_dict})}\n\n"
+            for evt in (session_dict.get('events_log') or []):
+                yield f"data: {json.dumps(evt)}\n\n"
+                import asyncio as _asyncio; await _asyncio.sleep(0.02)
+            log_types = [e.get('type') for e in (session_dict.get('events_log') or [])]
+            if 'done' not in log_types:
+                yield f"data: {json.dumps({'type':'done','payload':{'message':'Session ' + session.status, 'status':session.status}})}\n\n"
             return
 
         yield f"data: {json.dumps({'type':'init','payload':session.to_dict()})}\n\n"

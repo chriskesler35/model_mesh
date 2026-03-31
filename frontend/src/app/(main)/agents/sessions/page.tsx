@@ -1,47 +1,27 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 
 const API_BASE = 'http://localhost:19000'
-const API_KEY = 'modelmesh_local_dev_key'
-const AUTH = { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json' }
+const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-interface AgentSession {
-  session_id: string
-  agent_type: string
+interface WorkbenchSession {
+  id: string
   task: string
+  agent_type: string
+  model: string | null
+  project_id: string | null
+  project_path: string | null
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  files: string[]
+  input_tokens: number | null
+  output_tokens: number | null
+  estimated_cost: number | null
   created_at: string
   started_at: string | null
   completed_at: string | null
-  result: string | null
-  error: string | null
-  progress: Record<string, any> | null
-}
-
-interface Agent {
-  id: string
-  name: string
-  agent_type: string
-  description: string
-  is_active: boolean
-}
-
-interface SystemHealth {
-  status: string
-  version: string
-  uptime_seconds: number
-  models_count: number
-  personas_count: number
-  agents_count: number
-  sessions_active: number
-  system: {
-    cpu_percent: number
-    memory_percent: number
-    disk_percent: number
-  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -66,24 +46,18 @@ function duration(start: string | null, end: string | null): string {
 }
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; dot: string; animate: boolean }> = {
-  pending:   { label: 'Pending',   color: 'text-yellow-600 bg-yellow-50 border-yellow-200',  dot: 'bg-yellow-400', animate: true },
-  running:   { label: 'Running',   color: 'text-blue-600 bg-blue-50 border-blue-200',        dot: 'bg-blue-500',   animate: true },
+  pending:   { label: 'Pending',   color: 'text-yellow-600 bg-yellow-50 border-yellow-200',  dot: 'bg-yellow-400', animate: true  },
+  running:   { label: 'Running',   color: 'text-blue-600 bg-blue-50 border-blue-200',        dot: 'bg-blue-500',   animate: true  },
   completed: { label: 'Done',      color: 'text-green-600 bg-green-50 border-green-200',     dot: 'bg-green-500',  animate: false },
   failed:    { label: 'Failed',    color: 'text-red-600 bg-red-50 border-red-200',           dot: 'bg-red-500',    animate: false },
   cancelled: { label: 'Cancelled', color: 'text-gray-500 bg-gray-50 border-gray-200',        dot: 'bg-gray-400',   animate: false },
 }
 
-const AGENT_TYPE_ICONS: Record<string, string> = {
-  coder:      '💻',
-  researcher: '🔍',
-  designer:   '🎨',
-  reviewer:   '🔎',
-  planner:    '📋',
-  executor:   '⚡',
-  writer:     '✍️',
+const AGENT_ICONS: Record<string, string> = {
+  coder: '💻', researcher: '🔍', designer: '🎨',
+  reviewer: '🔎', planner: '📋', executor: '⚡', writer: '✍️',
 }
 
-// ─── Status badge ─────────────────────────────────────────────────────────────
 function StatusBadge({ status }: { status: string }) {
   const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.pending
   return (
@@ -94,8 +68,9 @@ function StatusBadge({ status }: { status: string }) {
   )
 }
 
-// ─── Stat card ────────────────────────────────────────────────────────────────
-function StatCard({ label, value, sub, color = 'text-gray-900' }: { label: string; value: string | number; sub?: string; color?: string }) {
+function StatCard({ label, value, sub, color = 'text-gray-900' }: {
+  label: string; value: string | number; sub?: string; color?: string
+}) {
   return (
     <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 px-5 py-4">
       <p className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">{label}</p>
@@ -106,23 +81,42 @@ function StatCard({ label, value, sub, color = 'text-gray-900' }: { label: strin
 }
 
 // ─── Session card ─────────────────────────────────────────────────────────────
-function SessionCard({ session, onCancel, onRetry }: {
-  session: AgentSession
+function SessionCard({ session, onCancel, onDelete }: {
+  session: WorkbenchSession
   onCancel: (id: string) => void
-  onRetry: (session: AgentSession) => void
+  onDelete: (id: string) => void
 }) {
-  const [expanded, setExpanded] = useState(false)
-  const icon = AGENT_TYPE_ICONS[session.agent_type?.toLowerCase()] || '🤖'
+  const router = useRouter()
+  const icon = AGENT_ICONS[session.agent_type?.toLowerCase()] || '🤖'
   const isActive = session.status === 'running' || session.status === 'pending'
 
+  const costStr = session.estimated_cost != null
+    ? session.estimated_cost < 0.001
+      ? `<$0.001`
+      : `$${session.estimated_cost.toFixed(4)}`
+    : null
+
+  const tokenStr = (session.input_tokens || session.output_tokens)
+    ? `${((session.input_tokens || 0) + (session.output_tokens || 0)).toLocaleString()} tokens`
+    : null
+
   return (
-    <div className={`bg-white dark:bg-gray-800 rounded-xl border ${isActive ? 'border-blue-200 dark:border-blue-700 shadow-sm shadow-blue-100 dark:shadow-none' : 'border-gray-200 dark:border-gray-700'} overflow-hidden transition-all`}>
+    <div
+      onClick={() => router.push(`/workbench/${session.id}`)}
+      className={`bg-white dark:bg-gray-800 rounded-xl border cursor-pointer transition-all hover:shadow-md ${
+        isActive
+          ? 'border-blue-200 dark:border-blue-700 shadow-sm shadow-blue-100 dark:shadow-none'
+          : 'border-gray-200 dark:border-gray-700 hover:border-gray-300'
+      }`}
+    >
       <div className="px-5 py-4">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-start gap-3 min-w-0">
-            {/* Icon + pulse ring for active */}
+            {/* Icon */}
             <div className="relative flex-shrink-0 mt-0.5">
-              <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-xl ${isActive ? 'bg-blue-50 dark:bg-blue-900/30' : 'bg-gray-50 dark:bg-gray-700'}`}>
+              <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-xl ${
+                isActive ? 'bg-blue-50 dark:bg-blue-900/30' : 'bg-gray-50 dark:bg-gray-700'
+              }`}>
                 {icon}
               </div>
               {isActive && (
@@ -133,197 +127,75 @@ function SessionCard({ session, onCancel, onRetry }: {
               )}
             </div>
 
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-sm font-semibold text-gray-900 dark:text-white capitalize">{session.agent_type}</span>
+                <span className="text-sm font-semibold text-gray-900 dark:text-white capitalize">
+                  {session.agent_type}
+                </span>
                 <StatusBadge status={session.status} />
+                {session.model && (
+                  <span className="text-xs text-gray-400 font-mono truncate max-w-[160px]">
+                    {session.model.split('/').pop()}
+                  </span>
+                )}
               </div>
               <p className="text-sm text-gray-600 dark:text-gray-300 mt-0.5 line-clamp-2">{session.task}</p>
-              <div className="flex items-center gap-3 mt-1.5 text-xs text-gray-400">
-                <span>Started {timeAgo(session.created_at)}</span>
-                {(session.status === 'running' || session.status === 'completed') && (
+              <div className="flex items-center gap-3 mt-1.5 text-xs text-gray-400 flex-wrap">
+                <span>{timeAgo(session.created_at)}</span>
+                {session.started_at && (
                   <span>Duration: {duration(session.started_at, session.completed_at)}</span>
                 )}
+                {session.files.length > 0 && (
+                  <span className="text-green-600">📄 {session.files.length} file{session.files.length !== 1 ? 's' : ''}</span>
+                )}
+                {tokenStr && <span>{tokenStr}</span>}
+                {costStr && <span className="text-orange-500">{costStr}</span>}
               </div>
             </div>
           </div>
 
-          {/* Actions */}
-          <div className="flex items-center gap-2 flex-shrink-0">
+          {/* Actions — stop propagation so clicks don't navigate */}
+          <div className="flex items-center gap-2 flex-shrink-0" onClick={e => e.stopPropagation()}>
             {isActive && (
               <button
-                onClick={() => onCancel(session.session_id)}
+                onClick={() => onCancel(session.id)}
                 className="px-3 py-1.5 text-xs font-medium rounded-lg border border-red-200 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
               >
                 Cancel
               </button>
             )}
-            {session.status === 'failed' && (
+            {!isActive && (
               <button
-                onClick={() => onRetry(session)}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg border border-orange-200 text-orange-600 hover:bg-orange-50 transition-colors"
+                onClick={() => onDelete(session.id)}
+                className="p-1.5 rounded-lg text-gray-300 hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                title="Delete session"
               >
-                Retry
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
               </button>
             )}
-            <button
-              onClick={() => setExpanded(e => !e)}
-              className="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-400 transition-colors"
-            >
-              <svg className={`w-4 h-4 transition-transform ${expanded ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-              </svg>
-            </button>
+            <svg className="w-4 h-4 text-gray-300 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
           </div>
         </div>
 
-        {/* Progress bar for running sessions */}
-        {session.status === 'running' && (
-          <div className="mt-3">
-            <div className="w-full bg-gray-100 dark:bg-gray-700 rounded-full h-1.5 overflow-hidden">
-              <div className="bg-blue-500 h-full rounded-full animate-pulse" style={{ width: `${session.progress?.percent ?? 50}%` }} />
-            </div>
+        {/* File list for completed sessions */}
+        {session.files.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {session.files.slice(0, 6).map(f => (
+              <span key={f} className="text-xs font-mono px-2 py-0.5 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 rounded">
+                {f}
+              </span>
+            ))}
+            {session.files.length > 6 && (
+              <span className="text-xs px-2 py-0.5 bg-gray-100 dark:bg-gray-700 text-gray-400 rounded">
+                +{session.files.length - 6} more
+              </span>
+            )}
           </div>
         )}
-      </div>
-
-      {/* Expanded detail */}
-      {expanded && (
-        <div className="border-t border-gray-100 dark:border-gray-700 px-5 py-4 bg-gray-50 dark:bg-gray-900/50 space-y-3">
-          <div>
-            <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Session ID</p>
-            <code className="text-xs font-mono text-gray-600 dark:text-gray-400">{session.session_id}</code>
-          </div>
-
-          {session.progress && Object.keys(session.progress).length > 0 && (
-            <div>
-              <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Progress</p>
-              <pre className="text-xs text-gray-600 dark:text-gray-400 bg-white dark:bg-gray-800 rounded-lg p-2 overflow-x-auto">
-                {JSON.stringify(session.progress, null, 2)}
-              </pre>
-            </div>
-          )}
-
-          {session.result && (
-            <div>
-              <p className="text-xs font-medium text-green-600 uppercase tracking-wider mb-1">Result</p>
-              <div className="text-sm text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 rounded-lg p-3 whitespace-pre-wrap max-h-48 overflow-y-auto">
-                {session.result}
-              </div>
-            </div>
-          )}
-
-          {session.error && (
-            <div>
-              <p className="text-xs font-medium text-red-600 uppercase tracking-wider mb-1">Error</p>
-              <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 rounded-lg p-3 font-mono">
-                {session.error}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ─── New session modal ────────────────────────────────────────────────────────
-function NewSessionModal({ agents, onClose, onCreate }: {
-  agents: Agent[]
-  onClose: () => void
-  onCreate: (session: AgentSession) => void
-}) {
-  const [agentType, setAgentType] = useState(agents[0]?.agent_type || 'coder')
-  const [task, setTask] = useState('')
-  const [model, setModel] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState('')
-
-  const submit = async () => {
-    if (!task.trim()) return
-    setSubmitting(true)
-    setError('')
-    try {
-      const res = await fetch(`${API_BASE}/v1/remote/sessions`, {
-        method: 'POST',
-        headers: AUTH,
-        body: JSON.stringify({ agent_type: agentType, task: task.trim(), model: model || undefined }),
-      })
-      if (!res.ok) throw new Error(await res.text())
-      const data = await res.json()
-      onCreate(data)
-      onClose()
-    } catch (e: any) {
-      setError(e.message)
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-      <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-2xl overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
-          <h2 className="text-base font-semibold text-gray-900 dark:text-white">New Agent Session</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-        <div className="px-6 py-5 space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Agent Type</label>
-            <select
-              value={agentType}
-              onChange={e => setAgentType(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
-            >
-              {agents.map(a => (
-                <option key={a.id} value={a.agent_type}>
-                  {AGENT_TYPE_ICONS[a.agent_type] || '🤖'} {a.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Task</label>
-            <textarea
-              value={task}
-              onChange={e => setTask(e.target.value)}
-              rows={4}
-              placeholder="Describe what you want this agent to do..."
-              className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 resize-none"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-              Model <span className="text-gray-400 font-normal">(optional)</span>
-            </label>
-            <input
-              value={model}
-              onChange={e => setModel(e.target.value)}
-              placeholder="e.g. ollama/glm4:latest"
-              className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
-            />
-          </div>
-          {error && <p className="text-sm text-red-500">{error}</p>}
-        </div>
-        <div className="px-6 py-4 border-t border-gray-100 dark:border-gray-800 flex gap-3 justify-end">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-sm font-medium rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={submit}
-            disabled={!task.trim() || submitting}
-            className="px-4 py-2 text-sm font-medium rounded-lg bg-orange-500 hover:bg-orange-600 disabled:bg-gray-200 dark:disabled:bg-gray-700 text-white disabled:text-gray-400 transition-colors"
-          >
-            {submitting ? 'Launching...' : 'Launch Agent'}
-          </button>
-        </div>
       </div>
     </div>
   )
@@ -331,77 +203,61 @@ function NewSessionModal({ agents, onClose, onCreate }: {
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function AgentSessionsPage() {
-  const [sessions, setSessions] = useState<AgentSession[]>([])
-  const [agents, setAgents] = useState<Agent[]>([])
-  const [health, setHealth] = useState<SystemHealth | null>(null)
+  const router = useRouter()
+  const [sessions, setSessions] = useState<WorkbenchSession[]>([])
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState<string>('all')
-  const [showNewModal, setShowNewModal] = useState(false)
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
 
-  const fetchAll = useCallback(async () => {
+  const fetchSessions = useCallback(async () => {
     try {
-      const [sessionsRes, agentsRes, healthRes] = await Promise.all([
-        fetch(`${API_BASE}/v1/remote/sessions?limit=50`, { headers: AUTH }).then(r => r.json()).catch(() => []),
-        fetch(`${API_BASE}/v1/agents`, { headers: AUTH }).then(r => r.json()).catch(() => ({ data: [] })),
-        fetch(`${API_BASE}/v1/remote/health`, { headers: AUTH }).then(r => r.json()).catch(() => null),
-      ])
-      setSessions(Array.isArray(sessionsRes) ? sessionsRes : [])
-      setAgents(agentsRes.data || [])
-      setHealth(healthRes)
+      const res = await fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH })
+      const data = await res.json()
+      setSessions(data.data || [])
       setLastRefresh(new Date())
     } catch (e) {
-      console.error('Failed to fetch:', e)
+      console.error('Failed to fetch workbench sessions:', e)
     } finally {
       setLoading(false)
     }
   }, [])
 
-  // Initial load
-  useEffect(() => { fetchAll() }, [fetchAll])
+  useEffect(() => { fetchSessions() }, [fetchSessions])
 
-  // Auto-refresh every 5s when active sessions exist
+  // Auto-refresh: fast when active sessions, slow otherwise
   useEffect(() => {
     if (!autoRefresh) return
     const hasActive = sessions.some(s => s.status === 'running' || s.status === 'pending')
-    const interval = hasActive ? 3000 : 10000
-    const timer = setInterval(fetchAll, interval)
+    const timer = setInterval(fetchSessions, hasActive ? 3000 : 15000)
     return () => clearInterval(timer)
-  }, [autoRefresh, sessions, fetchAll])
+  }, [autoRefresh, sessions, fetchSessions])
 
   const cancelSession = async (id: string) => {
-    await fetch(`${API_BASE}/v1/remote/sessions/${id}/cancel`, { method: 'POST', headers: AUTH })
-    setSessions(prev => prev.map(s => s.session_id === id ? { ...s, status: 'cancelled' } : s))
+    await fetch(`${API_BASE}/v1/workbench/sessions/${id}/cancel`, { method: 'POST', headers: AUTH })
+    setSessions(prev => prev.map(s => s.id === id ? { ...s, status: 'cancelled' } : s))
   }
 
-  const retrySession = async (session: AgentSession) => {
-    try {
-      const res = await fetch(`${API_BASE}/v1/remote/sessions`, {
-        method: 'POST',
-        headers: AUTH,
-        body: JSON.stringify({ agent_type: session.agent_type, task: session.task }),
-      })
-      const newSession = await res.json()
-      setSessions(prev => [newSession, ...prev])
-    } catch (e) {
-      console.error('Retry failed:', e)
-    }
+  const deleteSession = async (id: string) => {
+    if (!confirm('Delete this session?')) return
+    await fetch(`${API_BASE}/v1/workbench/sessions/${id}`, { method: 'DELETE', headers: AUTH })
+    setSessions(prev => prev.filter(s => s.id !== id))
   }
 
-  const filteredSessions = filter === 'all'
-    ? sessions
-    : sessions.filter(s => s.status === filter)
+  const filtered = filter === 'all' ? sessions : sessions.filter(s => s.status === filter)
 
   const counts = {
-    all: sessions.length,
-    running: sessions.filter(s => s.status === 'running').length,
-    pending: sessions.filter(s => s.status === 'pending').length,
+    all:       sessions.length,
+    running:   sessions.filter(s => s.status === 'running').length,
+    pending:   sessions.filter(s => s.status === 'pending').length,
     completed: sessions.filter(s => s.status === 'completed').length,
-    failed: sessions.filter(s => s.status === 'failed').length,
+    failed:    sessions.filter(s => s.status === 'failed').length,
   }
 
   const activeCount = counts.running + counts.pending
+  const totalTokens = sessions.reduce((a, s) => a + (s.input_tokens || 0) + (s.output_tokens || 0), 0)
+  const totalCost   = sessions.reduce((a, s) => a + (s.estimated_cost || 0), 0)
+  const totalFiles  = sessions.reduce((a, s) => a + s.files.length, 0)
 
   if (loading) {
     return (
@@ -422,10 +278,8 @@ export default function AgentSessionsPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Agent Sessions</h1>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Monitor and manage active agent tasks
-            {lastRefresh && (
-              <span className="ml-2 text-gray-400">· Updated {timeAgo(lastRefresh.toISOString())}</span>
-            )}
+            Workbench agent runs — click any session to view the event log
+            {lastRefresh && <span className="ml-2 text-gray-400">· Updated {timeAgo(lastRefresh.toISOString())}</span>}
           </p>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
@@ -441,13 +295,13 @@ export default function AgentSessionsPage() {
             {autoRefresh ? 'Live' : 'Paused'}
           </button>
           <button
-            onClick={fetchAll}
+            onClick={fetchSessions}
             className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
           >
             Refresh
           </button>
           <button
-            onClick={() => setShowNewModal(true)}
+            onClick={() => router.push('/workbench')}
             className="flex items-center gap-1.5 px-4 py-1.5 bg-orange-500 hover:bg-orange-600 text-white text-xs font-medium rounded-lg transition-colors"
           >
             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -458,80 +312,42 @@ export default function AgentSessionsPage() {
         </div>
       </div>
 
-      {/* System health stats */}
-      {health && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <StatCard
-            label="Active Sessions"
-            value={activeCount}
-            sub={activeCount > 0 ? 'agents working' : 'all idle'}
-            color={activeCount > 0 ? 'text-blue-600' : 'text-gray-900'}
-          />
-          <StatCard
-            label="CPU"
-            value={`${Math.round(health.system.cpu_percent)}%`}
-            sub="system load"
-            color={health.system.cpu_percent > 80 ? 'text-red-600' : health.system.cpu_percent > 50 ? 'text-yellow-600' : 'text-green-600'}
-          />
-          <StatCard
-            label="Memory"
-            value={`${Math.round(health.system.memory_percent)}%`}
-            sub="RAM used"
-            color={health.system.memory_percent > 85 ? 'text-red-600' : 'text-gray-900'}
-          />
-          <StatCard
-            label="Uptime"
-            value={health.uptime_seconds < 3600
-              ? `${Math.floor(health.uptime_seconds / 60)}m`
-              : `${Math.floor(health.uptime_seconds / 3600)}h`}
-            sub={`v${health.version}`}
-          />
-        </div>
-      )}
-
-      {/* Agent roster */}
-      {agents.length > 0 && (
-        <div>
-          <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Available Agents</h2>
-          <div className="flex flex-wrap gap-2">
-            {agents.map(a => (
-              <div
-                key={a.id}
-                className="flex items-center gap-2 px-3 py-1.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-full text-sm"
-              >
-                <span>{AGENT_TYPE_ICONS[a.agent_type] || '🤖'}</span>
-                <span className="text-gray-700 dark:text-gray-300">{a.name}</span>
-                <span className={`w-1.5 h-1.5 rounded-full ${a.is_active ? 'bg-green-400' : 'bg-gray-300'}`} />
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Stats */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <StatCard
+          label="Active"
+          value={activeCount}
+          sub={activeCount > 0 ? 'agents working' : 'all idle'}
+          color={activeCount > 0 ? 'text-blue-600' : 'text-gray-900'}
+        />
+        <StatCard label="Total Sessions" value={counts.all} sub={`${counts.completed} completed`} />
+        <StatCard label="Files Written"  value={totalFiles} sub="across all sessions" />
+        <StatCard
+          label="Total Cost"
+          value={totalCost < 0.001 ? '<$0.001' : `$${totalCost.toFixed(4)}`}
+          sub={totalTokens > 0 ? `${(totalTokens / 1000).toFixed(1)}k tokens` : 'no usage yet'}
+          color="text-orange-600"
+        />
+      </div>
 
       {/* Filter tabs */}
       <div className="flex items-center gap-1 border-b border-gray-200 dark:border-gray-700">
-        {[
-          { key: 'all', label: 'All' },
-          { key: 'running', label: 'Running' },
-          { key: 'pending', label: 'Pending' },
-          { key: 'completed', label: 'Completed' },
-          { key: 'failed', label: 'Failed' },
-        ].map(tab => (
+        {(['all', 'running', 'pending', 'completed', 'failed'] as const).map(key => (
           <button
-            key={tab.key}
-            onClick={() => setFilter(tab.key)}
-            className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium border-b-2 transition-colors ${
-              filter === tab.key
+            key={key}
+            onClick={() => setFilter(key)}
+            className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium border-b-2 transition-colors capitalize ${
+              filter === key
                 ? 'border-orange-500 text-orange-600 dark:text-orange-400'
                 : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
             }`}
           >
-            {tab.label}
-            {counts[tab.key as keyof typeof counts] > 0 && (
+            {key}
+            {counts[key] > 0 && (
               <span className={`text-xs px-1.5 py-0.5 rounded-full ${
-                filter === tab.key ? 'bg-orange-100 text-orange-600 dark:bg-orange-900/30' : 'bg-gray-100 dark:bg-gray-700 text-gray-500'
+                filter === key ? 'bg-orange-100 text-orange-600 dark:bg-orange-900/30' : 'bg-gray-100 dark:bg-gray-700 text-gray-500'
               }`}>
-                {counts[tab.key as keyof typeof counts]}
+                {counts[key]}
               </span>
             )}
           </button>
@@ -539,44 +355,35 @@ export default function AgentSessionsPage() {
       </div>
 
       {/* Session list */}
-      {filteredSessions.length === 0 ? (
+      {filtered.length === 0 ? (
         <div className="text-center py-16">
           <div className="text-4xl mb-3">🤖</div>
           <h3 className="text-sm font-medium text-gray-900 dark:text-white">
             {filter === 'all' ? 'No sessions yet' : `No ${filter} sessions`}
           </h3>
           <p className="text-sm text-gray-500 mt-1">
-            {filter === 'all' ? 'Launch an agent to get started.' : `Switch to "All" to see other sessions.`}
+            {filter === 'all' ? 'Launch a Workbench session to get started.' : 'Switch to "all" to see other sessions.'}
           </p>
           {filter === 'all' && (
             <button
-              onClick={() => setShowNewModal(true)}
+              onClick={() => router.push('/workbench')}
               className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium rounded-lg transition-colors"
             >
-              Launch First Agent
+              Open Workbench
             </button>
           )}
         </div>
       ) : (
         <div className="space-y-3">
-          {filteredSessions.map(session => (
+          {filtered.map(s => (
             <SessionCard
-              key={session.session_id}
-              session={session}
+              key={s.id}
+              session={s}
               onCancel={cancelSession}
-              onRetry={retrySession}
+              onDelete={deleteSession}
             />
           ))}
         </div>
-      )}
-
-      {/* New session modal */}
-      {showNewModal && (
-        <NewSessionModal
-          agents={agents}
-          onClose={() => setShowNewModal(false)}
-          onCreate={s => setSessions(prev => [s, ...prev])}
-        />
       )}
     </div>
   )

@@ -31,6 +31,14 @@ interface Conversation {
   persona_id: string | null
 }
 
+interface Model {
+  id: string
+  model_id: string
+  display_name: string
+  is_active: boolean
+  provider_name?: string
+}
+
 interface Persona {
   id: string
   name: string
@@ -105,7 +113,7 @@ function renderMarkdown(text: string): string {
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 function Sidebar({
   conversations, activeId, onSelect, onNew, onDelete, onPin, onKeepForever, onRename,
-  personas, selectedPersonaId, onPersonaChange, searchQuery, onSearchChange, collapsed, onToggle
+  personas, selectedPersonaId, onPersonaChange, models, selectedModelId, onModelChange, searchQuery, onSearchChange, collapsed, onToggle
 }: {
   conversations: Conversation[]
   activeId: string | null
@@ -118,6 +126,9 @@ function Sidebar({
   personas: Persona[]
   selectedPersonaId: string
   onPersonaChange: (id: string) => void
+  models: Model[]
+  selectedModelId: string
+  onModelChange: (id: string) => void
   searchQuery: string
   onSearchChange: (q: string) => void
   collapsed: boolean
@@ -177,8 +188,8 @@ function Sidebar({
           </button>
         </div>
 
-        {/* Persona selector */}
-        <div className="px-3 pb-2">
+        {/* Persona + Model selectors */}
+        <div className="px-3 pb-2 space-y-2">
           <select
             value={selectedPersonaId}
             onChange={e => onPersonaChange(e.target.value)}
@@ -188,7 +199,32 @@ function Sidebar({
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
-        </div>
+        
+          {/* Model override */}
+          {models.length > 0 && (
+            <select
+              value={selectedModelId}
+              onChange={e => onModelChange(e.target.value)}
+              className="w-full text-xs rounded-md border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 py-1.5 pl-2 pr-6 focus:ring-orange-500 focus:border-orange-400"
+              title="Override model (overrides persona default)"
+            >
+              <option value="">Model: persona default</option>
+              {Object.entries(
+                models.reduce((acc: Record<string, Model[]>, m) => {
+                  const g = m.provider_name || 'Other'
+                  ;(acc[g] = acc[g] || []).push(m)
+                  return acc
+                }, {})
+              ).map(([group, ms]) => (
+                <optgroup key={group} label={group}>
+                  {(ms as Model[]).map(m => (
+                    <option key={m.id} value={m.model_id}>{m.display_name || m.model_id}</option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          )}
+</div>
 
         {/* Search */}
         <div className="px-3 pb-2">
@@ -776,6 +812,8 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([])
   const [personas, setPersonas] = useState<Persona[]>([])
   const [selectedPersonaId, setSelectedPersonaId] = useState('')
+  const [models, setModels] = useState<Model[]>([])
+  const [selectedModelId, setSelectedModelId] = useState('')
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -958,7 +996,8 @@ export default function ChatPage() {
   useEffect(() => {
     const init = async () => {
       try {
-        const [personasRes, convsRes, identityRes] = await Promise.all([
+        const [personasRes, modelsRes, convsRes, identityRes] = await Promise.all([
+          fetch(`${API_BASE}/v1/models`, { headers: AUTH }).then(r => r.json()).catch(() => ({ data: [] })),
           fetch(`${API_BASE}/v1/personas`, { headers: AUTH }).then(r => r.json()),
           fetch(`${API_BASE}/v1/conversations?limit=100&pinned_first=true`, { headers: AUTH }).then(r => r.json()),
           fetch(`${API_BASE}/v1/identity/status`, { headers: AUTH }).then(r => r.json()),
@@ -966,6 +1005,8 @@ export default function ChatPage() {
 
         const ps: Persona[] = personasRes.data || []
         setPersonas(ps)
+        const ms: Model[] = (modelsRes.data || []).filter((m: Model) => m.is_active)
+        setModels(ms)
 
         const defaultP = ps.find(p => p.is_default) || ps[0]
         if (defaultP) setSelectedPersonaId(defaultP.id)
@@ -1139,7 +1180,7 @@ export default function ChatPage() {
 
     try {
       const body: any = {
-        model: selectedPersonaId,
+        model: selectedModelId || selectedPersonaId,
         messages: historyMsgs,
         stream: false,
       }
@@ -1360,6 +1401,9 @@ export default function ChatPage() {
         personas={personas}
         selectedPersonaId={selectedPersonaId}
         onPersonaChange={setSelectedPersonaId}
+        models={models}
+        selectedModelId={selectedModelId}
+        onModelChange={setSelectedModelId}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
         collapsed={sidebarCollapsed}

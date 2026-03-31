@@ -109,6 +109,48 @@ export default function ProjectDetailPage() {
 
   useEffect(() => { fetchProject() }, [fetchProject])
 
+  // Auto-refresh file tree when a Workbench session for this project completes
+  useEffect(() => {
+    let lastStatus: string | null = null
+    const poll = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH })
+        const data = await res.json()
+        const mine = (data.data || []).find((s: any) => s.project_id === id)
+        if (!mine) return
+        const isActive = mine.status === 'running' || mine.status === 'pending'
+        // When a session transitions from active -> done/failed, refresh the tree
+        if (lastStatus && ['running', 'pending'].includes(lastStatus) && !isActive) {
+          fetchProject()
+        }
+        lastStatus = mine.status
+      } catch { /* ignore */ }
+    }
+    const timer = setInterval(poll, 4000)
+    return () => clearInterval(timer)
+  }, [id, fetchProject])
+
+  // Auto-refresh file tree when a Workbench session for this project is active
+  useEffect(() => {
+    let lastStatus: string | null = null
+    const poll = async () => {
+      try {
+        const res = await fetch(\/v1/workbench/sessions\, { headers: AUTH })
+        const data = await res.json()
+        const mine = (data.data || []).find((s: any) => s.project_id === id)
+        if (!mine) return
+        const isActive = mine.status === \'running\' || mine.status === \'pending\'
+        // When a session transitions from active -> completed/failed, refresh the tree
+        if (lastStatus && [\'running\', \'pending\'].includes(lastStatus) && !isActive) {
+          fetchProject()
+        }
+        lastStatus = mine.status
+      } catch { /* ignore */ }
+    }
+    const timer = setInterval(poll, 4000)
+    return () => clearInterval(timer)
+  }, [id, fetchProject])
+
   const openFile = async (node: FileNode) => {
     setSelectedFile(node)
     setFileContent(null)

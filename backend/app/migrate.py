@@ -15,6 +15,11 @@ MIGRATIONS = [
     "ALTER TABLE conversations ADD COLUMN keep_forever BOOLEAN NOT NULL DEFAULT 0",
     "ALTER TABLE conversations ADD COLUMN last_message_at DATETIME",
     "ALTER TABLE conversations ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0",
+    # workbench_sessions - token/cost tracking + event replay
+    "ALTER TABLE workbench_sessions ADD COLUMN input_tokens INTEGER",
+    "ALTER TABLE workbench_sessions ADD COLUMN output_tokens INTEGER",
+    "ALTER TABLE workbench_sessions ADD COLUMN estimated_cost NUMERIC(10, 6)",
+    "ALTER TABLE workbench_sessions ADD COLUMN events_log JSON",
 ]
 
 
