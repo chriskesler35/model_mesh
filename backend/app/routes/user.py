@@ -72,11 +72,14 @@ async def update_user_profile(
 # Memory File Endpoints
 # ============================================================
 
+# These are managed exclusively by the Identity tab — never show in Memory
+_IDENTITY_RESERVED = {"soul.md", "user.md", "identity.md", "SOUL.md", "USER.md", "IDENTITY.md"}
+
+
 @router.get("/memory", response_model=MemoryFileList)
 async def list_memory_files(db: AsyncSession = Depends(get_db)):
     """List all memory files for the user. Auto-seeds defaults if none exist."""
     from app.services.memory_context import MemoryContext
-    # This auto-creates the user and seeds default files if none exist
     ctx = MemoryContext(db)
     await ctx.get_or_create_user()
 
@@ -89,7 +92,9 @@ async def list_memory_files(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(MemoryFile).where(MemoryFile.user_id == profile.id)
     )
-    files = result.scalars().all()
+    # Filter out identity files — those belong to the Identity tab
+    files = [f for f in result.scalars().all()
+             if f.name not in _IDENTITY_RESERVED]
 
     return MemoryFileList(data=files, total=len(files))
 
