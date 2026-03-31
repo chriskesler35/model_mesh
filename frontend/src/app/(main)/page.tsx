@@ -1,5 +1,7 @@
 'use client'
 
+import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { GpuStatusWidget } from '@/components/ModelFitnessCheck'
@@ -141,7 +143,7 @@ export default function Home() {
           <QuickAction href="/stats" label="View Stats" desc="Usage and cost tracking"
             icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>}
           />
-          <QuickAction href="http://localhost:19000/docs" label="API Docs" desc="OpenAPI / Swagger" external
+          <QuickAction href=`${API_BASE}/docs` label="API Docs" desc="OpenAPI / Swagger" external
             icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>}
           />
         </div>

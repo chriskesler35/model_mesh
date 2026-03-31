@@ -1,10 +1,7 @@
-// For SSR (server-side), use Docker network URL
-// For client-side (browser), use localhost
-const INTERNAL_API_URL = process.env.INTERNAL_API_URL || 'http://backend:18800'
-const PUBLIC_API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:19000'
+import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 
-// Use internal URL for SSR, public URL for client
-const API_URL = typeof window === 'undefined' ? INTERNAL_API_URL : PUBLIC_API_URL
+// API_URL uses the shared dynamic config (auto-detects hostname for remote access)
+const API_URL = API_BASE
 
 const API_KEY = process.env.NEXT_PUBLIC_MODELMESH_API_KEY || 'modelmesh_local_dev_key'
 

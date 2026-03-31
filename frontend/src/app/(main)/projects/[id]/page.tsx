@@ -1,5 +1,7 @@
 'use client'
 
+import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+
 import { useState, useEffect, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 
@@ -8,7 +10,6 @@ const SandboxPanel = ({ projectId }: { projectId: string }) => (
   <div className="text-sm text-gray-500 py-8 text-center">Sandbox coming soon.</div>
 )
 
-const API_BASE = 'http://localhost:19000'
 const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 interface FileNode { name: string; path: string; type: 'file' | 'dir'; size: number; children?: FileNode[] }

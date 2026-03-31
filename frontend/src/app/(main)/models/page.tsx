@@ -1,9 +1,10 @@
 'use client'
 
+import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+
 import { useState, useEffect, useRef } from 'react'
 import { api } from '@/lib/api'
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:19000'
 const AUTH_HEADERS = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 interface ValidationResult {
@@ -154,7 +155,7 @@ export default function ModelsPage() {
         const provider = providers.find(p => p.id === formData.provider_id)
         if (!provider) return
         
-        const res = await fetch(`http://localhost:19000/v1/model-lookup/suggestions/${provider.name}`, {
+        const res = await fetch(`${API_BASE}/v1/model-lookup/suggestions/${provider.name}`, {
           headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
         })
         if (res.ok) {
@@ -177,7 +178,7 @@ export default function ModelsPage() {
     setLookingUp(true)
     try {
       const provider = providers.find(p => p.id === formData.provider_id)
-      const res = await fetch('http://localhost:19000/v1/model-lookup/lookup', {
+      const res = await fetch(`${API_BASE}/v1/model-lookup/lookup`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -271,7 +272,7 @@ export default function ModelsPage() {
   const handleAddModel = async (e: React.FormEvent) => {
     e.preventDefault()
     try {
-      const res = await fetch('http://localhost:19000/v1/models', {
+      const res = await fetch(`${API_BASE}/v1/models`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -308,7 +309,7 @@ export default function ModelsPage() {
     if (!confirm(confirmMessage)) return
     
     try {
-      const res = await fetch(`http://localhost:19000/v1/models/${model.id}`, {
+      const res = await fetch(`${API_BASE}/v1/models/${model.id}`, {
         method: 'DELETE',
         headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
       })
@@ -332,7 +333,7 @@ export default function ModelsPage() {
 
   const handleToggleActive = async (model: Model) => {
     try {
-      const res = await fetch(`http://localhost:19000/v1/models/${model.id}`, {
+      const res = await fetch(`${API_BASE}/v1/models/${model.id}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',

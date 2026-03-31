@@ -1,4 +1,6 @@
 'use client'
+
+import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 import PreferencesTab from '@/components/PreferencesTab'
 import ImageSettingsTab from '@/components/ImageSettingsTab'
 import { RemoteAccessTab } from './remote'
@@ -6,7 +8,6 @@ import { RemoteAccessTab } from './remote'
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '@/lib/api'
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:19000'
 const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 const PROVIDER_META: Record<string, { label: string; placeholder: string; link: string; color: string }> = {
@@ -194,7 +195,6 @@ interface UserProfile {
 
 // ─── Conversations Tab ────────────────────────────────────────────────────────
 function ConversationsTab() {
-  const API_BASE = 'http://localhost:19000'
   const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
   const [conversations, setConversations] = useState<any[]>([])
@@ -272,7 +272,6 @@ function ConversationsTab() {
 }
 // ─── Identity Tab ─────────────────────────────────────────────────────────────
 function IdentityTab() {
-  const API_BASE = 'http://localhost:19000'
   const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
   const [soulContent, setSoulContent] = useState('')
@@ -686,7 +685,7 @@ export default function SettingsPage() {
     setProfileSaving(true)
     try {
       // Save to DB
-      await fetch('http://localhost:19000/v1/user', {
+      await fetch(`${API_BASE}/v1/user`, {
         method: 'PATCH',
         headers: { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: profile.name, email: profile.email })
@@ -694,7 +693,7 @@ export default function SettingsPage() {
 
       // Also update USER.md memory file so the AI knows about the user
       const userMdContent = `# USER.md — About You\n\n## Personal Info\n- Name: ${profile.name || ''}\n- Email: ${profile.email || ''}\n\n## Notes\n- Update this file with more context about yourself via Settings → Identity → Your Profile\n`
-      await fetch('http://localhost:19000/v1/identity/user', {
+      await fetch(`${API_BASE}/v1/identity/user`, {
         method: 'PUT',
         headers: { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: userMdContent })
@@ -715,10 +714,10 @@ export default function SettingsPage() {
     async function fetchData() {
       try {
         const [profileRes, memoryRes] = await Promise.all([
-          fetch('http://localhost:19000/v1/user', {
+          fetch(`${API_BASE}/v1/user`, {
             headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
           }).then(r => r.json()),
-          fetch('http://localhost:19000/v1/memory', {
+          fetch(`${API_BASE}/v1/memory`, {
             headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
           }).then(r => r.json())
         ])
@@ -735,7 +734,7 @@ export default function SettingsPage() {
 
   const createMemoryFile = async (name: string) => {
     try {
-      const res = await fetch('http://localhost:19000/v1/memory', {
+      const res = await fetch(`${API_BASE}/v1/memory`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -753,7 +752,7 @@ export default function SettingsPage() {
 
   const updateMemoryFile = async (file: MemoryFile) => {
     try {
-      await fetch(`http://localhost:19000/v1/memory/${file.id}`, {
+      await fetch(`${API_BASE}/v1/memory/${file.id}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -769,7 +768,7 @@ export default function SettingsPage() {
 
   const deleteMemoryFile = async (fileId: string) => {
     try {
-      await fetch(`http://localhost:19000/v1/memory/${fileId}`, {
+      await fetch(`${API_BASE}/v1/memory/${fileId}`, {
         method: 'DELETE',
         headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
       })

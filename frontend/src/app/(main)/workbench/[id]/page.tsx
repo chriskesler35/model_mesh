@@ -1,9 +1,10 @@
 'use client'
 
+import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 
-const API_BASE = 'http://localhost:19000'
 const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 // ─── Types ────────────────────────────────────────────────────────────────────

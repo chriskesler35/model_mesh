@@ -1,12 +1,13 @@
 'use client'
 
+import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { useToast } from '../ToastProvider'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:19000'
 const API_KEY = 'modelmesh_local_dev_key'
 const AUTH = { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json' }
 
@@ -1001,7 +1002,7 @@ export default function ChatPage() {
       }
       case '/method': {
         if (arg) {
-          await fetch('http://localhost:19000/v1/methods/activate', {
+          await fetch(`${API_BASE}/v1/methods/activate`, {
             method: 'POST', headers: AUTH, body: JSON.stringify({ method_id: arg.toLowerCase() })
           })
           const methodMeta: Record<string, { icon: string; color: string }> = {

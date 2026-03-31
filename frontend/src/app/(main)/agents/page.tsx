@@ -1,5 +1,7 @@
 'use client'
 
+import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { api } from '@/lib/api'
@@ -60,7 +62,7 @@ export default function AgentsPage() {
   const deleteAgent = async (id: string, name: string) => {
     if (!confirm(`Delete agent "${name}"? This cannot be undone.`)) return
     try {
-      await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:19000'}/v1/agents/${id}`, {
+      await fetch(`${process.env.NEXT_PUBLIC_API_URL || '${API_BASE}'}/v1/agents/${id}`, {
         method: 'DELETE',
         headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' },
       })

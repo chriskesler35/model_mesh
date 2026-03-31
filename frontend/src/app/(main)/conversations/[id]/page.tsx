@@ -1,5 +1,7 @@
 'use client'
 
+import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+
 import { useState, useEffect } from 'react'
 import { useParams } from 'next/navigation'
 import Link from 'next/link'
@@ -35,10 +37,10 @@ export default function ConversationDetailPage() {
     async function fetchData() {
       try {
         const [convRes, msgRes] = await Promise.all([
-          fetch(`http://localhost:19000/v1/conversations/${conversationId}`, {
+          fetch(`${API_BASE}/v1/conversations/${conversationId}`, {
             headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
           }).then(r => r.json()).catch(() => null),
-          fetch(`http://localhost:19000/v1/conversations/${conversationId}/messages`, {
+          fetch(`${API_BASE}/v1/conversations/${conversationId}/messages`, {
             headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
           }).then(r => r.json()).catch(() => ({ data: [] }))
         ])

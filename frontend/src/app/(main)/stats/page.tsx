@@ -1,5 +1,7 @@
 'use client'
 
+import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+
 import { useState, useEffect } from 'react'
 
 interface CostSummary {
@@ -37,10 +39,10 @@ export default function StatsPage() {
     async function fetchStats() {
       try {
         const [costsRes, usageRes] = await Promise.all([
-          fetch('http://localhost:19000/v1/stats/costs?days=7', {
+          fetch(`${API_BASE}/v1/stats/costs?days=7`, {
             headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
           }).then(r => r.json()),
-          fetch('http://localhost:19000/v1/stats/usage?days=7', {
+          fetch(`${API_BASE}/v1/stats/usage?days=7`, {
             headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
           }).then(r => r.json())
         ])

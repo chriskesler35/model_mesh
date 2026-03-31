@@ -1,5 +1,7 @@
 'use client'
 
+import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+
 import { ModelFitnessCheck } from '@/components/ModelFitnessCheck'
 import { useState, useEffect } from 'react'
 import { useParams, useRouter } from 'next/navigation'
@@ -68,7 +70,7 @@ export default function PersonaDetailPage() {
     async function fetchData() {
       try {
         const [modelsRes] = await Promise.all([
-          fetch('http://localhost:19000/v1/models', {
+          fetch(`${API_BASE}/v1/models`, {
             headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
           }).then(r => r.json())
         ])
@@ -76,7 +78,7 @@ export default function PersonaDetailPage() {
         setModels(modelsRes.data || [])
 
         if (personaId) {
-          const personaRes = await fetch(`http://localhost:19000/v1/personas/${personaId}`, {
+          const personaRes = await fetch(`${API_BASE}/v1/personas/${personaId}`, {
             headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
           })
           const personaData = await personaRes.json()
@@ -96,7 +98,7 @@ export default function PersonaDetailPage() {
     setSaving(true)
     
     try {
-      const res = await fetch(`http://localhost:19000/v1/personas/${personaId}`, {
+      const res = await fetch(`${API_BASE}/v1/personas/${personaId}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',

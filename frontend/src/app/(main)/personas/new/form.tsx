@@ -1,5 +1,7 @@
 'use client'
 
+import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+
 import { useState, useEffect } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
@@ -52,14 +54,14 @@ export default function PersonaForm() {
   useEffect(() => {
     async function fetchData() {
       try {
-        const modelsRes = await fetch('http://localhost:19000/v1/models', {
+        const modelsRes = await fetch(`${API_BASE}/v1/models`, {
           headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
         })
         const modelsData = await modelsRes.json()
         setModels(modelsData.data || [])
 
         if (personaId) {
-          const personaRes = await fetch(`http://localhost:19000/v1/personas/${personaId}`, {
+          const personaRes = await fetch(`${API_BASE}/v1/personas/${personaId}`, {
             headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
           })
           const personaData = await personaRes.json()
@@ -80,8 +82,8 @@ export default function PersonaForm() {
 
     try {
       const url = personaId 
-        ? `http://localhost:19000/v1/personas/${personaId}`
-        : 'http://localhost:19000/v1/personas'
+        ? `${API_BASE}/v1/personas/${personaId}`
+        : `${API_BASE}/v1/personas`
       const method = personaId ? 'PATCH' : 'POST'
 
       const res = await fetch(url, {

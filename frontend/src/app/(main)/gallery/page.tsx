@@ -1,9 +1,10 @@
 'use client'
 
+import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+
 import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 
-const API_BASE = 'http://localhost:19000'
 const API_KEY = 'modelmesh_local_dev_key'
 
 interface Image {
