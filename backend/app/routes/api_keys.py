@@ -27,13 +27,12 @@ def _find_env_file() -> Path:
 
 # Keys we expose (display name → env var name)
 MANAGED_KEYS = {
-    "anthropic":          "ANTHROPIC_API_KEY",
-    "google":             "GOOGLE_API_KEY",
-    "gemini":             "GEMINI_API_KEY",
-    "openrouter":         "OPENROUTER_API_KEY",
-    "openai":             "OPENAI_API_KEY",
-    "telegram_bot_token": "TELEGRAM_BOT_TOKEN",
-    "telegram_chat_ids":  "TELEGRAM_CHAT_IDS",
+    "anthropic":  "ANTHROPIC_API_KEY",
+    "google":     "GOOGLE_API_KEY",
+    "gemini":     "GEMINI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "openai":     "OPENAI_API_KEY",
+    # Telegram is managed in Settings → Remote, not here
 }
 
 def _read_env_file(path: Path) -> dict[str, str]:
