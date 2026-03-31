@@ -116,36 +116,53 @@ async def _resolve_model(model_id: str):
 # ─── File parser ──────────────────────────────────────────────────────────────
 def _parse_files(text: str) -> list[dict]:
     """
-    Extract files from LLM output. Supports two formats:
+    Extract files from LLM output.
 
-    Format 1 — fenced block with filename:
+    Supported formats (tried in order):
+
+    Format 1 — FILE: marker (most reliable, what we ask for in system prompt):
+        FILE: path/to/file.ext
+        ```lang
+        content
+        ```
+
+    Format 2 — fenced block with filename tag:
         ```python filename: bench.py
-        <code>
+        content
         ```
 
-    Format 2 — explicit FILE marker:
-        FILE: bench.py
-        ```
-        <code>
+    Format 3 — markdown header with filename:
+        ### bench.py
+        ```python
+        content
         ```
     """
     files = []
 
-    # Format 1: ```lang filename: path.ext ... ```
-    pattern1 = re.compile(
-        r'```[\w]*\s+(?:filename:|file:)\s*(\S+)\s*\n(.*?)```',
-        re.DOTALL | re.IGNORECASE
-    )
-    for m in pattern1.finditer(text):
-        files.append({"path": m.group(1).strip(), "content": m.group(2)})
+    # Format 1 — FILE: marker
+    # Use split-based approach instead of regex to handle edge cases reliably
+    # Split on FILE: markers (case-insensitive), handling both start-of-string and newline-preceded
+    parts = re.split(r'(?:^|\n)(?:FILE|file):\s*', text)
+    for part in parts[1:]:  # skip first chunk (before first FILE:)
+        lines = part.split('\n')
+        path = lines[0].strip()
+        rest = '\n'.join(lines[1:])
+
+        # Find the code block
+        block_match = re.search(r'```[^\n]*\n(.*?)(?:```|$)', rest, re.DOTALL)
+        if block_match and path:
+            content = block_match.group(1)
+            # Strip trailing ``` if present
+            content = re.sub(r'\s*```\s*$', '', content)
+            files.append({"path": path, "content": content})
 
     if files:
         return files
 
-    # Format 2: FILE: path\n```\ncontent\n```
+    # Format 2 — ```lang filename: path
     pattern2 = re.compile(
-        r'(?:^|\n)(?:FILE|file):\s*(\S+)\s*\n```[^\n]*\n(.*?)```',
-        re.DOTALL
+        r'```[\w]*\s+(?:filename:|file:)\s*(\S+)\s*\n(.*?)```',
+        re.DOTALL | re.IGNORECASE
     )
     for m in pattern2.finditer(text):
         files.append({"path": m.group(1).strip(), "content": m.group(2)})
@@ -153,14 +170,14 @@ def _parse_files(text: str) -> list[dict]:
     if files:
         return files
 
-    # Format 3: ### filename.ext\n```\ncontent\n```  (markdown header)
+    # Format 3 — ### filename.ext header
     pattern3 = re.compile(
         r'#{1,4}\s+`?([^\n`]+\.\w+)`?\s*\n+```[^\n]*\n(.*?)```',
         re.DOTALL
     )
     for m in pattern3.finditer(text):
         fname = m.group(1).strip()
-        if '/' not in fname and len(fname) < 80:
+        if len(fname) < 120:
             files.append({"path": fname, "content": m.group(2)})
 
     return files
