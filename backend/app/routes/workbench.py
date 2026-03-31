@@ -1,17 +1,18 @@
-"""Live Development Workbench — SSE streaming + agent intervention."""
+"""Live Development Workbench — real LLM agent that writes files to disk."""
 
 import uuid
 import json
 import asyncio
 import logging
+import os
+import re
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, Any, List, AsyncGenerator
-from fastapi import APIRouter, HTTPException, Request
+from typing import Optional, Dict, Any, AsyncGenerator
+from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from app.middleware.auth import verify_api_key
-from fastapi import Depends
 
 logger = logging.getLogger(__name__)
 
@@ -19,48 +20,178 @@ router = APIRouter(prefix="/v1/workbench", tags=["workbench"])
 
 # ─── In-memory session store ──────────────────────────────────────────────────
 _sessions: Dict[str, Dict[str, Any]] = {}
-_queues:   Dict[str, asyncio.Queue] = {}
+_queues:   Dict[str, asyncio.Queue]  = {}
 
 
-# ─── Models ───────────────────────────────────────────────────────────────────
+# ─── Schemas ──────────────────────────────────────────────────────────────────
 class WorkbenchCreate(BaseModel):
     task: str
     agent_type: str = "coder"
     model: Optional[str] = None
     project_path: Optional[str] = None
+    project_id: Optional[str] = None
 
 
 class WorkbenchMessage(BaseModel):
     message: str
 
 
-class WorkbenchEvent(BaseModel):
-    type: str        # file_created | file_modified | agent_thought | tool_call | error | waiting | done | user_message | info
-    payload: Dict[str, Any]
-    ts: str
-
-
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-def _evt(session_id: str, type: str, **payload) -> WorkbenchEvent:
-    return WorkbenchEvent(type=type, payload=payload, ts=datetime.utcnow().isoformat())
-
-
+# ─── Event helpers ────────────────────────────────────────────────────────────
 def _push(session_id: str, type: str, **payload):
-    """Push an event into a session's queue (non-blocking)."""
     if session_id in _queues:
-        evt = _evt(session_id, type, **payload)
+        evt = {"type": type, "payload": payload, "ts": datetime.utcnow().isoformat()}
         try:
-            _queues[session_id].put_nowait(evt.model_dump())
+            _queues[session_id].put_nowait(evt)
         except asyncio.QueueFull:
             pass
 
 
-async def _mock_agent_run(session_id: str, task: str, agent_type: str, model: str):
+# ─── Project path resolver ────────────────────────────────────────────────────
+def _resolve_project_path(project_id: Optional[str], project_path: Optional[str]) -> Optional[Path]:
+    """Look up project path from projects.json or use the provided path directly."""
+    if project_path:
+        return Path(project_path)
+    if project_id:
+        try:
+            from pathlib import Path as P
+            data_dir = P(__file__).parent.parent.parent.parent / "data"
+            pf = data_dir / "projects.json"
+            if pf.exists():
+                projects = json.loads(pf.read_text(encoding="utf-8"))
+                proj = projects.get(project_id)
+                if proj and proj.get("path"):
+                    return Path(proj["path"])
+        except Exception as e:
+            logger.warning(f"Could not resolve project path for {project_id}: {e}")
+    return None
+
+
+# ─── LLM model resolver ───────────────────────────────────────────────────────
+async def _resolve_model(model_id: str):
+    """Return (Model, Provider) objects from DB for a given model_id string."""
+    try:
+        from app.database import AsyncSessionLocal
+        from app.models.model import Model as ModelORM
+        from app.models.provider import Provider as ProviderORM
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(ModelORM, ProviderORM)
+                .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
+                .where(ModelORM.model_id == model_id)
+                .limit(1)
+            )
+            row = result.first()
+            if row:
+                return row[0], row[1]
+
+            # Fuzzy fallback — partial match
+            result = await db.execute(
+                select(ModelORM, ProviderORM)
+                .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
+                .where(ModelORM.model_id.contains(model_id.split("/")[-1]))
+                .where(ModelORM.is_active == True)
+                .limit(1)
+            )
+            row = result.first()
+            if row:
+                return row[0], row[1]
+
+            # Last resort — first active chat model
+            result = await db.execute(
+                select(ModelORM, ProviderORM)
+                .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
+                .where(ModelORM.is_active == True)
+                .limit(1)
+            )
+            row = result.first()
+            if row:
+                return row[0], row[1]
+    except Exception as e:
+        logger.error(f"Model resolve failed: {e}")
+    return None, None
+
+
+# ─── File parser ──────────────────────────────────────────────────────────────
+def _parse_files(text: str) -> list[dict]:
     """
-    Simulated agent execution loop.
-    In production this would invoke GLM-5/Codex/Claude Code and stream real events.
-    The structure and event protocol is identical — just replace the mock steps.
+    Extract files from LLM output. Supports two formats:
+
+    Format 1 — fenced block with filename:
+        ```python filename: bench.py
+        <code>
+        ```
+
+    Format 2 — explicit FILE marker:
+        FILE: bench.py
+        ```
+        <code>
+        ```
     """
+    files = []
+
+    # Format 1: ```lang filename: path.ext ... ```
+    pattern1 = re.compile(
+        r'```[\w]*\s+(?:filename:|file:)\s*(\S+)\s*\n(.*?)```',
+        re.DOTALL | re.IGNORECASE
+    )
+    for m in pattern1.finditer(text):
+        files.append({"path": m.group(1).strip(), "content": m.group(2)})
+
+    if files:
+        return files
+
+    # Format 2: FILE: path\n```\ncontent\n```
+    pattern2 = re.compile(
+        r'(?:^|\n)(?:FILE|file):\s*(\S+)\s*\n```[^\n]*\n(.*?)```',
+        re.DOTALL
+    )
+    for m in pattern2.finditer(text):
+        files.append({"path": m.group(1).strip(), "content": m.group(2)})
+
+    if files:
+        return files
+
+    # Format 3: ### filename.ext\n```\ncontent\n```  (markdown header)
+    pattern3 = re.compile(
+        r'#{1,4}\s+`?([^\n`]+\.\w+)`?\s*\n+```[^\n]*\n(.*?)```',
+        re.DOTALL
+    )
+    for m in pattern3.finditer(text):
+        fname = m.group(1).strip()
+        if '/' not in fname and len(fname) < 80:
+            files.append({"path": fname, "content": m.group(2)})
+
+    return files
+
+
+# ─── Real agent runner ────────────────────────────────────────────────────────
+_SYSTEM_PROMPT = """You are an expert software engineer. Your job is to implement exactly what the user asks.
+
+Output ONLY the files needed — no prose, no explanation outside the files.
+Use this exact format for every file:
+
+FILE: <relative/path/to/file.ext>
+```<language>
+<complete file content>
+```
+
+Rules:
+- Every file must be complete and immediately runnable — no placeholders, no TODOs
+- Use only standard library + explicitly requested dependencies
+- Include a README.md with install and usage instructions
+- Do not add files that weren't asked for
+- If you think additional files are needed, include them and briefly note why inside the README
+"""
+
+async def _real_agent_run(
+    session_id: str,
+    task: str,
+    agent_type: str,
+    model_id: str,
+    project_path: Optional[Path],
+):
     session = _sessions.get(session_id)
     if not session:
         return
@@ -68,74 +199,162 @@ async def _mock_agent_run(session_id: str, task: str, agent_type: str, model: st
     session["status"] = "running"
     session["started_at"] = datetime.utcnow().isoformat()
 
-    steps = [
-        ("info",         {"message": f"Starting {agent_type} agent for: {task}"}),
-        ("agent_thought",{"thought": f"Analyzing task requirements: {task}"}),
-        ("agent_thought",{"thought": "Planning implementation approach..."}),
-        ("tool_call",    {"tool": "read_file", "args": {"path": "README.md"}, "result": "Project context loaded"}),
-        ("file_created", {"path": "src/feature.py", "content": "# Generated by DevForgeAI\n\ndef main():\n    pass\n"}),
-        ("agent_thought",{"thought": "Writing implementation..."}),
-        ("file_modified",{"path": "src/feature.py", "diff": "+def process(data):\n+    return data\n"}),
-        ("tool_call",    {"tool": "run_tests", "args": {}, "result": "All tests passed ✓"}),
-        ("file_modified",{"path": "requirements.txt", "diff": "+fastapi>=0.100\n"}),
-        ("agent_thought",{"thought": "Task complete. Reviewing output..."}),
-        ("done",         {"message": "Task completed successfully.", "files_changed": ["src/feature.py", "requirements.txt"]}),
+    _push(session_id, "info", message=f"Starting {agent_type} agent for: \"{task}\"")
+
+    # ── Resolve model ────────────────────────────────────────────────────────
+    _push(session_id, "agent_thought", thought=f"Resolving model: {model_id}")
+    model_orm, provider_orm = await _resolve_model(model_id)
+
+    if not model_orm:
+        _push(session_id, "error", message=f"Could not find model '{model_id}' in database.")
+        session["status"] = "failed"
+        _push(session_id, "done", message="Session failed.", status="failed")
+        return
+
+    _push(session_id, "agent_thought",
+          thought=f"Using {model_orm.display_name or model_orm.model_id} via {provider_orm.display_name}")
+
+    # ── Call LLM ─────────────────────────────────────────────────────────────
+    _push(session_id, "agent_thought", thought="Generating implementation…")
+
+    from app.services.model_client import ModelClient
+    client = ModelClient()
+
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user",   "content": task},
     ]
 
-    for event_type, payload in steps:
-        if _sessions.get(session_id, {}).get("status") == "cancelled":
-            _push(session_id, "info", message="Session cancelled by user.")
-            break
+    full_response = ""
+    try:
+        stream = await client.call_model(
+            model=model_orm,
+            provider=provider_orm,
+            messages=messages,
+            stream=True,
+            temperature=0.2,
+            max_tokens=8000,
+        )
 
-        # Check for pending user messages
-        pending = session.get("pending_messages", [])
-        if pending:
-            for msg in pending:
-                _push(session_id, "user_message", message=msg, handled=True)
-                _push(session_id, "agent_thought", thought=f"Incorporating user input: {msg}")
-            session["pending_messages"] = []
+        chunk_count = 0
+        async for chunk in stream:
+            if session.get("status") == "cancelled":
+                break
 
-        _push(session_id, event_type, **payload)
+            # Handle pending user messages mid-stream
+            pending = session.get("pending_messages", [])
+            if pending:
+                for msg in pending:
+                    _push(session_id, "user_message", message=msg, handled=True)
+                session["pending_messages"] = []
 
-        if event_type == "file_created" or event_type == "file_modified":
-            session.setdefault("files", [])
-            path = payload.get("path", "")
-            if path not in session["files"]:
-                session["files"].append(path)
+            delta = ""
+            try:
+                if hasattr(chunk, "choices") and chunk.choices:
+                    delta = chunk.choices[0].delta.content or ""
+                elif isinstance(chunk, dict):
+                    delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+            except Exception:
+                pass
 
-        await asyncio.sleep(1.5)
+            if delta:
+                full_response += delta
+                chunk_count += 1
+                # Send a thinking pulse every 20 chunks so the UI shows progress
+                if chunk_count % 20 == 0:
+                    _push(session_id, "agent_thought",
+                          thought=f"Writing… ({len(full_response)} chars so far)")
 
-    if session.get("status") == "running":
-        session["status"] = "completed"
-        session["completed_at"] = datetime.utcnow().isoformat()
+    except Exception as e:
+        logger.error(f"LLM call failed in workbench session {session_id}: {e}")
+        _push(session_id, "error", message=f"LLM error: {str(e)}")
+        session["status"] = "failed"
+        _push(session_id, "done", message="Session failed.", status="failed")
+        return
 
-    _push(session_id, "done", message="Session ended.", status=session["status"])
+    if session.get("status") == "cancelled":
+        _push(session_id, "info", message="Session cancelled.")
+        _push(session_id, "done", message="Session cancelled.", status="cancelled")
+        return
+
+    # ── Parse files ──────────────────────────────────────────────────────────
+    _push(session_id, "agent_thought", thought="Parsing generated files…")
+    files = _parse_files(full_response)
+
+    if not files:
+        # No structured files found — save entire response as output.md
+        files = [{"path": "output.md", "content": full_response}]
+        _push(session_id, "agent_thought",
+              thought="No FILE: blocks detected — saving full response as output.md")
+
+    # ── Write files to disk ──────────────────────────────────────────────────
+    written = []
+    for f in files:
+        rel_path = f["path"].lstrip("/\\")
+        content  = f["content"]
+
+        _push(session_id, "agent_thought", thought=f"Writing {rel_path}…")
+
+        if project_path:
+            abs_path = project_path / rel_path
+            try:
+                abs_path.parent.mkdir(parents=True, exist_ok=True)
+                abs_path.write_text(content, encoding="utf-8")
+                _push(session_id, "file_created", path=rel_path,
+                      content=content[:500] + ("…" if len(content) > 500 else ""))
+                written.append(rel_path)
+                logger.info(f"Workbench wrote: {abs_path}")
+            except Exception as e:
+                _push(session_id, "error", message=f"Failed to write {rel_path}: {e}")
+        else:
+            # No project path — emit the content so frontend can display it
+            _push(session_id, "file_created", path=rel_path,
+                  content=content[:500] + ("…" if len(content) > 500 else ""),
+                  note="No project path set — file not saved to disk")
+            written.append(rel_path)
+
+        await asyncio.sleep(0.1)  # brief yield so SSE stream flushes
+
+    session["files"] = written
+    session["status"] = "completed"
+    session["completed_at"] = datetime.utcnow().isoformat()
+
+    location = str(project_path) if project_path else "in-memory only (no project path)"
+    _push(session_id, "done",
+          message=f"Done. {len(written)} file(s) written to {location}.",
+          files_changed=written,
+          status="completed")
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
+
 @router.post("/sessions", dependencies=[Depends(verify_api_key)])
 async def create_session(body: WorkbenchCreate):
-    """Start a new workbench session."""
     session_id = str(uuid.uuid4())
-    model = body.model or "ollama/glm4:latest"
+    model_id   = body.model or "llama3.1:8b"
+
+    # Resolve project path
+    project_path = _resolve_project_path(body.project_id, body.project_path)
 
     _sessions[session_id] = {
-        "id": session_id,
-        "task": body.task,
-        "agent_type": body.agent_type,
-        "model": model,
-        "project_path": body.project_path,
-        "status": "pending",
-        "created_at": datetime.utcnow().isoformat(),
-        "started_at": None,
+        "id":           session_id,
+        "task":         body.task,
+        "agent_type":   body.agent_type,
+        "model":        model_id,
+        "project_id":   body.project_id,
+        "project_path": str(project_path) if project_path else None,
+        "status":       "pending",
+        "created_at":   datetime.utcnow().isoformat(),
+        "started_at":   None,
         "completed_at": None,
-        "files": [],
+        "files":        [],
         "pending_messages": [],
     }
-    _queues[session_id] = asyncio.Queue(maxsize=500)
+    _queues[session_id] = asyncio.Queue(maxsize=1000)
 
-    # Kick off the agent in the background
-    asyncio.create_task(_mock_agent_run(session_id, body.task, body.agent_type, model))
+    asyncio.create_task(_real_agent_run(
+        session_id, body.task, body.agent_type, model_id, project_path
+    ))
 
     return _sessions[session_id]
 
@@ -154,36 +373,38 @@ async def get_session(session_id: str):
 
 @router.get("/sessions/{session_id}/stream")
 async def stream_session(session_id: str, request: Request):
-    """SSE stream of workbench events. No auth header required for EventSource."""
+    """SSE stream — no auth header required (EventSource API limitation)."""
     if session_id not in _sessions:
         raise HTTPException(status_code=404, detail="Session not found")
 
     async def event_generator() -> AsyncGenerator[str, None]:
         queue = _queues.get(session_id)
         if not queue:
-            yield f"data: {json.dumps({'type': 'error', 'payload': {'message': 'Session queue not found'}})}\n\n"
+            yield f"data: {json.dumps({'type':'error','payload':{'message':'Queue not found'}})}\n\n"
             return
 
-        # Send current session state as first event
-        yield f"data: {json.dumps({'type': 'init', 'payload': _sessions[session_id]})}\n\n"
+        # Send current state as first event
+        yield f"data: {json.dumps({'type':'init','payload':_sessions[session_id]})}\n\n"
 
         while True:
             if await request.is_disconnected():
                 break
             try:
-                evt = await asyncio.wait_for(queue.get(), timeout=15.0)
+                evt = await asyncio.wait_for(queue.get(), timeout=30.0)
                 yield f"data: {json.dumps(evt)}\n\n"
-                if evt.get("type") == "done" and _sessions.get(session_id, {}).get("status") != "running":
-                    break
+                if evt.get("type") == "done":
+                    s = _sessions.get(session_id, {}).get("status", "")
+                    if s != "running":
+                        break
             except asyncio.TimeoutError:
-                yield f"data: {json.dumps({'type': 'ping', 'payload': {}})}\n\n"
+                yield f"data: {json.dumps({'type':'ping','payload':{}})}\n\n"
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
+            "Cache-Control":       "no-cache",
+            "X-Accel-Buffering":   "no",
             "Access-Control-Allow-Origin": "*",
         }
     )
@@ -191,11 +412,9 @@ async def stream_session(session_id: str, request: Request):
 
 @router.post("/sessions/{session_id}/message", dependencies=[Depends(verify_api_key)])
 async def send_message(session_id: str, body: WorkbenchMessage):
-    """Inject a user message into the running agent."""
     if session_id not in _sessions:
         raise HTTPException(status_code=404, detail="Session not found")
-    session = _sessions[session_id]
-    session.setdefault("pending_messages", []).append(body.message)
+    _sessions[session_id].setdefault("pending_messages", []).append(body.message)
     _push(session_id, "user_message", message=body.message, handled=False)
     return {"ok": True}
 
@@ -205,7 +424,7 @@ async def cancel_session(session_id: str):
     if session_id not in _sessions:
         raise HTTPException(status_code=404, detail="Session not found")
     _sessions[session_id]["status"] = "cancelled"
-    _push(session_id, "info", message="Cancelling session...")
+    _push(session_id, "info", message="Cancelling…")
     return {"ok": True}
 
 
