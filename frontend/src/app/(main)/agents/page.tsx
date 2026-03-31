@@ -62,7 +62,7 @@ export default function AgentsPage() {
   const deleteAgent = async (id: string, name: string) => {
     if (!confirm(`Delete agent "${name}"? This cannot be undone.`)) return
     try {
-      await fetch(`${process.env.NEXT_PUBLIC_API_URL || '${API_BASE}'}/v1/agents/${id}`, {
+      await fetch(`${API_BASE}/v1/agents/${id}`, {
         method: 'DELETE',
         headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' },
       })
