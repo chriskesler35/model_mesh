@@ -279,6 +279,10 @@ async def _real_agent_run(
 
     # ── Parse files ──────────────────────────────────────────────────────────
     _push(session_id, "agent_thought", thought="Parsing generated files…")
+
+    # Log first 2000 chars of raw response for debugging
+    logger.info(f"Workbench raw response ({len(full_response)} chars):\n{full_response[:2000]}")
+
     files = _parse_files(full_response)
 
     if not files:
