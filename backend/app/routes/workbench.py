@@ -11,16 +11,19 @@ from datetime import datetime
 from typing import Optional, Dict, Any, AsyncGenerator
 from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, desc
 from pydantic import BaseModel
 from app.middleware.auth import verify_api_key
+from app.database import get_db, AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/workbench", tags=["workbench"])
 
-# ─── In-memory session store ──────────────────────────────────────────────────
-_sessions: Dict[str, Dict[str, Any]] = {}
-_queues:   Dict[str, asyncio.Queue]  = {}
+# ─── In-memory queues (SSE streaming only — sessions persisted to DB) ─────────
+_queues:            Dict[str, asyncio.Queue]  = {}
+_pending_messages:  Dict[str, list]           = {}
 
 
 # ─── Schemas ──────────────────────────────────────────────────────────────────
@@ -44,6 +47,23 @@ def _push(session_id: str, type: str, **payload):
             _queues[session_id].put_nowait(evt)
         except asyncio.QueueFull:
             pass
+
+
+async def _db_update(session_id: str, **kwargs):
+    """Update the persisted session record in DB."""
+    try:
+        from app.models.workbench import WorkbenchSession
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(WorkbenchSession).where(WorkbenchSession.id == session_id)
+            )
+            session = result.scalar_one_or_none()
+            if session:
+                for k, v in kwargs.items():
+                    setattr(session, k, v)
+                await db.commit()
+    except Exception as e:
+        logger.warning(f"DB update failed for workbench session {session_id}: {e}")
 
 
 # ─── Project path resolver ────────────────────────────────────────────────────
@@ -209,13 +229,8 @@ async def _real_agent_run(
     model_id: str,
     project_path: Optional[Path],
 ):
-    session = _sessions.get(session_id)
-    if not session:
-        return
-
-    session["status"] = "running"
-    session["started_at"] = datetime.utcnow().isoformat()
-
+    started = datetime.utcnow()
+    await _db_update(session_id, status="running", started_at=started)
     _push(session_id, "info", message=f"Starting {agent_type} agent for: \"{task}\"")
 
     # ── Resolve model ────────────────────────────────────────────────────────
@@ -224,7 +239,7 @@ async def _real_agent_run(
 
     if not model_orm:
         _push(session_id, "error", message=f"Could not find model '{model_id}' in database.")
-        session["status"] = "failed"
+        await _db_update(session_id, status="failed", completed_at=datetime.utcnow())
         _push(session_id, "done", message="Session failed.", status="failed")
         return
 
@@ -255,15 +270,15 @@ async def _real_agent_run(
 
         chunk_count = 0
         async for chunk in stream:
-            if session.get("status") == "cancelled":
+            if _pending_messages.get(session_id) == "cancelled":
                 break
 
             # Handle pending user messages mid-stream
-            pending = session.get("pending_messages", [])
-            if pending:
+            pending = _pending_messages.get(session_id, [])
+            if isinstance(pending, list) and pending:
                 for msg in pending:
                     _push(session_id, "user_message", message=msg, handled=True)
-                session["pending_messages"] = []
+                _pending_messages[session_id] = []
 
             delta = ""
             try:
@@ -285,11 +300,12 @@ async def _real_agent_run(
     except Exception as e:
         logger.error(f"LLM call failed in workbench session {session_id}: {e}")
         _push(session_id, "error", message=f"LLM error: {str(e)}")
-        session["status"] = "failed"
+        await _db_update(session_id, status="failed", completed_at=datetime.utcnow())
         _push(session_id, "done", message="Session failed.", status="failed")
         return
 
-    if session.get("status") == "cancelled":
+    if _pending_messages.get(session_id) == "cancelled":
+        await _db_update(session_id, status="cancelled", completed_at=datetime.utcnow())
         _push(session_id, "info", message="Session cancelled.")
         _push(session_id, "done", message="Session cancelled.", status="cancelled")
         return
@@ -336,9 +352,8 @@ async def _real_agent_run(
 
         await asyncio.sleep(0.1)  # brief yield so SSE stream flushes
 
-    session["files"] = written
-    session["status"] = "completed"
-    session["completed_at"] = datetime.utcnow().isoformat()
+    completed = datetime.utcnow()
+    await _db_update(session_id, status="completed", completed_at=completed, files=written)
 
     location = str(project_path) if project_path else "in-memory only (no project path)"
     _push(session_id, "done",
@@ -350,62 +365,80 @@ async def _real_agent_run(
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
 @router.post("/sessions", dependencies=[Depends(verify_api_key)])
-async def create_session(body: WorkbenchCreate):
+async def create_session(body: WorkbenchCreate, db: AsyncSession = Depends(get_db)):
+    from app.models.workbench import WorkbenchSession
     session_id = str(uuid.uuid4())
     model_id   = body.model or "llama3.1:8b"
-
-    # Resolve project path
     project_path = _resolve_project_path(body.project_id, body.project_path)
 
-    _sessions[session_id] = {
-        "id":           session_id,
-        "task":         body.task,
-        "agent_type":   body.agent_type,
-        "model":        model_id,
-        "project_id":   body.project_id,
-        "project_path": str(project_path) if project_path else None,
-        "status":       "pending",
-        "created_at":   datetime.utcnow().isoformat(),
-        "started_at":   None,
-        "completed_at": None,
-        "files":        [],
-        "pending_messages": [],
-    }
+    # Persist to DB
+    session = WorkbenchSession(
+        id=session_id,
+        task=body.task,
+        agent_type=body.agent_type,
+        model=model_id,
+        project_id=body.project_id,
+        project_path=str(project_path) if project_path else None,
+        status="pending",
+        files=[],
+    )
+    db.add(session)
+    await db.commit()
+
+    # Set up SSE queue
     _queues[session_id] = asyncio.Queue(maxsize=1000)
+    _pending_messages[session_id] = []
 
     asyncio.create_task(_real_agent_run(
         session_id, body.task, body.agent_type, model_id, project_path
     ))
 
-    return _sessions[session_id]
+    return session.to_dict()
 
 
 @router.get("/sessions", dependencies=[Depends(verify_api_key)])
-async def list_sessions():
-    return {"data": list(_sessions.values()), "total": len(_sessions)}
+async def list_sessions(db: AsyncSession = Depends(get_db)):
+    from app.models.workbench import WorkbenchSession
+    result = await db.execute(
+        select(WorkbenchSession).order_by(desc(WorkbenchSession.created_at)).limit(100)
+    )
+    sessions = result.scalars().all()
+    return {"data": [s.to_dict() for s in sessions], "total": len(sessions)}
 
 
 @router.get("/sessions/{session_id}", dependencies=[Depends(verify_api_key)])
-async def get_session(session_id: str):
-    if session_id not in _sessions:
+async def get_session(session_id: str, db: AsyncSession = Depends(get_db)):
+    from app.models.workbench import WorkbenchSession
+    result = await db.execute(
+        select(WorkbenchSession).where(WorkbenchSession.id == session_id)
+    )
+    session = result.scalar_one_or_none()
+    if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    return _sessions[session_id]
+    return session.to_dict()
 
 
 @router.get("/sessions/{session_id}/stream")
 async def stream_session(session_id: str, request: Request):
     """SSE stream — no auth header required (EventSource API limitation)."""
-    if session_id not in _sessions:
+    from app.models.workbench import WorkbenchSession
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(WorkbenchSession).where(WorkbenchSession.id == session_id)
+        )
+        session = result.scalar_one_or_none()
+    if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
     async def event_generator() -> AsyncGenerator[str, None]:
         queue = _queues.get(session_id)
         if not queue:
-            yield f"data: {json.dumps({'type':'error','payload':{'message':'Queue not found'}})}\n\n"
+            # Session exists in DB but not actively running — send final state
+            yield f"data: {json.dumps({'type':'init','payload':session.to_dict()})}\n\n"
+            yield f"data: {json.dumps({'type':'done','payload':{'message':'Session already completed','status':session.status}})}\n\n"
             return
 
-        # Send current state as first event
-        yield f"data: {json.dumps({'type':'init','payload':_sessions[session_id]})}\n\n"
+        yield f"data: {json.dumps({'type':'init','payload':session.to_dict()})}\n\n"
 
         while True:
             if await request.is_disconnected():
@@ -414,9 +447,7 @@ async def stream_session(session_id: str, request: Request):
                 evt = await asyncio.wait_for(queue.get(), timeout=30.0)
                 yield f"data: {json.dumps(evt)}\n\n"
                 if evt.get("type") == "done":
-                    s = _sessions.get(session_id, {}).get("status", "")
-                    if s != "running":
-                        break
+                    break
             except asyncio.TimeoutError:
                 yield f"data: {json.dumps({'type':'ping','payload':{}})}\n\n"
 
@@ -433,24 +464,31 @@ async def stream_session(session_id: str, request: Request):
 
 @router.post("/sessions/{session_id}/message", dependencies=[Depends(verify_api_key)])
 async def send_message(session_id: str, body: WorkbenchMessage):
-    if session_id not in _sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    _sessions[session_id].setdefault("pending_messages", []).append(body.message)
+    if session_id not in _queues:
+        raise HTTPException(status_code=404, detail="Session not active")
+    _pending_messages.setdefault(session_id, []).append(body.message)
     _push(session_id, "user_message", message=body.message, handled=False)
     return {"ok": True}
 
 
 @router.post("/sessions/{session_id}/cancel", dependencies=[Depends(verify_api_key)])
 async def cancel_session(session_id: str):
-    if session_id not in _sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    _sessions[session_id]["status"] = "cancelled"
+    _pending_messages[session_id] = "cancelled"
     _push(session_id, "info", message="Cancelling…")
+    await _db_update(session_id, status="cancelled", completed_at=datetime.utcnow())
     return {"ok": True}
 
 
 @router.delete("/sessions/{session_id}", dependencies=[Depends(verify_api_key)])
-async def delete_session(session_id: str):
-    _sessions.pop(session_id, None)
+async def delete_session(session_id: str, db: AsyncSession = Depends(get_db)):
+    from app.models.workbench import WorkbenchSession
+    result = await db.execute(
+        select(WorkbenchSession).where(WorkbenchSession.id == session_id)
+    )
+    session = result.scalar_one_or_none()
+    if session:
+        await db.delete(session)
+        await db.commit()
     _queues.pop(session_id, None)
+    _pending_messages.pop(session_id, None)
     return {"ok": True}
