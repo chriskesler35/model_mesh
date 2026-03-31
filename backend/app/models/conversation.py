@@ -58,6 +58,7 @@ class Message(Base, BaseMixin):
     conversation_id = Column(UUIDType, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
     role = Column(String(20), nullable=False)
     content = Column(Text, nullable=False)
+    image_url = Column(Text, nullable=True)  # inline generated image URL
     model_used = Column(UUIDType, ForeignKey("models.id", ondelete="SET NULL"))
     tokens_in = Column(Integer)
     tokens_out = Column(Integer)

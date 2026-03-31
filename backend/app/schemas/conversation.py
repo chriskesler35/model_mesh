@@ -53,6 +53,7 @@ class MessageResponse(BaseModel):
     conversation_id: UUID4
     role: str
     content: str
+    image_url: Optional[str] = None
     model_used: Optional[UUID4] = None
     tokens_in: Optional[int] = None
     tokens_out: Optional[int] = None

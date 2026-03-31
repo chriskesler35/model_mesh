@@ -1045,6 +1045,11 @@ export default function ChatPage() {
             ))
             pendingImageTasksRef.current.delete(task.id)
             fetch(`${API_BASE}/v1/tasks/${task.id}/acknowledge`, { method: 'POST', headers: AUTH }).catch(() => {})
+            // Persist image_url to DB so it survives session reload
+            fetch(`${API_BASE}/v1/conversations/messages/${msgId}/image`, {
+              method: 'PATCH', headers: AUTH,
+              body: JSON.stringify({ image_url: imageUrl })
+            }).catch(() => {})
           } else if (task.status === 'failed') {
             setMessages(prev => prev.map(m =>
               m.id === msgId
@@ -1155,6 +1160,7 @@ export default function ChatPage() {
         role: m.role,
         content: m.content,
         created_at: m.created_at,
+        image_url: m.image_url || undefined,
       }))
       setMessages(msgs)
 

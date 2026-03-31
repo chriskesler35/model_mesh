@@ -3,6 +3,7 @@
 from typing import Optional
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel as PydanticBaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_
 import uuid
@@ -16,6 +17,33 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/conversations", tags=["conversations"], dependencies=[Depends(verify_api_key)])
+
+
+# ─── Message image URL persistence (must be BEFORE /{conversation_id} routes) ─
+class MessageImageUpdate(PydanticBaseModel):
+    image_url: str
+
+
+@router.patch("/messages/{message_id}/image")
+async def update_message_image(
+    message_id: str,
+    body: MessageImageUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Save an inline image URL on a message (for persistence across reloads)."""
+    try:
+        msg_uuid = uuid.UUID(message_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid message ID")
+    result = await db.execute(
+        select(Message).where(Message.id == msg_uuid)
+    )
+    msg = result.scalar_one_or_none()
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    msg.image_url = body.image_url
+    await db.commit()
+    return {"ok": True}
 
 
 @router.get("", response_model=ConversationList)
@@ -190,3 +218,6 @@ async def get_messages(
         offset=offset,
         has_more=offset + limit < total
     )
+
+
+
