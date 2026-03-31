@@ -290,30 +290,6 @@ async def run_model_sync(db: AsyncSession) -> dict:
 # HTTP endpoints
 # ---------------------------------------------------------------------------
 
-@router.get("/sync/debug")
-async def sync_debug():
-    """Debug endpoint — test Ollama connectivity directly."""
-    import urllib.request as _u, json as _j
-    url = f"{settings.ollama_base_url}/api/tags"
-    results = {"url": url}
-    try:
-        with _u.urlopen(url, timeout=5) as r:
-            data = _j.loads(r.read())
-            results["urllib"] = {"ok": True, "count": len(data.get("models", []))}
-    except Exception as e:
-        results["urllib"] = {"ok": False, "error": str(e)}
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=5.0) as c:
-            r = await c.get(url)
-            results["httpx"] = {"ok": True, "count": len(r.json().get("models", []))}
-    except ImportError:
-        results["httpx"] = {"ok": False, "error": "not installed"}
-    except Exception as e:
-        results["httpx"] = {"ok": False, "error": str(e)}
-    results["fetch_ollama_models"] = len(await fetch_ollama_models(settings.ollama_base_url or "http://localhost:11434"))
-    return results
-
 
 @router.post("/sync")
 async def sync_models(db: AsyncSession = Depends(get_db)):
