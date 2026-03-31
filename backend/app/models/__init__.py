@@ -12,6 +12,7 @@ from app.models.agent import Agent
 from app.models.task import Task
 from app.models.workbench import WorkbenchSession
 from app.models.preference import Preference
+from app.models.app_settings import AppSetting
 
 __all__ = [
     "Base", "BaseMixin", "Provider", "Model", "Persona",

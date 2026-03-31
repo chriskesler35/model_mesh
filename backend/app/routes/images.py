@@ -25,9 +25,21 @@ logger = logging.getLogger(__name__)
 
 # ─── ComfyUI auto-launch ──────────────────────────────────────────────────────
 
-COMFYUI_DIR = Path(r"E:\AI_Models\ComfyUI")
-COMFYUI_PYTHON = Path(r"C:\Python313\python.exe")
+# ComfyUI paths are now configurable via Settings > Image Generation
+# Priority: DB settings > .env > defaults (empty = disabled)
 _comfyui_proc: Optional[subprocess.Popen] = None
+
+
+async def _get_comfyui_paths():
+    """Load ComfyUI paths from DB settings."""
+    from app.database import AsyncSessionLocal
+    from app.services.app_settings_helper import get_comfyui_config
+    try:
+        async with AsyncSessionLocal() as db:
+            cfg = await get_comfyui_config(db)
+            return cfg
+    except Exception:
+        return {"dir": "", "python": "", "url": "http://localhost:8188", "gpu_devices": "0"}
 
 
 async def is_comfyui_running(url: str = "http://localhost:8188") -> bool:
@@ -48,20 +60,25 @@ async def launch_comfyui(url: str = "http://localhost:8188") -> bool:
     global _comfyui_proc
     logger.info("ComfyUI not running — attempting auto-launch…")
 
-    if not COMFYUI_DIR.exists():
-        logger.warning(f"ComfyUI directory not found: {COMFYUI_DIR}")
+    cfg = await _get_comfyui_paths()
+    comfyui_dir = Path(cfg["dir"]) if cfg["dir"] else None
+    comfyui_python = Path(cfg["python"]) if cfg["python"] else None
+
+    if not comfyui_dir or not comfyui_dir.exists():
+        logger.warning(f"ComfyUI directory not configured or not found: {comfyui_dir}")
         return False
-    if not COMFYUI_PYTHON.exists():
-        logger.warning(f"Python not found at: {COMFYUI_PYTHON}")
-        return False
+    if not comfyui_python or not comfyui_python.exists():
+        # Fallback: try 'python' on PATH
+        comfyui_python = Path("python")
+        logger.info("ComfyUI python not configured, trying system python")
 
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = "1,0"
+    env["CUDA_VISIBLE_DEVICES"] = cfg.get("gpu_devices", "0")
 
     try:
         _comfyui_proc = subprocess.Popen(
-            [str(COMFYUI_PYTHON), "main.py", "--listen", "0.0.0.0"],
-            cwd=str(COMFYUI_DIR),
+            [str(comfyui_python), "main.py", "--listen", "0.0.0.0"],
+            cwd=str(comfyui_dir),
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

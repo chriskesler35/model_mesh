@@ -1,5 +1,6 @@
 'use client'
 import PreferencesTab from '@/components/PreferencesTab'
+import ImageSettingsTab from '@/components/ImageSettingsTab'
 import { RemoteAccessTab } from './remote'
 
 import { useState, useEffect, useCallback } from 'react'
@@ -678,7 +679,7 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true)
   const [profileSaving, setProfileSaving] = useState(false)
   const [profileSaved, setProfileSaved] = useState(false)
-  const [activeTab, setActiveTab] = useState<'identity' | 'profile' | 'memory' | 'preferences' | 'conversations' | 'apikeys' | 'remote' | 'server'>('identity')
+  const [activeTab, setActiveTab] = useState<'identity' | 'profile' | 'memory' | 'preferences' | 'conversations' | 'apikeys' | 'remote' | 'images' | 'server'>('identity')
 
   const saveProfile = async () => {
     if (!profile) return
@@ -803,6 +804,7 @@ export default function SettingsPage() {
             ['profile', 'Profile', 'border-indigo-500 text-indigo-600'],
             ['memory', 'Memory', 'border-indigo-500 text-indigo-600'],
             ['preferences', 'Preferences', 'border-indigo-500 text-indigo-600'],
+            ['images', 'Image Generation', 'border-pink-500 text-pink-600'],
             ['conversations', 'Conversations', 'border-indigo-500 text-indigo-600'],
             ['apikeys', 'API Keys', 'border-indigo-500 text-indigo-600'],
             ['remote', '🌐 Remote', 'border-orange-500 text-orange-600'],
@@ -1014,6 +1016,11 @@ export default function SettingsPage() {
           </div>
           <ApiKeysTab />
         </div>
+      )}
+
+      {/* Image Generation Tab */}
+      {activeTab === 'images' && (
+        <ImageSettingsTab />
       )}
 
       {/* Server Tab */}
