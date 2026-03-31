@@ -5,7 +5,6 @@ import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 
-const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 interface Project {
   id: string; name: string; path: string; template: string
@@ -31,8 +30,8 @@ export default function ProjectsPage() {
 
   const fetchData = useCallback(async () => {
     const [proj, tmpl] = await Promise.all([
-      fetch(`${API_BASE}/v1/projects/`, { headers: AUTH }).then(r => r.json()).catch(() => ({ data: [] })),
-      fetch(`${API_BASE}/v1/projects/templates`, { headers: AUTH }).then(r => r.json()).catch(() => ({ data: [] })),
+      fetch(`${API_BASE}/v1/projects/`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+      fetch(`${API_BASE}/v1/projects/templates`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
     ])
     setProjects(proj.data || [])
     setTemplates(tmpl.data || [])
@@ -46,7 +45,7 @@ export default function ProjectsPage() {
     setCreating(true); setError('')
     try {
       const res = await fetch(`${API_BASE}/v1/projects/`, {
-        method: 'POST', headers: AUTH, body: JSON.stringify(form)
+        method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify(form)
       })
       if (!res.ok) throw new Error((await res.json()).detail || 'Failed')
       const p = await res.json()
@@ -59,7 +58,7 @@ export default function ProjectsPage() {
   }
 
   const deleteProject = async (id: string, deleteFiles: boolean) => {
-    await fetch(`${API_BASE}/v1/projects/${id}?delete_files=${deleteFiles}`, { method: 'DELETE', headers: AUTH })
+    await fetch(`${API_BASE}/v1/projects/${id}?delete_files=${deleteFiles}`, { method: 'DELETE', headers: AUTH_HEADERS })
     setProjects(prev => prev.filter(p => p.id !== id))
   }
 

@@ -4,7 +4,6 @@ import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 
 import { useState, useEffect, useCallback } from 'react'
 
-const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 interface SettingValue {
   key: string
@@ -72,9 +71,9 @@ export default function ImageSettingsTab() {
   const fetchSettings = useCallback(async () => {
     try {
       const [settingsRes, statusRes, wfRes] = await Promise.all([
-        fetch(`${API_BASE}/v1/settings/app`, { headers: AUTH }).then(r => r.json()),
-        fetch(`${API_BASE}/v1/comfyui/status`, { headers: AUTH }).then(r => r.json()).catch(() => ({ status: 'offline' })),
-        fetch(`${API_BASE}/v1/workflows`, { headers: AUTH }).then(r => r.json()).catch(() => ({ data: [] })),
+        fetch(`${API_BASE}/v1/settings/app`, { headers: AUTH_HEADERS }).then(r => r.json()),
+        fetch(`${API_BASE}/v1/comfyui/status`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ status: 'offline' })),
+        fetch(`${API_BASE}/v1/workflows`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
       ])
       setSettings(settingsRes.data || {})
       setComfyStatus(statusRes.status === 'online' ? 'online' : 'offline')
@@ -94,7 +93,7 @@ export default function ImageSettingsTab() {
     setSaving(key)
     try {
       const res = await fetch(`${API_BASE}/v1/settings/app/${key}`, {
-        method: 'PUT', headers: AUTH,
+        method: 'PUT', headers: AUTH_HEADERS,
         body: JSON.stringify({ value }),
       })
       const updated = await res.json()

@@ -5,7 +5,6 @@ import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 
-const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 const AGENT_ICONS: Record<string, string> = {
   coder: '💻', researcher: '🔍', designer: '🎨',
@@ -30,7 +29,7 @@ export default function WorkbenchListPage() {
   const [loadingModels, setLoadingModels] = useState(false)
 
   const fetchSessions = useCallback(async () => {
-    const res = await fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH }).then(r => r.json()).catch(() => ({ data: [] }))
+    const res = await fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] }))
     setSessions(res.data || [])
     setLoading(false)
   }, [])
@@ -52,7 +51,7 @@ export default function WorkbenchListPage() {
   useEffect(() => {
     if (!showNew || models.length > 0) return
     setLoadingModels(true)
-    fetch(`${API_BASE}/v1/models?limit=100`, { headers: AUTH })
+    fetch(`${API_BASE}/v1/models?limit=100`, { headers: AUTH_HEADERS })
       .then(r => r.json())
       .then(d => {
         const list: Model[] = (d.data || []).filter((m: any) =>
@@ -72,7 +71,7 @@ export default function WorkbenchListPage() {
     const body: any = { task: task.trim(), agent_type: agentType, model }
     if (projectId) body.project_id = projectId
     const res = await fetch(`${API_BASE}/v1/workbench/sessions`, {
-      method: 'POST', headers: AUTH,
+      method: 'POST', headers: AUTH_HEADERS,
       body: JSON.stringify(body),
     }).then(r => r.json())
     router.push(`/workbench/${res.id}`)

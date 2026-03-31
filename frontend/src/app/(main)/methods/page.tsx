@@ -4,7 +4,6 @@ import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 
 import { useState, useEffect, useCallback } from 'react'
 
-const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 interface Method {
   id: string; name: string; tagline: string; icon: string; color: string
@@ -31,7 +30,7 @@ export default function MethodsPage() {
   const [expandedPrompt, setExpandedPrompt] = useState<string | null>(null)
 
   const fetchMethods = useCallback(async () => {
-    const res = await fetch(`${API_BASE}/v1/methods/`, { headers: AUTH })
+    const res = await fetch(`${API_BASE}/v1/methods/`, { headers: AUTH_HEADERS })
       .then(r => r.json()).catch(() => ({ data: [], active_method: 'standard', active_stack: [] }))
     setMethods(res.data || [])
     setActiveId(res.active_method || 'standard')
@@ -46,7 +45,7 @@ export default function MethodsPage() {
     if (working) return
     setWorking(true)
     const res = await fetch(`${API_BASE}/v1/methods/activate`, {
-      method: 'POST', headers: AUTH, body: JSON.stringify({ method_id: id })
+      method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify({ method_id: id })
     }).then(r => r.json())
     setActiveId(res.active_method)
     setStack(res.active_stack || [])
@@ -64,7 +63,7 @@ export default function MethodsPage() {
     if (working) return
     setWorking(true)
     const res = await fetch(`${API_BASE}/v1/methods/stack/add`, {
-      method: 'POST', headers: AUTH, body: JSON.stringify({ method_id: id })
+      method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify({ method_id: id })
     }).then(r => r.json())
     setStack(res.active_stack || [])
     setConflicts(res.conflicts || [])
@@ -80,7 +79,7 @@ export default function MethodsPage() {
     if (working) return
     setWorking(true)
     const res = await fetch(`${API_BASE}/v1/methods/stack/remove`, {
-      method: 'POST', headers: AUTH, body: JSON.stringify({ method_id: id })
+      method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify({ method_id: id })
     }).then(r => r.json())
     setStack(res.active_stack || [])
     setConflicts([])
@@ -96,7 +95,7 @@ export default function MethodsPage() {
   const clearStack = async () => {
     if (working) return
     setWorking(true)
-    await fetch(`${API_BASE}/v1/methods/stack`, { method: 'DELETE', headers: AUTH })
+    await fetch(`${API_BASE}/v1/methods/stack`, { method: 'DELETE', headers: AUTH_HEADERS })
     setStack([])
     setActiveId('standard')
     setConflicts([])

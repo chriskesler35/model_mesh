@@ -5,7 +5,6 @@ import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 
-const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface WorkbenchSession {
@@ -213,7 +212,7 @@ export default function AgentSessionsPage() {
 
   const fetchSessions = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH })
+      const res = await fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH_HEADERS })
       const data = await res.json()
       setSessions(data.data || [])
       setLastRefresh(new Date())
@@ -235,13 +234,13 @@ export default function AgentSessionsPage() {
   }, [autoRefresh, sessions, fetchSessions])
 
   const cancelSession = async (id: string) => {
-    await fetch(`${API_BASE}/v1/workbench/sessions/${id}/cancel`, { method: 'POST', headers: AUTH })
+    await fetch(`${API_BASE}/v1/workbench/sessions/${id}/cancel`, { method: 'POST', headers: AUTH_HEADERS })
     setSessions(prev => prev.map(s => s.id === id ? { ...s, status: 'cancelled' } : s))
   }
 
   const deleteSession = async (id: string) => {
     if (!confirm('Delete this session?')) return
-    await fetch(`${API_BASE}/v1/workbench/sessions/${id}`, { method: 'DELETE', headers: AUTH })
+    await fetch(`${API_BASE}/v1/workbench/sessions/${id}`, { method: 'DELETE', headers: AUTH_HEADERS })
     setSessions(prev => prev.filter(s => s.id !== id))
   }
 

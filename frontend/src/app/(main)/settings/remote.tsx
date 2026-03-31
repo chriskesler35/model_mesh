@@ -4,7 +4,6 @@ import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 
 import { useState, useEffect } from 'react'
 
-const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 interface TailscaleInfo {
   hostname: string
@@ -86,8 +85,8 @@ export function RemoteAccessTab() {
       if (res.ok && action !== 'stop') {
         setTimeout(async () => {
           const [ts, tg] = await Promise.all([
-            fetch(`${API_BASE}/v1/remote/tailscale-info`, { headers: AUTH }).then(r => r.json()).catch(() => null),
-            fetch(`${API_BASE}/v1/telegram/status`, { headers: AUTH }).then(r => r.json()).catch(() => null),
+            fetch(`${API_BASE}/v1/remote/tailscale-info`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => null),
+            fetch(`${API_BASE}/v1/telegram/status`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => null),
           ])
           if (ts) setTailscale(ts)
           if (tg) setTelegram(tg)
@@ -100,8 +99,8 @@ export function RemoteAccessTab() {
   useEffect(() => {
     fetchBackendStatus()
     Promise.all([
-      fetch(`${API_BASE}/v1/remote/tailscale-info`, { headers: AUTH }).then(r => r.json()).catch(() => null),
-      fetch(`${API_BASE}/v1/telegram/status`, { headers: AUTH }).then(r => r.json()).catch(() => null),
+      fetch(`${API_BASE}/v1/remote/tailscale-info`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => null),
+      fetch(`${API_BASE}/v1/telegram/status`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => null),
     ]).then(([ts, tg]) => {
       setTailscale(ts)
       setTelegram(tg)
@@ -118,10 +117,10 @@ export function RemoteAccessTab() {
     setSaving('token')
     try {
       await fetch(`${API_BASE}/v1/api-keys/telegram_bot_token`, {
-        method: 'PUT', headers: AUTH, body: JSON.stringify({ value: botToken.trim() })
+        method: 'PUT', headers: AUTH_HEADERS, body: JSON.stringify({ value: botToken.trim() })
       })
       setBotToken('')
-      const res = await fetch(`${API_BASE}/v1/telegram/status`, { headers: AUTH }).then(r => r.json())
+      const res = await fetch(`${API_BASE}/v1/telegram/status`, { headers: AUTH_HEADERS }).then(r => r.json())
       setTelegram(res)
       fb('ok', 'Bot token saved — active immediately')
     } catch (e: any) { fb('err', e.message) }
@@ -133,10 +132,10 @@ export function RemoteAccessTab() {
     setSaving('chats')
     try {
       await fetch(`${API_BASE}/v1/api-keys/telegram_chat_ids`, {
-        method: 'PUT', headers: AUTH, body: JSON.stringify({ value: chatIds.trim() })
+        method: 'PUT', headers: AUTH_HEADERS, body: JSON.stringify({ value: chatIds.trim() })
       })
       // Refresh status immediately so Send Test button activates
-      const res = await fetch(`${API_BASE}/v1/telegram/status`, { headers: AUTH }).then(r => r.json()).catch(() => null)
+      const res = await fetch(`${API_BASE}/v1/telegram/status`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => null)
       if (res) setTelegram(res)
       fb('ok', 'Chat IDs saved')
     } catch (e: any) { fb('err', e.message) }
@@ -147,7 +146,7 @@ export function RemoteAccessTab() {
     setSaving('webhook')
     try {
       const res = await fetch(`${API_BASE}/v1/telegram/register-webhook`, {
-        method: 'POST', headers: AUTH, body: '{}'
+        method: 'POST', headers: AUTH_HEADERS, body: '{}'
       }).then(r => r.json())
       if (res.ok) { setWebhookUrl(res.webhook_url); fb('ok', 'Webhook registered with Telegram') }
       else fb('err', res.detail || 'Webhook registration failed')
@@ -160,7 +159,7 @@ export function RemoteAccessTab() {
     setSaving('test')
     try {
       const res = await fetch(`${API_BASE}/v1/telegram/send`, {
-        method: 'POST', headers: AUTH,
+        method: 'POST', headers: AUTH_HEADERS,
         body: JSON.stringify({ chat_id: String(telegram.authorized_chats[0]), text: testMsg })
       }).then(r => r.json())
       if (res.result?.message_id || res.ok) fb('ok', 'Test message sent!')

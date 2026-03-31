@@ -8,8 +8,6 @@ import Link from 'next/link'
 import { useToast } from '../ToastProvider'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const API_KEY = 'modelmesh_local_dev_key'
-const AUTH = { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json' }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Message {
@@ -950,7 +948,7 @@ export default function ChatPage() {
       case '/pin':
         if (activeConvId) {
           await fetch(`${API_BASE}/v1/conversations/${activeConvId}`, {
-            method: 'PATCH', headers: AUTH, body: JSON.stringify({ pinned: true })
+            method: 'PATCH', headers: AUTH_HEADERS, body: JSON.stringify({ pinned: true })
           })
           setConversations(prev => prev.map(c => c.id === activeConvId ? { ...c, pinned: true } : c))
           addToast({ type: 'success', title: 'Pinned', message: 'Conversation pinned.', autoClose: 2000 })
@@ -1003,7 +1001,7 @@ export default function ChatPage() {
       case '/method': {
         if (arg) {
           await fetch(`${API_BASE}/v1/methods/activate`, {
-            method: 'POST', headers: AUTH, body: JSON.stringify({ method_id: arg.toLowerCase() })
+            method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify({ method_id: arg.toLowerCase() })
           })
           const methodMeta: Record<string, { icon: string; color: string }> = {
             bmad: { icon: 'BMAD', color: 'purple' }, gsd: { icon: 'GSD', color: 'orange' },
@@ -1065,9 +1063,9 @@ export default function ChatPage() {
     const load = async () => {
       try {
         const [wfRes, ckRes, stRes] = await Promise.all([
-          fetch(`${API_BASE}/v1/workflows`, { headers: AUTH }).then(r => r.json()).catch(() => ({ data: [] })),
-          fetch(`${API_BASE}/v1/comfyui/checkpoints`, { headers: AUTH }).then(r => r.json()).catch(() => ({ checkpoints: [], unet_models: [], status: 'offline' })),
-          fetch(`${API_BASE}/v1/comfyui/status`, { headers: AUTH }).then(r => r.json()).catch(() => ({ status: 'offline' })),
+          fetch(`${API_BASE}/v1/workflows`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+          fetch(`${API_BASE}/v1/comfyui/checkpoints`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ checkpoints: [], unet_models: [], status: 'offline' })),
+          fetch(`${API_BASE}/v1/comfyui/status`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ status: 'offline' })),
         ])
         setWorkflows(wfRes.data || [])
         setComfyCheckpoints(ckRes.checkpoints || [])
@@ -1098,7 +1096,7 @@ export default function ChatPage() {
     const poll = async () => {
       if (pendingImageTasksRef.current.size === 0) return
       try {
-        const res = await fetch(`${API_BASE}/v1/tasks/notifications`, { headers: AUTH })
+        const res = await fetch(`${API_BASE}/v1/tasks/notifications`, { headers: AUTH_HEADERS })
         if (!res.ok) return
         const data = await res.json()
         for (const task of (data.notifications || [])) {
@@ -1112,10 +1110,10 @@ export default function ChatPage() {
                 : m
             ))
             pendingImageTasksRef.current.delete(task.id)
-            fetch(`${API_BASE}/v1/tasks/${task.id}/acknowledge`, { method: 'POST', headers: AUTH }).catch(() => {})
+            fetch(`${API_BASE}/v1/tasks/${task.id}/acknowledge`, { method: 'POST', headers: AUTH_HEADERS }).catch(() => {})
             // Persist image_url to DB so it survives session reload
             fetch(`${API_BASE}/v1/conversations/messages/${msgId}/image`, {
-              method: 'PATCH', headers: AUTH,
+              method: 'PATCH', headers: AUTH_HEADERS,
               body: JSON.stringify({ image_url: imageUrl })
             }).catch(() => {})
           } else if (task.status === 'failed') {
@@ -1138,10 +1136,10 @@ export default function ChatPage() {
     const init = async () => {
       try {
         const [personasRes, modelsRes, convsRes, identityRes] = await Promise.all([
-          fetch(`${API_BASE}/v1/models`, { headers: AUTH }).then(r => r.json()).catch(() => ({ data: [] })),
-          fetch(`${API_BASE}/v1/personas`, { headers: AUTH }).then(r => r.json()),
-          fetch(`${API_BASE}/v1/conversations?limit=100&pinned_first=true`, { headers: AUTH }).then(r => r.json()),
-          fetch(`${API_BASE}/v1/identity/status`, { headers: AUTH }).then(r => r.json()),
+          fetch(`${API_BASE}/v1/models`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+          fetch(`${API_BASE}/v1/personas`, { headers: AUTH_HEADERS }).then(r => r.json()),
+          fetch(`${API_BASE}/v1/conversations?limit=100&pinned_first=true`, { headers: AUTH_HEADERS }).then(r => r.json()),
+          fetch(`${API_BASE}/v1/identity/status`, { headers: AUTH_HEADERS }).then(r => r.json()),
         ])
 
         const ps: Persona[] = personasRes.data || []
@@ -1221,7 +1219,7 @@ export default function ChatPage() {
     setTitleValue(conv?.title || '')
 
     try {
-      const res = await fetch(`${API_BASE}/v1/conversations/${id}/messages?limit=200`, { headers: AUTH })
+      const res = await fetch(`${API_BASE}/v1/conversations/${id}/messages?limit=200`, { headers: AUTH_HEADERS })
       const data = await res.json()
       const msgs: Message[] = (data.data || []).map((m: any) => ({
         id: m.id,
@@ -1235,7 +1233,7 @@ export default function ChatPage() {
       // If DB came back empty, check for a context snapshot to offer recovery
       if (msgs.length === 0) {
         try {
-          const snapRes = await fetch(`${API_BASE}/v1/context/recover/${id}`, { headers: AUTH })
+          const snapRes = await fetch(`${API_BASE}/v1/context/recover/${id}`, { headers: AUTH_HEADERS })
           if (snapRes.ok) {
             const snapData = await snapRes.json()
             if (snapData.message_count > 0 || snapData.snapshot) {
@@ -1330,7 +1328,7 @@ export default function ChatPage() {
 
       const res = await fetch(`${API_BASE}/v1/chat/completions`, {
         method: 'POST',
-        headers: AUTH,
+        headers: AUTH_HEADERS,
         body: JSON.stringify(body),
       })
 
@@ -1430,7 +1428,7 @@ export default function ChatPage() {
         }
         if (convId) saveBody.conversation_id = convId
         const saveRes = await fetch(`${API_BASE}/v1/chat/completions`, {
-          method: 'POST', headers: AUTH, body: JSON.stringify(saveBody)
+          method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify(saveBody)
         }).then(r => r.json())
         const newConvId = saveRes.conversation_id || saveRes.modelmesh?.conversation_id || null
         if (newConvId && newConvId !== convId) {
@@ -1443,7 +1441,7 @@ export default function ChatPage() {
         if (convId) {
           const autoTitle = `🖼️ ${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}`
           await fetch(`${API_BASE}/v1/conversations/${convId}`, {
-            method: 'PATCH', headers: AUTH, body: JSON.stringify({ title: autoTitle })
+            method: 'PATCH', headers: AUTH_HEADERS, body: JSON.stringify({ title: autoTitle })
           }).catch(() => {})
           setConversations(prev => prev.map(c =>
             c.id === convId ? { ...c, title: autoTitle, last_message_at: new Date().toISOString() } : c
@@ -1479,7 +1477,7 @@ export default function ChatPage() {
   }
   const refreshConversations = async () => {
     try {
-      const res = await fetch(`${API_BASE}/v1/conversations?limit=100&pinned_first=true`, { headers: AUTH })
+      const res = await fetch(`${API_BASE}/v1/conversations?limit=100&pinned_first=true`, { headers: AUTH_HEADERS })
       const data = await res.json()
       setConversations(data.data || [])
     } catch { /* silent */ }
@@ -1487,28 +1485,28 @@ export default function ChatPage() {
 
   // ── Conversation actions ──────────────────────────────────────────────────
   const deleteConv = async (id: string) => {
-    await fetch(`${API_BASE}/v1/conversations/${id}`, { method: 'DELETE', headers: AUTH })
+    await fetch(`${API_BASE}/v1/conversations/${id}`, { method: 'DELETE', headers: AUTH_HEADERS })
     setConversations(prev => prev.filter(c => c.id !== id))
     if (activeConvId === id) newChat()
   }
 
   const pinConv = async (id: string, val: boolean) => {
     await fetch(`${API_BASE}/v1/conversations/${id}`, {
-      method: 'PATCH', headers: AUTH, body: JSON.stringify({ pinned: val })
+      method: 'PATCH', headers: AUTH_HEADERS, body: JSON.stringify({ pinned: val })
     })
     setConversations(prev => prev.map(c => c.id === id ? { ...c, pinned: val } : c))
   }
 
   const keepForeverConv = async (id: string, val: boolean) => {
     await fetch(`${API_BASE}/v1/conversations/${id}`, {
-      method: 'PATCH', headers: AUTH, body: JSON.stringify({ keep_forever: val })
+      method: 'PATCH', headers: AUTH_HEADERS, body: JSON.stringify({ keep_forever: val })
     })
     setConversations(prev => prev.map(c => c.id === id ? { ...c, keep_forever: val } : c))
   }
 
   const renameConv = async (id: string, title: string) => {
     await fetch(`${API_BASE}/v1/conversations/${id}`, {
-      method: 'PATCH', headers: AUTH, body: JSON.stringify({ title })
+      method: 'PATCH', headers: AUTH_HEADERS, body: JSON.stringify({ title })
     })
     setConversations(prev => prev.map(c => c.id === id ? { ...c, title } : c))
     if (activeConvId === id) setTitleValue(title)

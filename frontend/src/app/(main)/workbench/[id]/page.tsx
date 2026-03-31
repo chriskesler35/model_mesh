@@ -5,7 +5,6 @@ import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 
-const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface WBEvent {
@@ -192,7 +191,7 @@ export default function WorkbenchSessionPage() {
     if (!intervention.trim() || sending) return
     setSending(true)
     await fetch(`${API_BASE}/v1/workbench/sessions/${id}/message`, {
-      method: 'POST', headers: AUTH,
+      method: 'POST', headers: AUTH_HEADERS,
       body: JSON.stringify({ message: intervention.trim() })
     })
     setIntervention('')
@@ -202,7 +201,7 @@ export default function WorkbenchSessionPage() {
 
   const cancelSession = async () => {
     if (!confirm('Cancel this session?')) return
-    await fetch(`${API_BASE}/v1/workbench/sessions/${id}/cancel`, { method: 'POST', headers: AUTH })
+    await fetch(`${API_BASE}/v1/workbench/sessions/${id}/cancel`, { method: 'POST', headers: AUTH_HEADERS })
     setStatus('cancelled')
   }
 

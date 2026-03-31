@@ -4,7 +4,6 @@ import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 
 import { useState, useEffect, useCallback, createContext, useContext } from 'react'
 
-const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key' }
 
 interface Toast {
   id: string
@@ -56,7 +55,7 @@ export default function ToastProvider({ children }: { children: React.ReactNode 
     const toast = toasts.find(t => t.id === id)
     if (toast?.taskId) {
       fetch(`${API_BASE}/v1/tasks/${toast.taskId}/acknowledge`, {
-        method: 'POST', headers: AUTH,
+        method: 'POST', headers: AUTH_HEADERS,
       }).catch(() => {})
     }
   }, [toasts])
@@ -64,7 +63,7 @@ export default function ToastProvider({ children }: { children: React.ReactNode 
   const submitTask = useCallback(async (taskType: string, params: any, conversationId?: string): Promise<string> => {
     const res = await fetch(`${API_BASE}/v1/tasks`, {
       method: 'POST',
-      headers: { ...AUTH, 'Content-Type': 'application/json' },
+      headers: { ...AUTH_HEADERS, 'Content-Type': 'application/json' },
       body: JSON.stringify({ task_type: taskType, params, conversation_id: conversationId }),
     })
     const data = await res.json()
@@ -84,7 +83,7 @@ export default function ToastProvider({ children }: { children: React.ReactNode 
   useEffect(() => {
     const poll = async () => {
       try {
-        const res = await fetch(`${API_BASE}/v1/tasks/notifications`, { headers: AUTH })
+        const res = await fetch(`${API_BASE}/v1/tasks/notifications`, { headers: AUTH_HEADERS })
         if (!res.ok) return
         const data = await res.json()
         for (const task of data.notifications || []) {
@@ -103,7 +102,7 @@ export default function ToastProvider({ children }: { children: React.ReactNode 
 
           // Auto-acknowledge on the server
           fetch(`${API_BASE}/v1/tasks/${task.id}/acknowledge`, {
-            method: 'POST', headers: AUTH,
+            method: 'POST', headers: AUTH_HEADERS,
           }).catch(() => {})
         }
       } catch { /* silent */ }

@@ -4,7 +4,6 @@ import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 
 import { useState, useEffect, useCallback } from 'react'
 
-const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 interface User {
   id: string; username: string; display_name: string
@@ -48,10 +47,10 @@ export default function CollaboratePage() {
 
   const fetchAll = useCallback(async () => {
     const [usersRes, auditRes, wsRes, handoffsRes] = await Promise.all([
-      fetch(`${API_BASE}/v1/collab/users`, { headers: AUTH }).then(r => r.json()).catch(() => ({ data: [] })),
-      fetch(`${API_BASE}/v1/collab/audit?limit=30`, { headers: AUTH }).then(r => r.json()).catch(() => ({ data: [] })),
-      fetch(`${API_BASE}/v1/collab/workspaces`, { headers: AUTH }).then(r => r.json()).catch(() => ({ data: [] })),
-      fetch(`${API_BASE}/v1/collab/handoff`, { headers: AUTH }).then(r => r.json()).catch(() => ({ data: [] })),
+      fetch(`${API_BASE}/v1/collab/users`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+      fetch(`${API_BASE}/v1/collab/audit?limit=30`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+      fetch(`${API_BASE}/v1/collab/workspaces`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+      fetch(`${API_BASE}/v1/collab/handoff`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
     ])
     setUsers(usersRes.data || [])
     setAudit(auditRes.data || [])
@@ -66,7 +65,7 @@ export default function CollaboratePage() {
     if (!userForm.username.trim() || !userForm.password.trim()) return
     setSavingUser(true)
     await fetch(`${API_BASE}/v1/collab/users`, {
-      method: 'POST', headers: AUTH, body: JSON.stringify(userForm)
+      method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify(userForm)
     })
     setShowNewUser(false)
     setUserForm({ username: '', display_name: '', password: '', role: 'member' })
@@ -76,7 +75,7 @@ export default function CollaboratePage() {
 
   const deleteUser = async (id: string, name: string) => {
     if (!confirm(`Remove user "${name}"?`)) return
-    await fetch(`${API_BASE}/v1/collab/users/${id}`, { method: 'DELETE', headers: AUTH })
+    await fetch(`${API_BASE}/v1/collab/users/${id}`, { method: 'DELETE', headers: AUTH_HEADERS })
     fetchAll()
   }
 
@@ -84,7 +83,7 @@ export default function CollaboratePage() {
     if (!wsForm.name.trim()) return
     setSavingWs(true)
     await fetch(`${API_BASE}/v1/collab/workspaces`, {
-      method: 'POST', headers: AUTH,
+      method: 'POST', headers: AUTH_HEADERS,
       body: JSON.stringify({ name: wsForm.name, description: wsForm.description, project_ids: [], member_ids: [] })
     })
     setShowNewWs(false)
@@ -94,12 +93,12 @@ export default function CollaboratePage() {
   }
 
   const deleteWorkspace = async (id: string) => {
-    await fetch(`${API_BASE}/v1/collab/workspaces/${id}`, { method: 'DELETE', headers: AUTH })
+    await fetch(`${API_BASE}/v1/collab/workspaces/${id}`, { method: 'DELETE', headers: AUTH_HEADERS })
     fetchAll()
   }
 
   const acceptHandoff = async (id: string) => {
-    await fetch(`${API_BASE}/v1/collab/handoff/${id}/accept`, { method: 'POST', headers: AUTH })
+    await fetch(`${API_BASE}/v1/collab/handoff/${id}/accept`, { method: 'POST', headers: AUTH_HEADERS })
     fetchAll()
   }
 

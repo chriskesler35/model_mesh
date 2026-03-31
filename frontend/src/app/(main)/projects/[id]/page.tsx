@@ -10,7 +10,6 @@ const SandboxPanel = ({ projectId }: { projectId: string }) => (
   <div className="text-sm text-gray-500 py-8 text-center">Sandbox coming soon.</div>
 )
 
-const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 interface FileNode { name: string; path: string; type: 'file' | 'dir'; size: number; children?: FileNode[] }
 
@@ -82,7 +81,7 @@ export default function ProjectDetailPage() {
     setSandboxSaving(true)
     try {
       await fetch(`${API_BASE}/v1/projects/${id}/sandbox`, {
-        method: 'POST', headers: AUTH, body: JSON.stringify({ mode })
+        method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify({ mode })
       })
       setProject((p: any) => ({ ...p, sandbox_mode: mode }))
     } finally {
@@ -97,8 +96,8 @@ export default function ProjectDetailPage() {
 
   const fetchProject = useCallback(async () => {
     const [proj, files] = await Promise.all([
-      fetch(`${API_BASE}/v1/projects/${id}`, { headers: AUTH }).then(r => r.json()).catch(() => null),
-      fetch(`${API_BASE}/v1/projects/${id}/files`, { headers: AUTH }).then(r => r.json()).catch(() => ({ tree: [] })),
+      fetch(`${API_BASE}/v1/projects/${id}`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => null),
+      fetch(`${API_BASE}/v1/projects/${id}/files`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ tree: [] })),
     ])
     if (!proj || proj.detail) { router.push('/projects'); return }
     setProject(proj)
@@ -115,7 +114,7 @@ export default function ProjectDetailPage() {
     let lastStatus: string | null = null
     const poll = async () => {
       try {
-        const res = await fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH })
+        const res = await fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH_HEADERS })
         const data = await res.json()
         const mine = (data.data || []).find((s: any) => s.project_id === id)
         if (!mine) return
@@ -136,7 +135,7 @@ export default function ProjectDetailPage() {
     let lastStatus: string | null = null
     const poll = async () => {
       try {
-        const res = await fetch(\/v1/workbench/sessions\, { headers: AUTH })
+        const res = await fetch(\/v1/workbench/sessions\, { headers: AUTH_HEADERS })
         const data = await res.json()
         const mine = (data.data || []).find((s: any) => s.project_id === id)
         if (!mine) return
@@ -156,7 +155,7 @@ export default function ProjectDetailPage() {
     setSelectedFile(node)
     setFileContent(null)
     setLoadingFile(true)
-    const res = await fetch(`${API_BASE}/v1/projects/${id}/files/read?file_path=${encodeURIComponent(node.path)}`, { headers: AUTH })
+    const res = await fetch(`${API_BASE}/v1/projects/${id}/files/read?file_path=${encodeURIComponent(node.path)}`, { headers: AUTH_HEADERS })
       .then(r => r.json()).catch(() => ({ content: 'Failed to load file.' }))
     setFileContent(res.content || '')
     setLoadingFile(false)
@@ -165,7 +164,7 @@ export default function ProjectDetailPage() {
   const saveProject = async () => {
     setSaving(true)
     await fetch(`${API_BASE}/v1/projects/${id}`, {
-      method: 'PATCH', headers: AUTH,
+      method: 'PATCH', headers: AUTH_HEADERS,
       body: JSON.stringify({ name: editName, description: editDesc })
     })
     setProject((p: any) => ({ ...p, name: editName, description: editDesc }))

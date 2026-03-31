@@ -5,7 +5,6 @@ import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 import { useState, useEffect, useRef } from 'react'
 import { api } from '@/lib/api'
 
-const AUTH_HEADERS = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 interface ValidationResult {
   valid: boolean

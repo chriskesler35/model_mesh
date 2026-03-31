@@ -4,7 +4,6 @@ import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 
 import { useState, useEffect, useCallback } from 'react'
 
-const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key' }
 
 interface FitnessResult {
   ok: boolean
@@ -44,7 +43,7 @@ export function ModelFitnessCheck({ modelId, showGpuBar = true, compact = false 
     if (!modelId) return
     setLoading(true)
     try {
-      const res = await fetch(`${API_BASE}/v1/hardware/check/${encodeURIComponent(modelId)}`, { headers: AUTH })
+      const res = await fetch(`${API_BASE}/v1/hardware/check/${encodeURIComponent(modelId)}`, { headers: AUTH_HEADERS })
         .then(r => r.json())
       setResult(res)
     } catch {
@@ -150,7 +149,7 @@ export function GpuStatusWidget() {
   useEffect(() => {
     const fetch_ = async () => {
       try {
-        const res = await fetch(`${API_BASE}/v1/hardware/status`, { headers: AUTH }).then(r => r.json())
+        const res = await fetch(`${API_BASE}/v1/hardware/status`, { headers: AUTH_HEADERS }).then(r => r.json())
         setHw(res)
       } catch { /* silent */ }
     }

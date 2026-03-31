@@ -4,7 +4,6 @@ import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 
 import { useState, useEffect, useCallback } from 'react'
 
-const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 interface SandboxStatus {
   project_id: string
@@ -30,14 +29,14 @@ export function SandboxPanel({ projectId }: { projectId: string }) {
   const [envVars, setEnvVars] = useState<Record<string, string>>({})
 
   const fetchStatus = useCallback(async () => {
-    const res = await fetch(`${API_BASE}/v1/sandbox/projects/${projectId}/status`, { headers: AUTH })
+    const res = await fetch(`${API_BASE}/v1/sandbox/projects/${projectId}/status`, { headers: AUTH_HEADERS })
       .then(r => r.json()).catch(() => null)
     if (res) setStatus(res)
     setLoading(false)
   }, [projectId])
 
   const fetchEnvVars = useCallback(async () => {
-    const res = await fetch(`${API_BASE}/v1/sandbox/projects/${projectId}/env-vars`, { headers: AUTH })
+    const res = await fetch(`${API_BASE}/v1/sandbox/projects/${projectId}/env-vars`, { headers: AUTH_HEADERS })
       .then(r => r.json()).catch(() => ({ env_vars: {} }))
     setEnvVars(res.env_vars || {})
   }, [projectId])
@@ -61,20 +60,20 @@ export function SandboxPanel({ projectId }: { projectId: string }) {
 
   const createVenv = () => run(async () =>
     fetch(`${API_BASE}/v1/sandbox/projects/${projectId}/venv`, {
-      method: 'POST', headers: AUTH,
+      method: 'POST', headers: AUTH_HEADERS,
       body: JSON.stringify({ requirements: packages || null })
     }).then(r => r.json())
   )
 
   const gitInit = () => run(async () =>
     fetch(`${API_BASE}/v1/sandbox/projects/${projectId}/git/init`, {
-      method: 'POST', headers: AUTH, body: '{}'
+      method: 'POST', headers: AUTH_HEADERS, body: '{}'
     }).then(r => r.json()), 'Git repository initialized'
   )
 
   const createSnapshot = () => run(async () =>
     fetch(`${API_BASE}/v1/sandbox/projects/${projectId}/snapshot`, {
-      method: 'POST', headers: AUTH,
+      method: 'POST', headers: AUTH_HEADERS,
       body: JSON.stringify({ message: snapMsg || 'DevForgeAI snapshot' })
     }).then(r => r.json()),
     `Snapshot created: "${snapMsg || 'DevForgeAI snapshot'}"`
@@ -84,7 +83,7 @@ export function SandboxPanel({ projectId }: { projectId: string }) {
     if (!confirm(`Roll back to "${message}" (${hash})?\n\nA safety snapshot will be created first.`)) return
     run(async () =>
       fetch(`${API_BASE}/v1/sandbox/projects/${projectId}/rollback`, {
-        method: 'POST', headers: AUTH, body: JSON.stringify({ commit_hash: hash })
+        method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify({ commit_hash: hash })
       }).then(r => r.json()), `Rolled back to ${hash}`
     )
   }
@@ -93,7 +92,7 @@ export function SandboxPanel({ projectId }: { projectId: string }) {
     if (!packages.trim()) return
     run(async () =>
       fetch(`${API_BASE}/v1/sandbox/projects/${projectId}/install`, {
-        method: 'POST', headers: AUTH, body: JSON.stringify({ requirements: packages })
+        method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify({ requirements: packages })
       }).then(r => r.json()), `Installed: ${packages}`
     )
   }
@@ -102,7 +101,7 @@ export function SandboxPanel({ projectId }: { projectId: string }) {
     if (!envKey.trim()) return
     const updated = { ...envVars, [envKey]: envVal }
     await fetch(`${API_BASE}/v1/sandbox/projects/${projectId}/env-vars`, {
-      method: 'POST', headers: AUTH, body: JSON.stringify(updated)
+      method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify(updated)
     })
     setEnvVars(updated)
     setEnvKey(''); setEnvVal('')
@@ -111,7 +110,7 @@ export function SandboxPanel({ projectId }: { projectId: string }) {
   const deleteEnvVar = async (key: string) => {
     const updated = Object.fromEntries(Object.entries(envVars).filter(([k]) => k !== key))
     await fetch(`${API_BASE}/v1/sandbox/projects/${projectId}/env-vars`, {
-      method: 'POST', headers: AUTH, body: JSON.stringify(updated)
+      method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify(updated)
     })
     setEnvVars(updated)
   }

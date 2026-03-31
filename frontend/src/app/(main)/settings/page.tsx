@@ -8,7 +8,6 @@ import { RemoteAccessTab } from './remote'
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '@/lib/api'
 
-const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 const PROVIDER_META: Record<string, { label: string; placeholder: string; link: string; color: string }> = {
   anthropic:  { label: 'Anthropic',  placeholder: 'sk-ant-…',        link: 'https://console.anthropic.com/settings/keys',    color: 'bg-orange-100 text-orange-800' },
@@ -35,7 +34,7 @@ function ApiKeysTab() {
 
   const fetchKeys = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/v1/api-keys`, { headers: AUTH })
+      const res = await fetch(`${API_BASE}/v1/api-keys`, { headers: AUTH_HEADERS })
       const data = await res.json()
       setKeys(data.data || [])
     } catch (e) {
@@ -55,7 +54,7 @@ function ApiKeysTab() {
     try {
       const res = await fetch(`${API_BASE}/v1/api-keys/${provider}`, {
         method: 'PUT',
-        headers: AUTH,
+        headers: AUTH_HEADERS,
         body: JSON.stringify({ value }),
       })
       if (!res.ok) {
@@ -79,7 +78,7 @@ function ApiKeysTab() {
 
   const clearKey = async (provider: string) => {
     if (!confirm(`Clear the ${PROVIDER_META[provider]?.label || provider} API key?`)) return
-    await fetch(`${API_BASE}/v1/api-keys/${provider}`, { method: 'DELETE', headers: AUTH })
+    await fetch(`${API_BASE}/v1/api-keys/${provider}`, { method: 'DELETE', headers: AUTH_HEADERS })
     setKeys(prev => prev.map(k => k.provider === provider ? { ...k, is_set: false, masked_value: null } : k))
   }
 
@@ -195,14 +194,13 @@ interface UserProfile {
 
 // ─── Conversations Tab ────────────────────────────────────────────────────────
 function ConversationsTab() {
-  const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
   const [conversations, setConversations] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [deleting, setDeleting] = useState<string | null>(null)
 
   useEffect(() => {
-    fetch(`${API_BASE}/v1/conversations?limit=100`, { headers: AUTH })
+    fetch(`${API_BASE}/v1/conversations?limit=100`, { headers: AUTH_HEADERS })
       .then(r => r.json())
       .then(d => setConversations(d.data || []))
       .catch(console.error)
@@ -212,7 +210,7 @@ function ConversationsTab() {
   const deleteConv = async (id: string) => {
     if (!confirm('Delete this conversation?')) return
     setDeleting(id)
-    await fetch(`${API_BASE}/v1/conversations/${id}`, { method: 'DELETE', headers: AUTH })
+    await fetch(`${API_BASE}/v1/conversations/${id}`, { method: 'DELETE', headers: AUTH_HEADERS })
     setConversations(prev => prev.filter(c => c.id !== id))
     setDeleting(null)
   }
@@ -272,7 +270,6 @@ function ConversationsTab() {
 }
 // ─── Identity Tab ─────────────────────────────────────────────────────────────
 function IdentityTab() {
-  const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
   const [soulContent, setSoulContent] = useState('')
   const [userContent, setUserContent] = useState('')
@@ -285,9 +282,9 @@ function IdentityTab() {
     const fetchAll = async () => {
       try {
         const [soulRes, userRes, identityRes] = await Promise.all([
-          fetch(`${API_BASE}/v1/identity/soul`, { headers: AUTH }).then(r => r.json()),
-          fetch(`${API_BASE}/v1/identity/user`, { headers: AUTH }).then(r => r.json()),
-          fetch(`${API_BASE}/v1/identity/identity-file`, { headers: AUTH }).then(r => r.json()),
+          fetch(`${API_BASE}/v1/identity/soul`, { headers: AUTH_HEADERS }).then(r => r.json()),
+          fetch(`${API_BASE}/v1/identity/user`, { headers: AUTH_HEADERS }).then(r => r.json()),
+          fetch(`${API_BASE}/v1/identity/identity-file`, { headers: AUTH_HEADERS }).then(r => r.json()),
         ])
         setSoulContent(soulRes.content || '')
         setUserContent(userRes.content || '')
@@ -304,7 +301,7 @@ function IdentityTab() {
   const saveFile = async (key: string, url: string, content: string) => {
     setSaving(s => ({ ...s, [key]: true }))
     try {
-      await fetch(url, { method: 'PUT', headers: AUTH, body: JSON.stringify({ content }) })
+      await fetch(url, { method: 'PUT', headers: AUTH_HEADERS, body: JSON.stringify({ content }) })
       setSaved(s => ({ ...s, [key]: true }))
       setTimeout(() => setSaved(s => ({ ...s, [key]: false })), 2500)
     } finally {
@@ -315,10 +312,10 @@ function IdentityTab() {
   const resetOnboarding = async () => {
     if (!confirm('This will clear your profile and re-run setup next time you open chat. Continue?')) return
     await fetch(`${API_BASE}/v1/identity/user`, {
-      method: 'PUT', headers: AUTH, body: JSON.stringify({ content: '' })
+      method: 'PUT', headers: AUTH_HEADERS, body: JSON.stringify({ content: '' })
     })
     await fetch(`${API_BASE}/v1/identity/soul`, {
-      method: 'PUT', headers: AUTH, body: JSON.stringify({ content: '' })
+      method: 'PUT', headers: AUTH_HEADERS, body: JSON.stringify({ content: '' })
     })
     setUserContent('')
     setSoulContent('')
@@ -442,8 +439,8 @@ function ServerTab() {
   const fetchAll = useCallback(async () => {
     try {
       const [infoRes, healthRes, backendStatus] = await Promise.all([
-        fetch(`${API_BASE}/v1/system/info`, { headers: AUTH }).then(r => r.json()).catch(() => null),
-        fetch(`${API_BASE}/v1/system/health`, { headers: AUTH }).then(r => r.json()).catch(() => null),
+        fetch(`${API_BASE}/v1/system/info`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => null),
+        fetch(`${API_BASE}/v1/system/health`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => null),
         fetch('/api/backend').then(r => r.json()).catch(() => null),
       ])
       setInfo(infoRes)
@@ -477,7 +474,7 @@ function ServerTab() {
 
   const fetchLogs = useCallback(async (service: string) => {
     try {
-      const res = await fetch(`${API_BASE}/v1/system/logs?service=${service}&lines=80`, { headers: AUTH })
+      const res = await fetch(`${API_BASE}/v1/system/logs?service=${service}&lines=80`, { headers: AUTH_HEADERS })
       const data = await res.json()
       setLogs({ out: data.out || [], err: data.err || [] })
     } catch { setLogs({ out: [], err: [] }) }

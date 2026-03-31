@@ -6,7 +6,6 @@ import { useState, useEffect, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 
-const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 const AGENT_TYPE_ICONS: Record<string, string> = {
   coder: '💻', researcher: '🔍', designer: '🎨',
@@ -53,12 +52,12 @@ export default function AgentDetailPage() {
 
   const loadData = useCallback(async () => {
     const [personasRes] = await Promise.all([
-      fetch(`${API_BASE}/v1/personas`, { headers: AUTH }).then(r => r.json()).catch(() => ({ data: [] }))
+      fetch(`${API_BASE}/v1/personas`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] }))
     ])
     setPersonas(personasRes.data || [])
 
     if (agentId !== 'new') {
-      const agentData = await fetch(`${API_BASE}/v1/agents/${agentId}`, { headers: AUTH })
+      const agentData = await fetch(`${API_BASE}/v1/agents/${agentId}`, { headers: AUTH_HEADERS })
         .then(r => r.json()).catch(() => null)
       if (agentData && !agentData.detail) {
         setAgent(agentData)
@@ -88,12 +87,12 @@ export default function AgentDetailPage() {
     try {
       if (agentId === 'new') {
         const res = await fetch(`${API_BASE}/v1/agents`, {
-          method: 'POST', headers: AUTH, body: JSON.stringify(body)
+          method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify(body)
         }).then(r => r.json())
         router.push(`/agents/${res.id}`)
       } else {
         const res = await fetch(`${API_BASE}/v1/agents/${agentId}`, {
-          method: 'PATCH', headers: AUTH, body: JSON.stringify(body)
+          method: 'PATCH', headers: AUTH_HEADERS, body: JSON.stringify(body)
         }).then(r => r.json())
         // If a default-* agent was promoted to a real DB record, update the URL
         if (res.id && res.id !== agentId) {

@@ -4,7 +4,6 @@ import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 
 import { useState, useEffect, useCallback } from 'react'
 
-const AUTH = { 'Authorization': 'Bearer modelmesh_local_dev_key', 'Content-Type': 'application/json' }
 
 interface Preference {
   id: string
@@ -50,7 +49,7 @@ export default function PreferencesTab() {
     try {
       const res = await fetch(
         `${API_BASE}/v1/preferences?include_inactive=${showInactive}`,
-        { headers: AUTH }
+        { headers: AUTH_HEADERS }
       )
       const data = await res.json()
       setPrefs(data.data || [])
@@ -68,7 +67,7 @@ export default function PreferencesTab() {
     setSaving(true)
     try {
       const res = await fetch(`${API_BASE}/v1/preferences`, {
-        method: 'POST', headers: AUTH,
+        method: 'POST', headers: AUTH_HEADERS,
         body: JSON.stringify({ key: newKey.trim(), value: newValue.trim(), category: newCategory, source: 'manual' }),
       })
       const pref = await res.json()
@@ -84,7 +83,7 @@ export default function PreferencesTab() {
 
   const togglePref = async (id: string, active: boolean) => {
     await fetch(`${API_BASE}/v1/preferences/${id}`, {
-      method: 'PATCH', headers: AUTH,
+      method: 'PATCH', headers: AUTH_HEADERS,
       body: JSON.stringify({ is_active: active }),
     })
     setPrefs(prev => prev.map(p => p.id === id ? { ...p, is_active: active } : p))
@@ -92,7 +91,7 @@ export default function PreferencesTab() {
 
   const deletePref = async (id: string) => {
     if (!confirm('Delete this preference?')) return
-    await fetch(`${API_BASE}/v1/preferences/${id}`, { method: 'DELETE', headers: AUTH })
+    await fetch(`${API_BASE}/v1/preferences/${id}`, { method: 'DELETE', headers: AUTH_HEADERS })
     setPrefs(prev => prev.filter(p => p.id !== id))
   }
 
@@ -100,14 +99,14 @@ export default function PreferencesTab() {
     setDetecting(true)
     try {
       // Fetch last 20 messages from most recent conversation
-      const convsRes = await fetch(`${API_BASE}/v1/conversations?limit=1`, { headers: AUTH }).then(r => r.json())
+      const convsRes = await fetch(`${API_BASE}/v1/conversations?limit=1`, { headers: AUTH_HEADERS }).then(r => r.json())
       const convs = convsRes.data || []
       if (convs.length === 0) {
         alert('No conversations found to analyze.')
         return
       }
       const convId = convs[0].id
-      const msgsRes = await fetch(`${API_BASE}/v1/conversations/${convId}/messages?limit=20`, { headers: AUTH }).then(r => r.json())
+      const msgsRes = await fetch(`${API_BASE}/v1/conversations/${convId}/messages?limit=20`, { headers: AUTH_HEADERS }).then(r => r.json())
       const messages = (msgsRes.data || []).map((m: any) => ({ role: m.role, content: m.content }))
 
       if (messages.length < 2) {
@@ -116,7 +115,7 @@ export default function PreferencesTab() {
       }
 
       const res = await fetch(`${API_BASE}/v1/preferences/detect`, {
-        method: 'POST', headers: AUTH,
+        method: 'POST', headers: AUTH_HEADERS,
         body: JSON.stringify({ messages }),
       })
       const result = await res.json()

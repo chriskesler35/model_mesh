@@ -3,7 +3,6 @@ import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 // API_URL uses the shared dynamic config (auto-detects hostname for remote access)
 const API_URL = API_BASE
 
-const API_KEY = process.env.NEXT_PUBLIC_MODELMESH_API_KEY || 'modelmesh_local_dev_key'
 
 class ApiClient {
   private baseUrl: string
