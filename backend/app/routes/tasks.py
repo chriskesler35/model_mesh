@@ -74,7 +74,7 @@ async def _run_image_gen(task_id: str, params: dict):
 
         try:
             prompt = params.get("prompt", "")
-            model = params.get("model", "comfyui-local")
+            model = params.get("model", "gemini-imagen")
             size = params.get("size", "1024x1024")
             negative_prompt = params.get("negative_prompt")
 

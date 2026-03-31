@@ -34,6 +34,23 @@ async def chat_completions(
     resolver = PersonaResolver(db)
     persona, primary_model, fallback_model = await resolver.resolve(request.model)
     
+    # Apply model override if specified (user picked a specific model from dropdown)
+    if request.model_override and persona:
+        from app.models.model import Model as ModelORM
+        from app.models.provider import Provider as ProviderORM
+        override_result = await db.execute(
+            select(ModelORM, ProviderORM)
+            .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
+            .where(ModelORM.model_id == request.model_override)
+            .where(ModelORM.is_active == True)
+            .limit(1)
+        )
+        override_row = override_result.first()
+        if override_row:
+            primary_model = override_row[0]
+            fallback_model = None  # No fallback when explicitly overridden
+            logger.info(f"Model override: {request.model_override}")
+    
     if not persona:
         raise HTTPException(
             status_code=404,

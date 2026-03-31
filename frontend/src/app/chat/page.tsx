@@ -1038,7 +1038,7 @@ export default function ChatPage() {
   const [showImageGen, setShowImageGen] = useState(false)
   const [imagePrompt, setImagePrompt] = useState('')
   const [generatingImage, setGeneratingImage] = useState(false)
-  const [imageProvider, setImageProvider] = useState<'gemini-imagen' | 'comfyui-local'>('comfyui-local')
+  const [imageProvider, setImageProvider] = useState<'gemini-imagen' | 'comfyui-local'>('gemini-imagen')
   const [imageNegPrompt, setImageNegPrompt] = useState('')
 
   // Workflow / checkpoint state for ComfyUI
@@ -1320,9 +1320,10 @@ export default function ChatPage() {
 
     try {
       const body: any = {
-        model: selectedModelId || selectedPersonaId,
+        model: selectedPersonaId,
         messages: historyMsgs,
         stream: false,
+        ...(selectedModelId ? { model_override: selectedModelId } : {}),
       }
       if (activeConvId) body.conversation_id = activeConvId
 

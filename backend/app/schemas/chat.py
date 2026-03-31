@@ -12,12 +12,13 @@ class ChatMessage(BaseModel):
 
 class ChatCompletionRequest(BaseModel):
     """Chat completion request (OpenAI-compatible)."""
-    model: str  # Persona name or model ID
+    model: str  # Persona name or ID
     messages: List[ChatMessage]
     stream: bool = True
     conversation_id: Optional[UUID4] = None
     temperature: Optional[float] = 0.7
     max_tokens: Optional[int] = 4096
+    model_override: Optional[str] = None  # Override the persona's default model (model_id string)
 
 
 class ChatCompletionChoice(BaseModel):
