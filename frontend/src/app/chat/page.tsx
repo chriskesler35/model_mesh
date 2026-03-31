@@ -18,6 +18,7 @@ interface Message {
   model?: string
   created_at: string
   streaming?: boolean
+  image_url?: string   // inline generated image
 }
 
 interface Conversation {
@@ -378,6 +379,35 @@ function MessageBubble({ msg }: { msg: Message }) {
             )
           )}
         </div>
+
+        {/* Inline generated image */}
+        {msg.image_url && (
+          <div className="mt-2 space-y-1">
+            <img
+              src={msg.image_url}
+              alt="Generated image"
+              className="rounded-xl max-w-xs w-full cursor-zoom-in hover:opacity-90 transition-opacity border border-gray-200 dark:border-gray-700 shadow-sm"
+              onClick={() => window.open(msg.image_url, '_blank')}
+            />
+            <div className="flex gap-3 px-0.5">
+              <a
+                href={msg.image_url}
+                download
+                className="text-xs text-indigo-500 hover:text-indigo-700 dark:text-indigo-400 hover:underline"
+              >
+                ↓ Download
+              </a>
+              <a
+                href={msg.image_url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs text-gray-400 hover:text-gray-600 hover:underline"
+              >
+                Open full size ↗
+              </a>
+            </div>
+          </div>
+        )}
 
         {/* Meta row */}
         <div className={`flex items-center gap-2 px-1 ${isUser ? 'flex-row-reverse' : ''}`}>
@@ -988,9 +1018,47 @@ export default function ChatPage() {
   const [imagePrompt, setImagePrompt] = useState('')
   const [generatingImage, setGeneratingImage] = useState(false)
 
+  // Track pending image tasks: taskId → assistantMessageId
+  const pendingImageTasksRef = useRef<Map<string, string>>(new Map())
+
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const searchTimer = useRef<ReturnType<typeof setTimeout>>()
+
+  // ── Poll for image task completion → inject inline ────────────────────────
+  useEffect(() => {
+    const poll = async () => {
+      if (pendingImageTasksRef.current.size === 0) return
+      try {
+        const res = await fetch(`${API_BASE}/v1/tasks/notifications`, { headers: AUTH })
+        if (!res.ok) return
+        const data = await res.json()
+        for (const task of (data.notifications || [])) {
+          const msgId = pendingImageTasksRef.current.get(task.id)
+          if (!msgId) continue
+          if (task.status === 'completed' && task.result?.url) {
+            const imageUrl = `${API_BASE}${task.result.url}`
+            setMessages(prev => prev.map(m =>
+              m.id === msgId
+                ? { ...m, content: '🖼️ Here\'s your image:', image_url: imageUrl, streaming: false }
+                : m
+            ))
+            pendingImageTasksRef.current.delete(task.id)
+            fetch(`${API_BASE}/v1/tasks/${task.id}/acknowledge`, { method: 'POST', headers: AUTH }).catch(() => {})
+          } else if (task.status === 'failed') {
+            setMessages(prev => prev.map(m =>
+              m.id === msgId
+                ? { ...m, content: `❌ Image generation failed: ${task.error || 'Unknown error'}`, streaming: false }
+                : m
+            ))
+            pendingImageTasksRef.current.delete(task.id)
+          }
+        }
+      } catch { /* silent */ }
+    }
+    const interval = setInterval(poll, 3000)
+    return () => clearInterval(interval)
+  }, [])
 
   // ── Init ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1258,8 +1326,8 @@ export default function ChatPage() {
     const assistantMsg: Message = {
       id: assistantId,
       role: 'assistant' as const,
-      content: '🎨 Image generation submitted — you\'ll get a notification when it\'s ready!',
-      streaming: false,
+      content: '🎨 Generating image…',
+      streaming: true,
       created_at: new Date().toISOString(),
     }
     setMessages(prev => [...prev, userMsg, assistantMsg])
@@ -1299,12 +1367,14 @@ export default function ChatPage() {
         refreshConversations()
       } catch { /* non-fatal - image still generates */ }
 
-      await submitTask('image_gen', {
+      const taskId = await submitTask('image_gen', {
         prompt,
         model: 'comfyui-local',
         size: '1024x1024',
         format: 'png',
       }, convId || undefined)
+      // Map task → placeholder message so we can inject the image inline when done
+      pendingImageTasksRef.current.set(taskId, assistantId)
     } catch (e: any) {
       addToast({
         type: 'error',
