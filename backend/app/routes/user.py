@@ -5,11 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
-from app.models import UserProfile, MemoryFile, PreferenceTracking, SystemModification
+from app.models import UserProfile, MemoryFile, SystemModification
 from app.schemas.user_profile import (
     UserProfileCreate, UserProfileUpdate, UserProfileResponse,
     MemoryFileCreate, MemoryFileUpdate, MemoryFileResponse, MemoryFileList,
-    PreferenceCreate, PreferenceUpdate, PreferenceResponse, PreferenceList,
     ModificationResponse, ModificationList
 )
 from app.middleware.auth import verify_api_key
@@ -188,70 +187,10 @@ async def delete_memory_file(
 
 
 # ============================================================
-# Preference Tracking Endpoints
+# Preference Tracking Endpoints (MOVED to routes/preferences.py)
+# The new Preference model supports categories, toggle, detection.
+# Old PreferenceTracking endpoints removed to avoid route collision.
 # ============================================================
-
-@router.get("/preferences", response_model=PreferenceList)
-async def list_preferences(db: AsyncSession = Depends(get_db)):
-    """List all learned preferences."""
-    result = await db.execute(select(UserProfile).limit(1))
-    profile = result.scalar_one_or_none()
-    
-    if not profile:
-        raise HTTPException(status_code=404, detail="User profile not found")
-    
-    result = await db.execute(
-        select(PreferenceTracking).where(PreferenceTracking.user_id == profile.id)
-    )
-    preferences = result.scalars().all()
-    
-    return PreferenceList(data=preferences, total=len(preferences))
-
-
-@router.post("/preferences", response_model=PreferenceResponse)
-async def create_preference(
-    pref: PreferenceCreate,
-    db: AsyncSession = Depends(get_db)
-):
-    """Add a preference (manually or from chat)."""
-    result = await db.execute(select(UserProfile).limit(1))
-    profile = result.scalar_one_or_none()
-    
-    if not profile:
-        raise HTTPException(status_code=404, detail="User profile not found")
-    
-    preference = PreferenceTracking(
-        id=uuid.uuid4(),
-        user_id=profile.id,
-        key=pref.key,
-        value=pref.value,
-        source=pref.source,
-        confidence=pref.confidence,
-        context=pref.context
-    )
-    db.add(preference)
-    await db.commit()
-    await db.refresh(preference)
-    return preference
-
-
-@router.delete("/preferences/{pref_id}")
-async def delete_preference(
-    pref_id: str,
-    db: AsyncSession = Depends(get_db)
-):
-    """Delete a preference."""
-    result = await db.execute(
-        select(PreferenceTracking).where(PreferenceTracking.id == uuid.UUID(pref_id))
-    )
-    preference = result.scalar_one_or_none()
-    
-    if not preference:
-        raise HTTPException(status_code=404, detail="Preference not found")
-    
-    await db.delete(preference)
-    await db.commit()
-    return {"status": "deleted"}
 
 
 # ============================================================
