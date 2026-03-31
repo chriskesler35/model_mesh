@@ -1,7 +1,7 @@
-import { API_BASE, API_KEY, AUTH_HEADERS } from '@/lib/config'
+import { getApiBase, API_KEY, AUTH_HEADERS } from '@/lib/config'
 
-// API_URL uses the shared dynamic config (auto-detects hostname for remote access)
-const API_URL = API_BASE
+// Use lazy getter so the URL is always correct even if module loads during SSR
+const API_URL = getApiBase()
 
 
 class ApiClient {
