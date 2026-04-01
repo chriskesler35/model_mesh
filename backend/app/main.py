@@ -1,10 +1,45 @@
 """FastAPI application entry point."""
 
 import os
+import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
+
+# ─── Logging setup: write to logs/ directory so the UI log viewer works ────────
+_LOG_DIR = Path(__file__).parent.parent.parent / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+
+_log_fmt = logging.Formatter(
+    "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+# stdout handler (keeps console output working as before)
+_stdout_handler = logging.StreamHandler()
+_stdout_handler.setLevel(logging.INFO)
+_stdout_handler.setFormatter(_log_fmt)
+
+# File handler — backend.log (stdout equivalent)
+_file_handler = logging.FileHandler(_LOG_DIR / "backend.log", encoding="utf-8")
+_file_handler.setLevel(logging.INFO)
+_file_handler.setFormatter(_log_fmt)
+
+# File handler — backend-error.log (WARNING+)
+_err_handler = logging.FileHandler(_LOG_DIR / "backend-error.log", encoding="utf-8")
+_err_handler.setLevel(logging.WARNING)
+_err_handler.setFormatter(_log_fmt)
+
+# Apply to root logger so every module's getLogger(__name__) inherits these
+_root = logging.getLogger()
+_root.setLevel(logging.INFO)
+# Avoid duplicates if uvicorn already added a handler
+if not _root.handlers:
+    _root.addHandler(_stdout_handler)
+_root.addHandler(_file_handler)
+_root.addHandler(_err_handler)
 
 # Ensure API keys from settings are available in os.environ for litellm
 _key_map = {

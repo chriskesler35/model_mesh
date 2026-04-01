@@ -3,7 +3,7 @@
 import { API_BASE, API_KEY, AUTH_HEADERS } from '@/lib/config'
 
 import { useState, useEffect, useRef, useCallback, Suspense } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
+import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { useToast } from '../ToastProvider'
 
@@ -77,7 +77,15 @@ function groupByDay(convs: Conversation[]): Record<string, Conversation[]> {
     'Last 7 days': [],
     Older: [],
   }
-  for (const c of convs) {
+
+  // Sort by most recent first before grouping
+  const sorted = [...convs].sort((a, b) => {
+    const ta = new Date(a.last_message_at || a.created_at).getTime()
+    const tb = new Date(b.last_message_at || b.created_at).getTime()
+    return tb - ta
+  })
+
+  for (const c of sorted) {
     if (c.pinned) { groups['Pinned'].push(c); continue }
     const d = new Date(c.last_message_at || c.created_at)
     if (d.toDateString() === today) groups['Today'].push(c)
@@ -954,7 +962,7 @@ function OnboardingOverlay({ aiName, onComplete }: { aiName: string; onComplete:
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function ChatPage() {
   const searchParams = useSearchParams()
-  const router = useRouter()
+
 
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [activeConvId, setActiveConvId] = useState<string | null>(null)
@@ -1025,7 +1033,7 @@ export default function ChatPage() {
         setActiveConvId(null)
         setMessages([])
         setTitleValue('')
-        router.replace('/chat', { scroll: false })
+        window.history.replaceState(null, '', '/chat')
         localStorage.removeItem('devforge_last_session')
         break
       case '/clear':
@@ -1114,7 +1122,7 @@ export default function ChatPage() {
         break
       }
     }
-  }, [activeConvId, messages, personas, addToast, setUserExists, router])
+  }, [activeConvId, messages, personas, addToast, setUserExists])
 
   const [showImageGen, setShowImageGen] = useState(false)
   const [imagePrompt, setImagePrompt] = useState('')
@@ -1129,6 +1137,9 @@ export default function ChatPage() {
   const [comfyUnetModels, setComfyUnetModels] = useState<string[]>([])
   const [selectedCheckpoint, setSelectedCheckpoint] = useState('')
   const [selectedSize, setSelectedSize] = useState('1024x1024')
+  const [comfyLoras, setComfyLoras] = useState<string[]>([])
+  const [selectedLora, setSelectedLora] = useState('')
+  const [loraStrength, setLoraStrength] = useState(1.0)
   const [comfyStatus, setComfyStatus] = useState<'online' | 'offline' | 'checking'>('checking')
 
   // Track pending image tasks: taskId → assistantMessageId
@@ -1143,14 +1154,16 @@ export default function ChatPage() {
     if (!showImageGen) return
     const load = async () => {
       try {
-        const [wfRes, ckRes, stRes] = await Promise.all([
+        const [wfRes, ckRes, stRes, loraRes] = await Promise.all([
           fetch(`${API_BASE}/v1/workflows`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
           fetch(`${API_BASE}/v1/comfyui/checkpoints`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ checkpoints: [], unet_models: [], status: 'offline' })),
           fetch(`${API_BASE}/v1/comfyui/status`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ status: 'offline' })),
+          fetch(`${API_BASE}/v1/comfyui/loras`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ loras: [], status: 'offline' })),
         ])
         setWorkflows(wfRes.data || [])
         setComfyCheckpoints(ckRes.checkpoints || [])
         setComfyUnetModels(ckRes.unet_models || [])
+        setComfyLoras(loraRes.loras || [])
         setComfyStatus(stRes.status === 'online' ? 'online' : 'offline')
         // Set defaults from first workflow if available
         if (wfRes.data?.length > 0) {
@@ -1250,12 +1263,30 @@ export default function ChatPage() {
           setUserExists(true)
           // Restore from URL or last session
           const sessionParam = searchParams?.get('session')
-          if (sessionParam && convs.find(c => c.id === sessionParam)) {
-            loadSession(sessionParam, convs, ps)
-          } else {
-            const lastId = localStorage.getItem('devforge_last_session')
-            if (lastId && convs.find(c => c.id === lastId)) {
-              loadSession(lastId, convs, ps)
+          const lastId = localStorage.getItem('devforge_last_session')
+          const targetId = sessionParam || lastId
+          if (targetId) {
+            // Load the session even if it's not in the conversation list yet —
+            // it might have been created moments ago and not yet in the first page
+            const inList = convs.find(c => c.id === targetId)
+            if (inList) {
+              loadSession(targetId, convs, ps)
+            } else {
+              // Try fetching the conversation directly — it exists in DB but
+              // wasn't in the list (just created, or past the limit)
+              try {
+                const checkRes = await fetch(`${API_BASE}/v1/conversations/${targetId}/messages?limit=1`, { headers: AUTH_HEADERS })
+                if (checkRes.ok) {
+                  // Conversation exists — add stub to list and load it
+                  const stub: Conversation = {
+                    id: targetId, title: 'Loading…', pinned: false, keep_forever: false,
+                    last_message_at: new Date().toISOString(), message_count: 0,
+                    created_at: new Date().toISOString(), persona_id: ps[0]?.id || '',
+                  }
+                  setConversations(prev => [stub, ...prev])
+                  loadSession(targetId, [stub, ...convs], ps)
+                }
+              } catch { /* conversation truly doesn't exist — start fresh */ }
             }
           }
         }
@@ -1265,6 +1296,16 @@ export default function ChatPage() {
     }
     init()
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // ── Keep sidebar in sync — refresh on window focus and periodically ─────
+  useEffect(() => {
+    const onFocus = () => refreshConversations()
+    window.addEventListener('focus', onFocus)
+    // Also refresh every 30s in case conversations were created in another tab
+    const interval = setInterval(refreshConversations, 30_000)
+    return () => { window.removeEventListener('focus', onFocus); clearInterval(interval) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // ── Search debounce ───────────────────────────────────────────────────────
@@ -1299,7 +1340,7 @@ export default function ChatPage() {
     setLoadingMessages(true)
     setRecoverySnapshot(null)
     localStorage.setItem('devforge_last_session', id)
-    router.replace(`/chat?session=${id}`, { scroll: false })
+    window.history.replaceState(null, '', `/chat?session=${id}`)
 
     // Update title input and restore persona from conversation
     const conv = (convList || conversations).find(c => c.id === id)
@@ -1345,7 +1386,7 @@ export default function ChatPage() {
     } finally {
       setLoadingMessages(false)
     }
-  }, [conversations, router])
+  }, [conversations])
 
   // ── New chat ──────────────────────────────────────────────────────────────
   const newChat = () => {
@@ -1353,7 +1394,7 @@ export default function ChatPage() {
     setActiveConvId(null)
     setMessages([])
     setTitleValue('')
-    router.replace('/chat', { scroll: false })
+    window.history.replaceState(null, '', '/chat')
     localStorage.removeItem('devforge_last_session')
     textareaRef.current?.focus()
   }
@@ -1447,11 +1488,9 @@ export default function ChatPage() {
 
       // Update conversation state
       if (convId && convId !== activeConvId) {
-        setActiveConvId(convId)
-        localStorage.setItem('devforge_last_session', convId)
-        router.replace(`/chat?session=${convId}`, { scroll: false })
-        // Immediately add new conversation to sidebar
+        // Set all React state BEFORE URL update
         const autoTitle = text.slice(0, 60) + (text.length > 60 ? '...' : '')
+        setActiveConvId(convId)
         setConversations(prev => {
           if (prev.some(c => c.id === convId)) return prev
           return [{
@@ -1466,7 +1505,11 @@ export default function ChatPage() {
           }, ...prev]
         })
         setTitleValue(autoTitle)
-        refreshConversations()
+        // Update URL + localStorage AFTER state is queued
+        localStorage.setItem('devforge_last_session', convId)
+        window.history.replaceState(null, '', `/chat?session=${convId}`)
+        // Delay refresh so the DB commit is fully visible to the list query
+        setTimeout(() => refreshConversations(), 800)
       } else if (convId) {
         // Auto-title on first real message (replaces "New Chat" placeholder)
         const conv = conversations.find(c => c.id === convId)
@@ -1511,6 +1554,8 @@ export default function ChatPage() {
     const ckpt = provider === 'comfyui-local' ? selectedCheckpoint : undefined
     const size = provider === 'comfyui-local' ? selectedSize : '1024x1024'
     const negPrompt = provider === 'comfyui-local' ? imageNegPrompt : undefined
+    const loraName = provider === 'comfyui-local' && selectedLora ? selectedLora : undefined
+    const loraStr = provider === 'comfyui-local' && selectedLora ? loraStrength : undefined
     const wfName = workflows.find(w => w.id === wfId)?.name
 
     setImagePrompt('')
@@ -1554,14 +1599,9 @@ export default function ChatPage() {
         convId = createRes.id || createRes.data?.id || null
       }
 
-      if (convId && convId !== activeConvId) {
-        setActiveConvId(convId)
-        localStorage.setItem('devforge_last_session', convId)
-        router.replace(`/chat?session=${convId}`, { scroll: false })
-      }
-
-      // Always ensure the conversation is in the sidebar immediately
+      // Always ensure the conversation is in the sidebar BEFORE URL update
       if (convId) {
+        if (convId !== activeConvId) setActiveConvId(convId)
         setConversations(prev => {
           if (prev.some(c => c.id === convId)) {
             // Already exists — update title
@@ -1582,6 +1622,11 @@ export default function ChatPage() {
           }, ...prev]
         })
         setTitleValue(autoTitle)
+        // URL + localStorage AFTER state is queued
+        if (convId !== activeConvId) {
+          localStorage.setItem('devforge_last_session', convId)
+          window.history.replaceState(null, '', `/chat?session=${convId}`)
+        }
         // Update backend title
         fetch(`${API_BASE}/v1/conversations/${convId}`, {
           method: 'PATCH', headers: AUTH_HEADERS, body: JSON.stringify({ title: autoTitle })
@@ -1623,6 +1668,8 @@ export default function ChatPage() {
       if (wfId) taskPayload.workflow_id = wfId
       if (ckpt) taskPayload.checkpoint = ckpt
       if (negPrompt) taskPayload.negative_prompt = negPrompt
+      if (loraName) taskPayload.lora = loraName
+      if (loraStr !== undefined) taskPayload.lora_strength = loraStr
 
       const taskId = await submitTask('image_gen', taskPayload, convId || undefined)
       // Map task → message so we can inject the image inline when done (use real DB ID)
@@ -1655,7 +1702,7 @@ export default function ChatPage() {
   const refreshConversations = async () => {
     try {
       const res = await fetch(`${API_BASE}/v1/conversations?limit=100&pinned_first=true`, { headers: AUTH_HEADERS })
-      if (!res.ok) return // don't wipe sidebar on error
+      if (!res.ok) return
       const data = await res.json()
       const fresh: Conversation[] = data.data || []
       if (fresh.length === 0) return // backend returned empty — keep current list
@@ -1972,6 +2019,36 @@ export default function ChatPage() {
                             ))
                           })()}
                         </select>
+
+                        {/* LoRA */}
+                        {comfyLoras.length > 0 && (
+                          <select
+                            value={selectedLora}
+                            onChange={e => setSelectedLora(e.target.value)}
+                            className="text-xs rounded-lg border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 py-1.5 pl-2 pr-6 focus:ring-purple-400 focus:border-purple-400 max-w-[180px]"
+                            title={selectedLora || 'No LoRA'}
+                          >
+                            <option value="">No LoRA</option>
+                            {comfyLoras.map(l => (
+                              <option key={l} value={l}>{l.replace(/\.[^.]+$/, '')}</option>
+                            ))}
+                          </select>
+                        )}
+
+                        {/* LoRA strength */}
+                        {selectedLora && (
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="range"
+                              min="0" max="2" step="0.05"
+                              value={loraStrength}
+                              onChange={e => setLoraStrength(parseFloat(e.target.value))}
+                              className="w-16 h-1 accent-purple-500"
+                              title={`LoRA strength: ${loraStrength}`}
+                            />
+                            <span className="text-xs text-gray-400 w-7">{loraStrength.toFixed(1)}</span>
+                          </div>
+                        )}
 
                         {/* Status dot */}
                         <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${

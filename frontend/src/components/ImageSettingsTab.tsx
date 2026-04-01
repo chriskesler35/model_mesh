@@ -241,7 +241,7 @@ export default function ImageSettingsTab() {
             ))}
           </div>
           <p className="text-xs text-gray-400 mt-2">
-            💡 Add custom workflows by placing .json files in <code>data/workflows/</code>. They appear here automatically.
+            Workflows from <code>data/workflows/</code> and your ComfyUI installation are shown automatically.
           </p>
         </div>
       )}

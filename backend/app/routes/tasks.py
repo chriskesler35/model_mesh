@@ -77,36 +77,47 @@ async def _run_image_gen(task_id: str, params: dict):
             model = params.get("model", "gemini-imagen")
             size = params.get("size", "1024x1024")
             negative_prompt = params.get("negative_prompt")
+            workflow_id = params.get("workflow_id")
+            checkpoint = params.get("checkpoint")
+            lora = params.get("lora")
+            lora_strength = params.get("lora_strength", 1.0)
 
             # Import image gen functions
             from app.routes.images import (
                 ensure_comfyui, generate_with_comfyui,
                 generate_with_gemini_imagen, IMAGE_STORAGE
             )
+            from app.services.app_settings_helper import get_setting as _get_setting
 
             result = None
             used_model = model
 
             if model == "comfyui-local":
-                comfyui_url = os.environ.get('COMFYUI_URL') or getattr(settings, 'comfyui_url', 'http://localhost:8188')
+                comfyui_url = await _get_setting("comfyui_url", db)
+                comfyui_dir = await _get_setting("comfyui_dir", db)
                 task.user_message = "Checking ComfyUI…"
                 task.progress = 20
                 await db.commit()
 
                 comfyui_available = await ensure_comfyui(comfyui_url)
                 if comfyui_available:
-                    task.user_message = "Generating with ComfyUI…"
+                    task.user_message = f"Generating with ComfyUI ({workflow_id or 'sdxl-standard'})…"
                     task.progress = 40
                     await db.commit()
                     try:
-                        result = await generate_with_comfyui(prompt, comfyui_url, size, negative_prompt)
+                        result = await generate_with_comfyui(prompt, comfyui_url, size, negative_prompt, workflow_id=workflow_id, checkpoint=checkpoint, comfyui_dir=comfyui_dir, lora=lora, lora_strength=lora_strength)
                     except Exception as comfy_err:
-                        logger.warning(f"ComfyUI generation failed, falling back: {comfy_err}")
-                        task.user_message = "ComfyUI failed, falling back to Gemini…"
+                        err_detail = str(comfy_err)
+                        # Extract useful detail from HTTPException
+                        if hasattr(comfy_err, 'detail'):
+                            err_detail = str(comfy_err.detail)
+                        logger.error(f"ComfyUI generation failed: {err_detail}")
+                        task.user_message = f"ComfyUI error: {err_detail[:120]}. Falling back to Gemini…"
                         task.progress = 35
                         await db.commit()
                         used_model = "gemini-imagen"
                 else:
+                    logger.warning("ComfyUI not reachable, falling back to Gemini")
                     task.user_message = "ComfyUI unavailable, falling back to Gemini…"
                     task.progress = 30
                     await db.commit()

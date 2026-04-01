@@ -104,7 +104,8 @@ async def chat_completions(
         )
         db.add(conv)
         await db.commit()
-    
+        logger.info(f"Chat created conversation {conversation_id[:8]}… title={auto_title!r}")
+
     # 3. Route request
     router_service = Router(db, memory)
     

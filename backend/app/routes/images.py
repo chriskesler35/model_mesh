@@ -17,6 +17,8 @@ from app.database import get_db
 from app.models import Model
 from app.middleware.auth import verify_api_key
 from app.config import settings
+from app.services.app_settings_helper import get_setting
+from app.routes.workflows import find_workflow_path, _convert_editor_to_api
 from pydantic import BaseModel
 from typing import Optional, List
 import os
@@ -73,11 +75,29 @@ async def launch_comfyui(url: str = "http://localhost:8188") -> bool:
         logger.info("ComfyUI python not configured, trying system python")
 
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = cfg.get("gpu_devices", "0")
+    gpu_devices = cfg.get("gpu_devices", "0")
+    env["CUDA_VISIBLE_DEVICES"] = gpu_devices
+    # Performance env vars
+    env["NVIDIA_TF32_OVERRIDE"] = "1"
+    env["CUDA_MODULE_LOADING"] = "LAZY"
+    env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+    cmd = [
+        str(comfyui_python), "main.py",
+        "--listen", "0.0.0.0",
+        "--default-device", "0",  # primary GPU, keeps others visible for overflow
+        "--highvram",             # maximize VRAM usage, offload only when needed
+        "--async-offload", "2",   # async offload across 2 streams when needed
+        "--cuda-malloc",          # faster CUDA memory allocation
+        "--fast",                 # enable fast-path optimizations
+        "--preview-method", "auto",
+        "--enable-cors-header", "*",
+    ]
+    logger.info(f"Launching ComfyUI: CUDA_VISIBLE_DEVICES={gpu_devices}, cmd={' '.join(cmd[2:])}")
 
     try:
         _comfyui_proc = subprocess.Popen(
-            [str(comfyui_python), "main.py", "--listen", "0.0.0.0"],
+            cmd,
             cwd=str(comfyui_dir),
             env=env,
             stdout=subprocess.DEVNULL,
@@ -102,8 +122,11 @@ async def launch_comfyui(url: str = "http://localhost:8188") -> bool:
 
 async def ensure_comfyui(url: str = "http://localhost:8188") -> bool:
     """Check if ComfyUI is running; auto-launch if not. Returns True if available."""
+    logger.info(f"Checking ComfyUI at {url}")
     if await is_comfyui_running(url):
+        logger.info(f"ComfyUI is running at {url}")
         return True
+    logger.warning(f"ComfyUI not responding at {url}, attempting auto-launch")
     return await launch_comfyui(url)
 
 router = APIRouter(prefix="/v1/images", tags=["images"], dependencies=[Depends(verify_api_key)])
@@ -122,6 +145,8 @@ class ImageGenerationRequest(BaseModel):
     negative_prompt: Optional[str] = None
     workflow_id: Optional[str] = None  # which workflow template to use
     checkpoint: Optional[str] = None   # which checkpoint/model to use
+    lora: Optional[str] = None         # LoRA model name
+    lora_strength: float = 1.0         # LoRA model/clip strength
 
 
 class ImageResponse(BaseModel):
@@ -260,17 +285,26 @@ def _hydrate_workflow(workflow_template: dict, variables: dict) -> dict:
 
     hydrated = json.loads(raw)
 
-    # Walk the tree and fix types: width/height must be int, seed must be int
+    # Walk the tree and fix types
     for node_id, node in hydrated.items():
         if not isinstance(node, dict):
             continue
         inputs = node.get("inputs", {})
-        for field in ("width", "height", "batch_size"):
+        # Ints: width, height, batch_size, steps
+        for field in ("width", "height", "batch_size", "steps"):
             if field in inputs and isinstance(inputs[field], str):
                 try:
                     inputs[field] = int(inputs[field])
                 except ValueError:
                     pass
+        # Floats: cfg, denoise, strength_model, strength_clip
+        for field in ("cfg", "denoise", "strength_model", "strength_clip"):
+            if field in inputs and isinstance(inputs[field], str):
+                try:
+                    inputs[field] = float(inputs[field])
+                except ValueError:
+                    pass
+        # Seed: randomize if 0
         if "seed" in inputs:
             if inputs["seed"] == 0 or inputs["seed"] == "0":
                 inputs["seed"] = random.randint(1, 2**32 - 1)
@@ -290,64 +324,150 @@ async def generate_with_comfyui(
     negative_prompt: str = None,
     workflow_id: str = None,
     checkpoint: str = None,
+    comfyui_dir: str = "",
+    lora: str = None,
+    lora_strength: float = 1.0,
 ) -> dict:
     """Generate image using ComfyUI local installation.
 
-    If workflow_id is provided, loads the template from data/workflows/{workflow_id}.json
-    and hydrates it with the given parameters. Otherwise falls back to sdxl-standard
+    If workflow_id is provided, loads the template from data/workflows/ or the
+    ComfyUI installation directories. Otherwise falls back to sdxl-standard
     if it exists, or a minimal hardcoded SDXL workflow.
     """
 
     width, height = map(int, size.split('x'))
 
+    logger.info(f"ComfyUI gen: workflow={workflow_id}, checkpoint={checkpoint}, lora={lora}, size={size}")
+
     # Try to load a workflow template
     effective_workflow_id = workflow_id or "sdxl-standard"
-    template_path = _WORKFLOW_DIR / f"{effective_workflow_id}.json"
+    template_path = find_workflow_path(effective_workflow_id, comfyui_dir)
     effective_checkpoint = checkpoint
 
-    if template_path.exists():
+    if template_path:
         try:
-            template_data = json.loads(template_path.read_text(encoding="utf-8"))
+            raw_text = template_path.read_text(encoding="utf-8-sig")  # handle BOM
+            template_data = json.loads(raw_text)
             if not effective_checkpoint:
                 effective_checkpoint = template_data.get("default_checkpoint", "")
+            # Extract the API-format workflow — our templates store it under "workflow"
             workflow_json = template_data.get("workflow", {})
-            workflow = _hydrate_workflow(workflow_json, {
-                "prompt": prompt,
-                "negative_prompt": negative_prompt or "",
-                "width": str(width),
-                "height": str(height),
-                "checkpoint": effective_checkpoint,
-            })
+            is_api_format = workflow_json and any(
+                isinstance(v, dict) and "class_type" in v for v in workflow_json.values()
+            )
+
+            if not is_api_format and "nodes" in template_data:
+                # ComfyUI editor-format file — convert to API format
+                logger.info(f"Converting editor-format workflow: {template_path.name}")
+                workflow_json = _convert_editor_to_api(template_data)
+                if workflow_json:
+                    is_api_format = True
+                else:
+                    logger.warning(f"Failed to convert {template_path.name} — no output nodes found")
+
+            if not is_api_format:
+                logger.warning(f"Template {template_path.name} has no usable workflow, using fallback")
+                workflow = None
+            else:
+                logger.info(f"ComfyUI using template: {template_path.name}, checkpoint: {effective_checkpoint}")
+                workflow = _hydrate_workflow(workflow_json, {
+                    "prompt": prompt,
+                    "negative_prompt": negative_prompt or "",
+                    "width": str(width),
+                    "height": str(height),
+                    "checkpoint": effective_checkpoint,
+                    "lora_name": lora or "",
+                    "lora_strength": str(lora_strength),
+                })
         except Exception as e:
             logger.warning(f"Failed to load workflow template {effective_workflow_id}: {e}, using fallback")
             workflow = None
     else:
+        logger.warning(f"Workflow template not found: {effective_workflow_id}, using fallback")
         workflow = None
 
     # Fallback: hardcoded minimal SDXL workflow
     if workflow is None:
         seed = random.randint(1, 2**32 - 1)
+        ckpt_node = "4"
+        model_source = [ckpt_node, 0]  # model output
+        clip_source = [ckpt_node, 1]   # clip output
+
         workflow = {
             "3": {
                 "class_type": "KSampler",
                 "inputs": {
                     "cfg": 7.5, "denoise": 1.0,
-                    "latent_image": ["5", 0], "model": ["4", 0],
+                    "latent_image": ["5", 0], "model": model_source,
                     "negative": ["7", 0], "positive": ["6", 0],
                     "sampler_name": "euler", "scheduler": "normal",
                     "steps": 20, "seed": seed,
                 }
             },
-            "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": effective_checkpoint or "sdxl_base.safetensors"}},
+            ckpt_node: {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": effective_checkpoint or "sdxl_base.safetensors"}},
             "5": {"class_type": "EmptyLatentImage", "inputs": {"batch_size": 1, "height": height, "width": width}},
-            "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": prompt}},
-            "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": negative_prompt or ""}},
-            "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
+            "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": clip_source, "text": prompt}},
+            "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": clip_source, "text": negative_prompt or ""}},
+            "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": [ckpt_node, 2]}},
             "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "modelmesh", "images": ["8", 0]}},
         }
 
+        # Inject LoRA into the fallback workflow
+        if lora:
+            lora_node_id = "10"
+            workflow[lora_node_id] = {
+                "class_type": "LoraLoader",
+                "inputs": {
+                    "lora_name": lora,
+                    "strength_model": lora_strength,
+                    "strength_clip": lora_strength,
+                    "model": [ckpt_node, 0],
+                    "clip": [ckpt_node, 1],
+                }
+            }
+            # Rewire: KSampler + CLIP encoders use LoRA outputs instead of checkpoint
+            workflow["3"]["inputs"]["model"] = [lora_node_id, 0]
+            workflow["6"]["inputs"]["clip"] = [lora_node_id, 1]
+            workflow["7"]["inputs"]["clip"] = [lora_node_id, 1]
+
+    # If LoRA specified and workflow from template doesn't have a LoraLoader, inject one
+    if lora and workflow is not None:
+        has_lora = any(
+            n.get("class_type") == "LoraLoader" for n in workflow.values() if isinstance(n, dict)
+        )
+        if not has_lora:
+            # Find the CheckpointLoaderSimple node and inject LoRA after it
+            ckpt_id = None
+            for nid, node in workflow.items():
+                if isinstance(node, dict) and node.get("class_type") == "CheckpointLoaderSimple":
+                    ckpt_id = nid
+                    break
+            if ckpt_id:
+                lora_id = str(max(int(k) for k in workflow.keys() if k.isdigit()) + 1)
+                workflow[lora_id] = {
+                    "class_type": "LoraLoader",
+                    "inputs": {
+                        "lora_name": lora,
+                        "strength_model": lora_strength,
+                        "strength_clip": lora_strength,
+                        "model": [ckpt_id, 0],
+                        "clip": [ckpt_id, 1],
+                    }
+                }
+                # Rewire nodes that reference the checkpoint's model/clip outputs
+                for nid, node in workflow.items():
+                    if nid == lora_id or not isinstance(node, dict):
+                        continue
+                    inputs = node.get("inputs", {})
+                    for key, val in inputs.items():
+                        if isinstance(val, list) and len(val) == 2 and val[0] == ckpt_id:
+                            if val[1] == 0:  # model output
+                                inputs[key] = [lora_id, 0]
+                            elif val[1] == 1:  # clip output
+                                inputs[key] = [lora_id, 1]
+
     try:
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=600.0) as client:
             # Queue the prompt
             queue_response = await client.post(
                 f"{comfyui_url}/prompt",
@@ -357,14 +477,15 @@ async def generate_with_comfyui(
             
             if queue_response.status_code != 200:
                 error_msg = queue_response.text
-                if "ComfyUI" not in comfyui_url or "connection refused" in error_msg.lower():
+                logger.error(f"ComfyUI rejected workflow (HTTP {queue_response.status_code}): {error_msg[:500]}")
+                if "connection refused" in error_msg.lower():
                     raise HTTPException(
                         status_code=503,
                         detail="ComfyUI not running. Start ComfyUI at http://localhost:8188"
                     )
                 raise HTTPException(
                     status_code=500,
-                    detail=f"ComfyUI error: {error_msg}"
+                    detail=f"ComfyUI error: {error_msg[:300]}"
                 )
             
             result = queue_response.json()
@@ -376,9 +497,12 @@ async def generate_with_comfyui(
                     detail="ComfyUI did not return a prompt ID"
                 )
             
-            # Poll for completion
-            for attempt in range(120):  # Wait up to 2 minutes
+            # Poll for completion — 10 minutes max (model loading + generation on RTX 3060)
+            max_poll = 600
+            for attempt in range(max_poll):
                 await asyncio.sleep(1)
+                if attempt > 0 and attempt % 30 == 0:
+                    logger.info(f"ComfyUI still generating… {attempt}s elapsed")
                 
                 history_response = await client.get(
                     f"{comfyui_url}/history/{prompt_id}"
@@ -387,15 +511,25 @@ async def generate_with_comfyui(
                 if history_response.status_code == 200:
                     history = history_response.json()
                     if prompt_id in history:
-                        outputs = history[prompt_id].get("outputs", {})
-                        
+                        entry = history[prompt_id]
+                        status_info = entry.get("status", {})
+                        status_str = status_info.get("status_str", "")
+
+                        # Check for execution error
+                        if status_str == "error":
+                            msgs = status_info.get("messages", [])
+                            err_detail = str(msgs) if msgs else "unknown error"
+                            logger.error(f"ComfyUI execution failed: {err_detail[:300]}")
+                            raise HTTPException(status_code=500, detail=f"ComfyUI execution error: {err_detail[:300]}")
+
+                        outputs = entry.get("outputs", {})
                         for node_id, node_output in outputs.items():
                             if "images" in node_output:
                                 for img in node_output["images"]:
                                     filename = img.get("filename", "")
                                     subfolder = img.get("subfolder", "")
                                     img_type = img.get("type", "output")
-                                    
+
                                     # Get the image
                                     view_url = f"{comfyui_url}/view"
                                     params = {
@@ -403,11 +537,13 @@ async def generate_with_comfyui(
                                         "subfolder": subfolder,
                                         "type": img_type
                                     }
-                                    
+
                                     img_response = await client.get(view_url, params=params)
-                                    
+
                                     if img_response.status_code == 200:
                                         image_bytes = img_response.content
+                                        elapsed = attempt + 1
+                                        logger.info(f"ComfyUI generation complete in {elapsed}s, image: {filename}")
                                         return {
                                             "base64": base64.b64encode(image_bytes).decode('utf-8'),
                                             "revised_prompt": prompt
@@ -415,7 +551,7 @@ async def generate_with_comfyui(
             
             raise HTTPException(
                 status_code=504,
-                detail="ComfyUI generation timed out after 2 minutes"
+                detail=f"ComfyUI generation timed out after {max_poll // 60} minutes"
             )
             
     except httpx.TimeoutException:
@@ -463,7 +599,8 @@ async def generate_image(
                 )
                 
             elif request.model == "comfyui-local":
-                comfyui_url = os.environ.get('COMFYUI_URL') or getattr(settings, 'comfyui_url', 'http://localhost:8188')
+                comfyui_url = await get_setting("comfyui_url", db)
+                comfyui_dir = await get_setting("comfyui_dir", db)
 
                 # Try ComfyUI; fall back to Gemini on any failure (unreachable, timeout, error)
                 comfyui_failed = False
@@ -479,11 +616,14 @@ async def generate_image(
                         request.negative_prompt,
                         request.workflow_id,
                         request.checkpoint,
+                        comfyui_dir,
+                        request.lora,
+                        request.lora_strength,
                     )
                 except Exception as comfy_err:
                     comfyui_failed = True
-                    comfyui_error = str(comfy_err)
-                    logger.warning(f"ComfyUI failed, falling back to Gemini: {comfy_err}")
+                    comfyui_error = getattr(comfy_err, 'detail', str(comfy_err))
+                    logger.error(f"ComfyUI generation failed: {comfyui_error}")
 
                 if comfyui_failed:
                     api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY') or getattr(settings, 'gemini_api_key', None) or getattr(settings, 'google_api_key', None)
@@ -513,6 +653,8 @@ async def generate_image(
                 "negative_prompt": request.negative_prompt,
                 "workflow_id": request.workflow_id,
                 "checkpoint": request.checkpoint,
+                "lora": request.lora,
+                "lora_strength": request.lora_strength,
             }
             
             # Parse size
@@ -663,12 +805,13 @@ async def generate_variation(
                 )
             result = await generate_with_gemini_imagen(prompt, api_key, size)
         elif model == "comfyui-local":
-            comfyui_url = os.environ.get('COMFYUI_URL') or getattr(settings, 'comfyui_url', 'http://localhost:8188')
+            comfyui_url = await get_setting("comfyui_url", db)
+            comfyui_dir = await get_setting("comfyui_dir", db)
             try:
                 comfyui_available = await ensure_comfyui(comfyui_url)
                 if not comfyui_available:
                     raise Exception("ComfyUI not reachable")
-                result = await generate_with_comfyui(prompt, comfyui_url, size, negative_prompt)
+                result = await generate_with_comfyui(prompt, comfyui_url, size, negative_prompt, comfyui_dir=comfyui_dir)
             except Exception as comfy_err:
                 # ComfyUI failed (unreachable, timed out, errored) — fall back to Gemini
                 logger.warning(f"ComfyUI failed for variation, falling back to Gemini: {comfy_err}")
@@ -820,7 +963,7 @@ async def _gemini_image_edit(source_base64: str, source_mime: str, prompt: str, 
 
 
 @router.post("/edit", response_model=ImageListResponse)
-async def edit_image(req: ImageEditRequest):
+async def edit_image(req: ImageEditRequest, db: AsyncSession = Depends(get_db)):
     """Edit an image using AI — upload a photo and describe what you want."""
 
     # Get source image base64
@@ -845,15 +988,39 @@ async def edit_image(req: ImageEditRequest):
         raise HTTPException(status_code=400,
                             detail="Provide either source_image_id or source_base64")
 
-    # Get API key
-    api_key = (os.environ.get('GEMINI_API_KEY')
-               or os.environ.get('GOOGLE_API_KEY')
-               or getattr(settings, 'gemini_api_key', None))
-    if not api_key:
-        raise HTTPException(status_code=503, detail="Gemini API key required for image editing")
+    # Determine which model originally created this image
+    original_model = None
+    original_negative_prompt = None
+    if req.source_image_id and req.source_image_id in IMAGE_STORAGE:
+        stored = IMAGE_STORAGE[req.source_image_id]
+        original_model = stored.get("model")
+        original_negative_prompt = stored.get("negative_prompt")
 
-    # Call Gemini
-    result = await _gemini_image_edit(source_b64, source_mime, req.prompt, api_key)
+    result = None
+    used_model = original_model
+
+    # Try original model first (same priority as variations endpoint)
+    if original_model == "comfyui-local":
+        comfyui_url = await get_setting("comfyui_url", db)
+        comfyui_dir = await get_setting("comfyui_dir", db)
+        try:
+            comfyui_available = await ensure_comfyui(comfyui_url)
+            if not comfyui_available:
+                raise Exception("ComfyUI not reachable")
+            result = await generate_with_comfyui(req.prompt, comfyui_url, req.size, original_negative_prompt, comfyui_dir=comfyui_dir)
+        except Exception as comfy_err:
+            logger.warning(f"ComfyUI failed for edit, falling back to Gemini: {comfy_err}")
+            used_model = None  # will fall through to Gemini below
+
+    # Gemini editing (default, or fallback from ComfyUI)
+    if result is None:
+        api_key = (os.environ.get('GEMINI_API_KEY')
+                   or os.environ.get('GOOGLE_API_KEY')
+                   or getattr(settings, 'gemini_api_key', None))
+        if not api_key:
+            raise HTTPException(status_code=503, detail="Gemini API key required for image editing")
+        result = await _gemini_image_edit(source_b64, source_mime, req.prompt, api_key)
+        used_model = "gemini-image-edit"
 
     # Store result
     image_id = str(uuid.uuid4())
@@ -867,8 +1034,8 @@ async def edit_image(req: ImageEditRequest):
         "revised_prompt": result.get("revised_prompt"),
         "format": fmt,
         "size": req.size,
-        "model": "gemini-image-edit",
-        "negative_prompt": None,
+        "model": used_model,
+        "negative_prompt": original_negative_prompt,
         "source_image_id": req.source_image_id,
     })
 

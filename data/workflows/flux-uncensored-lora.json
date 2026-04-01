@@ -1,0 +1,99 @@
+{
+  "name": "Flux Uncensored + LoRA",
+  "description": "Flux Dev FP8 with LoRA support — realistic, uncensored image generation.",
+  "category": "txt2img",
+  "default_checkpoint": "flux1_devFP8Kijai11GB.safetensors",
+  "compatible_checkpoints": [
+    "flux1_devFP8Kijai11GB.safetensors",
+    "flux1-dev-fp8-e4m3fn.safetensors",
+    "flux1-dev-fp8-e5m2.safetensors",
+    "flux1Dev.ojBw.safetensors"
+  ],
+  "default_size": "1024x1024",
+  "sizes": ["1024x1024", "1024x768", "768x1024", "1280x720", "720x1280", "1024x576", "576x1024"],
+  "workflow": {
+    "11": {
+      "class_type": "DualCLIPLoader",
+      "inputs": {
+        "clip_name1": "clip_l.safetensors",
+        "clip_name2": "t5xxl_fp16.safetensors",
+        "type": "flux",
+        "device": "default"
+      }
+    },
+    "12": {
+      "class_type": "UNETLoader",
+      "inputs": {
+        "unet_name": "{{checkpoint}}",
+        "weight_dtype": "fp8_e4m3fn"
+      }
+    },
+    "10": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "ae.safetensors"
+      }
+    },
+    "14": {
+      "class_type": "LoraLoader",
+      "inputs": {
+        "model": ["12", 0],
+        "clip": ["11", 0],
+        "lora_name": "{{lora_name}}",
+        "strength_model": "{{lora_strength}}",
+        "strength_clip": "{{lora_strength}}"
+      }
+    },
+    "5": {
+      "class_type": "EmptySD3LatentImage",
+      "inputs": {
+        "width": "{{width}}",
+        "height": "{{height}}",
+        "batch_size": 1
+      }
+    },
+    "13": {
+      "class_type": "KSampler",
+      "inputs": {
+        "model": ["14", 0],
+        "positive": ["6", 0],
+        "negative": ["7", 0],
+        "latent_image": ["5", 0],
+        "seed": 0,
+        "steps": 28,
+        "cfg": 1,
+        "sampler_name": "euler",
+        "scheduler": "simple",
+        "denoise": 1
+      }
+    },
+    "8": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": ["13", 0],
+        "vae": ["10", 0]
+      }
+    },
+    "6": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "clip": ["14", 1],
+        "text": "{{prompt}}"
+      }
+    },
+    "7": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "clip": ["14", 1],
+        "text": "{{negative_prompt}}"
+      }
+    },
+    "9": {
+      "class_type": "SaveImage",
+      "inputs": {
+        "images": ["8", 0],
+        "filename_prefix": "devforgeai_flux"
+      }
+    }
+  }
+}

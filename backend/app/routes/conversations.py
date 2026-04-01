@@ -85,6 +85,7 @@ async def list_conversations(
     result = await db.execute(query)
     conversations = result.scalars().all()
 
+    logger.info(f"Listing conversations: {len(conversations)} returned, {total} total")
     return ConversationList(
         data=[ConversationResponse.model_validate(c) for c in conversations],
         total=total,
@@ -105,6 +106,7 @@ async def create_conversation(
     db.add(db_conversation)
     await db.commit()
     await db.refresh(db_conversation)
+    logger.info(f"Created conversation {db_conversation.id} title={db_conversation.title!r}")
     return ConversationResponse.model_validate(db_conversation)
 
 
