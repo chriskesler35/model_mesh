@@ -6,15 +6,22 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { exec, spawn } from 'child_process'
 import { promisify } from 'util'
+import path from 'path'
+import fs from 'fs'
 
 const execAsync = promisify(exec)
 
 const BACKEND_PORT = 19000
-const PYTHON_EXE  = 'C:\\Python313\\python.exe'
-// Resolve relative to this file: frontend/src/app/api/backend/ → ../../../../.. → repo root → backend
-const REPO_ROOT   = require('path').resolve(__dirname, '..', '..', '..', '..', '..', '..', '..')
-const BACKEND_DIR = require('path').join(REPO_ROOT, 'backend')
-const VENV_PYTHON = require('path').join(BACKEND_DIR, 'venv', 'Scripts', 'python.exe')
+
+// Resolve paths from process.cwd() (frontend directory) → sibling backend
+// In dev: cwd = G:\Model_Mesh\frontend, backend = G:\Model_Mesh\backend
+const FRONTEND_DIR = process.cwd()
+const REPO_ROOT = path.resolve(FRONTEND_DIR, '..')
+const BACKEND_DIR = path.join(REPO_ROOT, 'backend')
+const VENV_PYTHON = path.join(BACKEND_DIR, 'venv', 'Scripts', 'python.exe')
+const PYTHON_EXE = 'C:\\Python313\\python.exe' // fallback
+
+console.log('[backend route] Paths:', { REPO_ROOT, BACKEND_DIR, VENV_PYTHON, exists: fs.existsSync(VENV_PYTHON) })
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -50,8 +57,8 @@ async function killBackend(): Promise<void> {
 
 function spawnBackend(): void {
   // Use venv python if it exists, fall back to system python
-  const fs = require('fs')
   const pythonExe = fs.existsSync(VENV_PYTHON) ? VENV_PYTHON : PYTHON_EXE
+  console.log('[spawnBackend] Using python:', pythonExe, 'cwd:', BACKEND_DIR)
   const child = spawn(pythonExe, ['-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', String(BACKEND_PORT)], {
     cwd: BACKEND_DIR,
     detached: true,
