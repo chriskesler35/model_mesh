@@ -1212,7 +1212,7 @@ export default function ChatPage() {
         role: m.role,
         content: m.content,
         created_at: m.created_at,
-        image_url: m.image_url || undefined,
+        image_url: m.image_url ? `${API_BASE}${m.image_url}` : undefined,
       }))
       setMessages(msgs)
 
