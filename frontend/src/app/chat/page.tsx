@@ -1452,6 +1452,28 @@ export default function ChatPage() {
         refreshConversations()
       } catch { /* non-fatal - image still generates */ }
 
+      // Save assistant placeholder message to DB so image_url can be updated later
+      let dbAssistantId = assistantId
+      if (convId) {
+        try {
+          const assistantRes = await fetch(`${API_BASE}/v1/conversations/${convId}/messages`, {
+            method: 'POST',
+            headers: AUTH_HEADERS,
+            body: JSON.stringify({
+              role: 'assistant',
+              content: `🎨 Generating image${wfName ? ` with ${wfName}` : ''}…`,
+            })
+          }).then(r => r.json())
+          if (assistantRes.id) {
+            dbAssistantId = assistantRes.id
+            // Update local message to use the real DB ID
+            setMessages(prev => prev.map(m =>
+              m.id === assistantId ? { ...m, id: dbAssistantId } : m
+            ))
+          }
+        } catch { /* non-fatal */ }
+      }
+
       const taskPayload: any = {
         prompt,
         model: provider,
@@ -1463,8 +1485,8 @@ export default function ChatPage() {
       if (negPrompt) taskPayload.negative_prompt = negPrompt
 
       const taskId = await submitTask('image_gen', taskPayload, convId || undefined)
-      // Map task → placeholder message so we can inject the image inline when done
-      pendingImageTasksRef.current.set(taskId, assistantId)
+      // Map task → message so we can inject the image inline when done (use real DB ID)
+      pendingImageTasksRef.current.set(taskId, dbAssistantId)
     } catch (e: any) {
       addToast({
         type: 'error',

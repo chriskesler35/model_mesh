@@ -220,4 +220,34 @@ async def get_messages(
     )
 
 
+class MessageCreate(PydanticBaseModel):
+    role: str
+    content: str
+
+
+@router.post("/{conversation_id}/messages", response_model=MessageResponse)
+async def add_message(
+    conversation_id: str,
+    body: MessageCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Add a message to a conversation (for image placeholder, etc.)."""
+    conv_uuid = uuid.UUID(conversation_id)
+
+    conv = await db.get(Conversation, conv_uuid)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    msg = Message(
+        conversation_id=conv_uuid,
+        role=body.role,
+        content=body.content,
+    )
+    db.add(msg)
+    await db.commit()
+    await db.refresh(msg)
+
+    return MessageResponse.model_validate(msg)
+
+
 
