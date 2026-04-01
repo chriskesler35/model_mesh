@@ -465,30 +465,13 @@ async def generate_image(
             elif request.model == "comfyui-local":
                 comfyui_url = os.environ.get('COMFYUI_URL') or getattr(settings, 'comfyui_url', 'http://localhost:8188')
 
-                # Try to ensure ComfyUI is running; fall back to Gemini Imagen if unavailable
-                comfyui_available = await ensure_comfyui(comfyui_url)
-                if not comfyui_available:
-                    logger.warning("ComfyUI unavailable after auto-launch attempt — falling back to Gemini Imagen")
-                    # Look up gemini-imagen model for fallback
-                    gemini_model_result = await db.execute(
-                        select(Model).where(Model.model_id == "gemini-imagen")
-                    )
-                    gemini_model = gemini_model_result.scalar_one_or_none()
-                    if gemini_model:
-                        api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY') or getattr(settings, 'gemini_api_key', None) or getattr(settings, 'google_api_key', None)
-                        if not api_key:
-                            raise HTTPException(
-                                status_code=503,
-                                detail="ComfyUI is not running and could not be started. Gemini Imagen fallback requires a Google API key."
-                            )
-                        result = await generate_with_gemini_imagen(request.prompt, api_key, request.size)
-                        request.model = "gemini-imagen"  # update for storage
-                    else:
-                        raise HTTPException(
-                            status_code=503,
-                            detail="ComfyUI is not running and could not be started. Add a Gemini API key to enable the fallback image generator."
-                        )
-                else:
+                # Try ComfyUI; fall back to Gemini on any failure (unreachable, timeout, error)
+                comfyui_failed = False
+                comfyui_error = ""
+                try:
+                    comfyui_available = await ensure_comfyui(comfyui_url)
+                    if not comfyui_available:
+                        raise Exception("ComfyUI not reachable after auto-launch attempt")
                     result = await generate_with_comfyui(
                         request.prompt,
                         comfyui_url,
@@ -497,6 +480,20 @@ async def generate_image(
                         request.workflow_id,
                         request.checkpoint,
                     )
+                except Exception as comfy_err:
+                    comfyui_failed = True
+                    comfyui_error = str(comfy_err)
+                    logger.warning(f"ComfyUI failed, falling back to Gemini: {comfy_err}")
+
+                if comfyui_failed:
+                    api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY') or getattr(settings, 'gemini_api_key', None) or getattr(settings, 'google_api_key', None)
+                    if not api_key:
+                        raise HTTPException(
+                            status_code=503,
+                            detail=f"ComfyUI failed ({comfyui_error}) and no Gemini API key configured for fallback."
+                        )
+                    result = await generate_with_gemini_imagen(request.prompt, api_key, request.size)
+                    request.model = "gemini-imagen"
 
             else:
                 raise HTTPException(
@@ -667,16 +664,19 @@ async def generate_variation(
             result = await generate_with_gemini_imagen(prompt, api_key, size)
         elif model == "comfyui-local":
             comfyui_url = os.environ.get('COMFYUI_URL') or getattr(settings, 'comfyui_url', 'http://localhost:8188')
-            comfyui_available = await ensure_comfyui(comfyui_url)
-            if not comfyui_available:
-                logger.warning("ComfyUI unavailable — falling back to Gemini Imagen for variation")
+            try:
+                comfyui_available = await ensure_comfyui(comfyui_url)
+                if not comfyui_available:
+                    raise Exception("ComfyUI not reachable")
+                result = await generate_with_comfyui(prompt, comfyui_url, size, negative_prompt)
+            except Exception as comfy_err:
+                # ComfyUI failed (unreachable, timed out, errored) — fall back to Gemini
+                logger.warning(f"ComfyUI failed for variation, falling back to Gemini: {comfy_err}")
                 api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY') or getattr(settings, 'gemini_api_key', None)
                 if not api_key:
-                    raise HTTPException(status_code=503, detail="ComfyUI unavailable and no Gemini API key configured")
+                    raise HTTPException(status_code=503, detail=f"ComfyUI failed ({comfy_err}) and no Gemini API key configured")
                 result = await generate_with_gemini_imagen(prompt, api_key, size)
                 model = "gemini-imagen"
-            else:
-                result = await generate_with_comfyui(prompt, comfyui_url, size, negative_prompt)
         else:
             raise HTTPException(
                 status_code=400,
