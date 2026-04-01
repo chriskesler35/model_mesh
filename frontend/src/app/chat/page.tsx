@@ -1473,6 +1473,34 @@ export default function ChatPage() {
       const taskId = await submitTask('image_gen', taskPayload, convId || undefined)
       // Map task → message so we can inject the image inline when done (use real DB ID)
       pendingImageTasksRef.current.set(taskId, dbAssistantId)
+      
+      // Poll immediately after task submission (for fast providers that complete within 3s)
+      // This prevents missing fast-completing tasks
+      setTimeout(() => {
+        const poll = async () => {
+          const msgId = pendingImageTasksRef.current.get(taskId)
+          if (!msgId) return
+          try {
+            const res = await fetch(`${API_BASE}/v1/tasks/${taskId}`, { headers: AUTH_HEADERS })
+            if (!res.ok) return
+            const task = await res.json()
+            if (task.status === 'completed' && task.result?.url) {
+              const imageUrl = `${API_BASE}${task.result.url}`
+              setMessages(prev => prev.map(m =>
+                m.id === msgId
+                  ? { ...m, content: '🖼️ Here\'s your image:', image_url: imageUrl, streaming: false }
+                  : m
+              ))
+              pendingImageTasksRef.current.delete(taskId)
+              fetch(`${API_BASE}/v1/conversations/messages/${msgId}/image`, {
+                method: 'PATCH', headers: AUTH_HEADERS,
+                body: JSON.stringify({ image_url: task.result.url })
+              }).catch(() => {})
+            }
+          } catch { /* silent */ }
+        }
+        poll()
+      }, 500)
     } catch (e: any) {
       addToast({
         type: 'error',
@@ -1540,7 +1568,7 @@ export default function ChatPage() {
   const activePersona = personas.find(p => p.id === selectedPersonaId)
 
   return (
-    <div className="flex h-full w-full overflow-hidden rounded-xl">
+    <div className="flex h-full w-full overflow-hidden">
 
       {/* Identity wizard — first-run and /soul /identity /user commands */}
       {wizardMode && (
