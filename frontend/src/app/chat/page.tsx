@@ -1164,11 +1164,11 @@ export default function ChatPage() {
           // Restore from URL or last session
           const sessionParam = searchParams?.get('session')
           if (sessionParam && convs.find(c => c.id === sessionParam)) {
-            loadSession(sessionParam, convs)
+            loadSession(sessionParam, convs, ps)
           } else {
             const lastId = localStorage.getItem('devforge_last_session')
             if (lastId && convs.find(c => c.id === lastId)) {
-              loadSession(lastId, convs)
+              loadSession(lastId, convs, ps)
             }
           }
         }
@@ -1207,16 +1207,19 @@ export default function ChatPage() {
   // ── Load session ──────────────────────────────────────────────────────────
   const [recoverySnapshot, setRecoverySnapshot] = useState<{conversationId: string, summary: string, messageCount: number} | null>(null)
 
-  const loadSession = useCallback(async (id: string, convList?: Conversation[]) => {
+  const loadSession = useCallback(async (id: string, convList?: Conversation[], personaList?: Persona[]) => {
     setActiveConvId(id)
     setLoadingMessages(true)
     setRecoverySnapshot(null)
     localStorage.setItem('devforge_last_session', id)
     router.replace(`/chat?session=${id}`, { scroll: false })
 
-    // Update title input
+    // Update title input and restore persona from conversation
     const conv = (convList || conversations).find(c => c.id === id)
     setTitleValue(conv?.title || '')
+    if (conv?.persona_id && (personaList || personas).find(p => p.id === conv.persona_id)) {
+      setSelectedPersonaId(conv.persona_id)
+    }
 
     try {
       const res = await fetch(`${API_BASE}/v1/conversations/${id}/messages?limit=200`, { headers: AUTH_HEADERS })
