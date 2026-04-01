@@ -59,14 +59,19 @@ function spawnBackend(): void {
   // Use venv python if it exists, fall back to system python
   const pythonExe = fs.existsSync(VENV_PYTHON) ? VENV_PYTHON : PYTHON_EXE
   console.log('[spawnBackend] Using python:', pythonExe, 'cwd:', BACKEND_DIR)
-  const child = spawn(pythonExe, ['-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', String(BACKEND_PORT)], {
-    cwd: BACKEND_DIR,
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-    shell: false,
-  })
-  child.unref()
+
+  // Use Windows 'start' command for reliable detached spawn
+  if (process.platform === 'win32') {
+    const cmd = `start "DevForgeAI Backend" /MIN /D "${BACKEND_DIR}" "${pythonExe}" -m uvicorn app.main:app --host 0.0.0.0 --port ${BACKEND_PORT}`
+    execAsync(cmd, { shell: 'cmd.exe' }).catch(() => {})
+  } else {
+    const child = spawn(pythonExe, ['-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', String(BACKEND_PORT)], {
+      cwd: BACKEND_DIR,
+      detached: true,
+      stdio: 'ignore',
+    })
+    child.unref()
+  }
 }
 
 async function waitForBackend(timeoutMs = 30000): Promise<boolean> {
