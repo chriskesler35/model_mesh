@@ -530,7 +530,7 @@ function ServerTab() {
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-base font-semibold text-gray-900">Processes</h3>
             <div className="flex gap-2">
-              {{actionMsg && <span className="text-xs text-gray-500 self-center">{actionMsg}</span>}
+              {actionMsg && <span className="text-xs text-gray-500 self-center">{actionMsg}</span>}
               <button onClick={() => pmControl('restart')} className="text-xs px-2.5 py-1 rounded border border-amber-300 text-amber-700 hover:bg-amber-50 disabled:opacity-50" disabled={!!pendingAction}>
                 {pendingAction === 'restart' ? <><svg className="animate-spin h-3 w-3 inline mr-1" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>Restarting…</> : '🔄 Restart All'}
               </button>
