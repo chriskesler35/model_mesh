@@ -195,7 +195,9 @@ pm2 restart all
 | `Cannot find module '...'` (frontend) | New npm package added | `npm install` in `frontend/` |
 | `address already in use :19000` | Old backend still running | Kill the old process then restart |
 | `address already in use :3001` | Old frontend still running | Kill the old process then restart |
-| Blank page or 404 in browser | Frontend not rebuilt | Stop and restart `npm run dev` |
+| Blank page or 404 in browser | Stale webpack cache | Restart `npm run dev` (cache auto-clears on start) |
+
+> **Self-healing:** The frontend automatically clears stale caches on startup. If a page crashes at runtime, error boundaries catch it and attempt auto-recovery before showing a manual retry UI — you should never see a blank white page.
 
 > **Rule of thumb:** after every `git pull`, always run `pip install -r requirements.txt` and `npm install` before restarting. It's fast when nothing changed and prevents 99% of post-update errors.
 
@@ -206,8 +208,9 @@ pm2 restart all
 ### Chat
 - OpenAI-compatible chat completions with streaming
 - Automatic image generation intent detection - just say "generate an image of..."
+- **Inline image preview** - generated images appear directly in chat with loading states; click to open a full-size lightbox with download
 - Multiple personas (each with its own model, system prompt, routing)
-- Conversation history with pin, keep-forever, rename, export
+- Conversation history with pin, keep-forever, rename, export — sessions persist immediately on first message
 - **Model override dropdown** - pick a specific model per-conversation (grouped by provider), independent of persona
 - **Slash commands:** `/reset` `/image` `/persona` `/model` `/pin` `/export` `/theme` `/method` `/help`
 
@@ -365,7 +368,10 @@ model_mesh/
 │   └── .env                     # Your keys (never committed)
 ├── frontend/
 │   └── src/app/
-│       ├── chat/                # Chat UI + recovery banner
+│       ├── chat/                # Chat UI + inline images + error boundary
+│       ├── api/health/          # Frontend health + self-healing endpoint
+│       ├── api/backend/         # Backend process control (start/stop/restart)
+│       ├── global-error.tsx     # App-wide error boundary with auto-recovery
 │       └── (main)/
 │           ├── agents/          # Agent list + detail
 │           ├── gallery/         # Image gallery

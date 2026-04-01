@@ -2,6 +2,12 @@
 echo Starting DevForgeAI...
 echo.
 
+:: Clean stale Next.js cache — prevents blank page after code changes
+if exist "G:\Model_Mesh\frontend\.next\cache" (
+    echo Cleaning stale frontend cache...
+    rmdir /s /q "G:\Model_Mesh\frontend\.next\cache" 2>nul
+)
+
 :: Check if backend is already running on port 19000
 netstat -ano | findstr ":19000 " | findstr "LISTENING" >nul 2>&1
 if %errorlevel% == 0 (

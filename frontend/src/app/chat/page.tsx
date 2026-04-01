@@ -180,8 +180,16 @@ function Sidebar({
           </button>
         </div>
 
-        {/* New chat */}
-        <div className="px-3 py-3">
+        {/* Back to Dashboard + New chat */}
+        <div className="px-3 py-3 space-y-2">
+          <Link href="/"
+            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+            Back to Dashboard
+          </Link>
           <button
             onClick={onNew}
             className="w-full flex items-center gap-2 px-3 py-2.5 rounded-lg bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium transition-colors"
@@ -332,13 +340,144 @@ function Sidebar({
           )}
         </div>
 
-        {/* Footer */}
-        <div className="px-3 py-2 border-t border-gray-100 dark:border-gray-800">
-          <Link href="/" className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
-            ← Back to dashboard
-          </Link>
-        </div>
       </aside>
+    </>
+  )
+}
+
+// ─── Inline image with lightbox ──────────────────────────────────────────────
+function InlineImage({ src, meta }: { src: string; meta?: Message['image_meta'] }) {
+  const [status, setStatus] = useState<'loading' | 'loaded' | 'error'>('loading')
+  const [lightbox, setLightbox] = useState(false)
+  const [retryCount, setRetryCount] = useState(0)
+
+  // Always construct URL fresh from current window context — handles hostname changes,
+  // remote access, and stale stored URLs.
+  // Extract the image path: "/v1/img/{uuid}" from any URL format
+  const extractPath = (url: string) => {
+    const match = url.match(/\/v1\/img\/[a-f0-9-]+/i)
+    return match ? match[0] : url.startsWith('/') ? url : `/${url}`
+  }
+  const imgPath = extractPath(src)
+  const imgSrc = `${API_BASE}${imgPath}`
+
+  // Force a new request on retry by appending a cache-buster
+  const finalSrc = retryCount > 0 ? `${imgSrc}${imgSrc.includes('?') ? '&' : '?'}r=${retryCount}` : imgSrc
+
+  return (
+    <>
+      <div className="mt-2 space-y-1.5">
+        {/* Image with loading/error states */}
+        <div className="relative inline-block">
+          {status === 'loading' && (
+            <div className="flex items-center gap-2 px-4 py-6 rounded-xl bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 w-64">
+              <div className="w-4 h-4 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+              <span className="text-xs text-gray-500">Loading image…</span>
+            </div>
+          )}
+          {status === 'error' && (
+            <div className="flex flex-col items-center gap-2 px-4 py-6 rounded-xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 w-72">
+              <span className="text-sm text-red-500">Failed to load image</span>
+              <span className="text-[10px] text-gray-400 break-all text-center px-2">{imgSrc}</span>
+              <button
+                onClick={() => { setRetryCount(c => c + 1); setStatus('loading') }}
+                className="text-xs px-3 py-1 rounded-lg bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 transition-colors"
+              >
+                Retry
+              </button>
+              <a href={imgSrc} target="_blank" rel="noreferrer" className="text-xs text-gray-400 hover:underline">
+                Open direct link ↗
+              </a>
+            </div>
+          )}
+          <img
+            key={finalSrc}
+            src={finalSrc}
+            alt="Generated image"
+            className={`rounded-xl max-w-sm w-full cursor-zoom-in hover:opacity-90 transition-opacity border border-gray-200 dark:border-gray-700 shadow-sm ${
+              status !== 'loaded' ? 'hidden' : ''
+            }`}
+            onLoad={() => setStatus('loaded')}
+            onError={() => setStatus('error')}
+            onClick={() => setLightbox(true)}
+          />
+        </div>
+
+        {/* Metadata badges */}
+        {status === 'loaded' && meta && (
+          <div className="flex flex-wrap gap-1.5 px-0.5">
+            <span className="text-xs bg-purple-100 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 px-1.5 py-0.5 rounded">
+              {meta.provider}
+            </span>
+            {meta.checkpoint && (
+              <span className="text-xs bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 px-1.5 py-0.5 rounded truncate max-w-[180px]" title={meta.checkpoint}>
+                {meta.checkpoint}
+              </span>
+            )}
+            {meta.workflow && (
+              <span className="text-xs bg-blue-50 dark:bg-blue-900/20 text-blue-500 dark:text-blue-400 px-1.5 py-0.5 rounded">
+                {meta.workflow}
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Action links */}
+        {status === 'loaded' && (
+          <div className="flex gap-3 px-0.5">
+            <a href={imgSrc} download className="text-xs text-indigo-500 hover:text-indigo-700 dark:text-indigo-400 hover:underline">
+              ↓ Download
+            </a>
+            <button onClick={() => setLightbox(true)} className="text-xs text-gray-400 hover:text-gray-600 hover:underline">
+              View full size ↗
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Lightbox modal */}
+      {lightbox && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm"
+          onClick={() => setLightbox(false)}
+        >
+          <div className="relative max-w-[90vw] max-h-[90vh]" onClick={e => e.stopPropagation()}>
+            <img
+              src={imgSrc}
+              alt="Generated image — full size"
+              className="max-w-full max-h-[85vh] rounded-lg shadow-2xl object-contain"
+            />
+            <div className="absolute top-3 right-3 flex gap-2">
+              <a
+                href={imgSrc}
+                download
+                className="px-3 py-1.5 rounded-lg bg-white/90 dark:bg-gray-800/90 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-white dark:hover:bg-gray-700 shadow transition-colors"
+                onClick={e => e.stopPropagation()}
+              >
+                ↓ Download
+              </a>
+              <button
+                onClick={() => setLightbox(false)}
+                className="px-3 py-1.5 rounded-lg bg-white/90 dark:bg-gray-800/90 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-white dark:hover:bg-gray-700 shadow transition-colors"
+              >
+                ✕ Close
+              </button>
+            </div>
+            {meta && (
+              <div className="absolute bottom-3 left-3 flex flex-wrap gap-1.5">
+                <span className="text-xs bg-white/80 dark:bg-gray-800/80 backdrop-blur px-2 py-1 rounded shadow">
+                  {meta.provider}
+                </span>
+                {meta.checkpoint && (
+                  <span className="text-xs bg-white/80 dark:bg-gray-800/80 backdrop-blur px-2 py-1 rounded shadow truncate max-w-[200px]">
+                    {meta.checkpoint}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </>
   )
 }
@@ -386,48 +525,7 @@ function MessageBubble({ msg }: { msg: Message }) {
 
         {/* Inline generated image */}
         {msg.image_url && (
-          <div className="mt-2 space-y-1">
-            <img
-              src={msg.image_url}
-              alt="Generated image"
-              className="rounded-xl max-w-xs w-full cursor-zoom-in hover:opacity-90 transition-opacity border border-gray-200 dark:border-gray-700 shadow-sm"
-              onClick={() => window.open(msg.image_url, '_blank')}
-            />
-            {msg.image_meta && (
-              <div className="flex flex-wrap gap-1.5 px-0.5">
-                <span className="text-xs bg-purple-100 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 px-1.5 py-0.5 rounded">
-                  {msg.image_meta.provider}
-                </span>
-                {msg.image_meta.checkpoint && (
-                  <span className="text-xs bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 px-1.5 py-0.5 rounded truncate max-w-[180px]" title={msg.image_meta.checkpoint}>
-                    {msg.image_meta.checkpoint}
-                  </span>
-                )}
-                {msg.image_meta.workflow && (
-                  <span className="text-xs bg-blue-50 dark:bg-blue-900/20 text-blue-500 dark:text-blue-400 px-1.5 py-0.5 rounded">
-                    {msg.image_meta.workflow}
-                  </span>
-                )}
-              </div>
-            )}
-            <div className="flex gap-3 px-0.5">
-              <a
-                href={msg.image_url}
-                download
-                className="text-xs text-indigo-500 hover:text-indigo-700 dark:text-indigo-400 hover:underline"
-              >
-                ↓ Download
-              </a>
-              <a
-                href={msg.image_url}
-                target="_blank"
-                rel="noreferrer"
-                className="text-xs text-gray-400 hover:text-gray-600 hover:underline"
-              >
-                Open full size ↗
-              </a>
-            </div>
-          </div>
+          <InlineImage src={msg.image_url} meta={msg.image_meta} />
         )}
 
         {/* Meta row */}
@@ -1075,54 +1173,60 @@ export default function ChatPage() {
   }, [selectedWorkflowId, workflows])
 
   // ── Poll for image task completion → inject inline ────────────────────────
+  // Helper to handle a completed image task
+  const handleImageTaskComplete = useCallback((taskId: string, msgId: string, imageUrl: string, relativeUrl: string) => {
+    setMessages(prev => prev.map(m =>
+      m.id === msgId
+        ? { ...m, content: '🖼️ Here\'s your image:', image_url: imageUrl, streaming: false }
+        : m
+    ))
+    pendingImageTasksRef.current.delete(taskId)
+    fetch(`${API_BASE}/v1/tasks/${taskId}/acknowledge`, { method: 'POST', headers: AUTH_HEADERS }).catch(() => {})
+    // Persist image URL + updated content to DB so it works on reload
+    fetch(`${API_BASE}/v1/conversations/messages/${msgId}/image`, {
+      method: 'PATCH', headers: { ...AUTH_HEADERS, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_url: relativeUrl, content: '🖼️ Here\'s your image:' })
+    }).catch(() => {})
+  }, [])
+
   useEffect(() => {
     const poll = async () => {
       if (pendingImageTasksRef.current.size === 0) return
-      try {
-        const res = await fetch(`${API_BASE}/v1/tasks/notifications`, { headers: AUTH_HEADERS })
-        if (!res.ok) return
-        const data = await res.json()
-        for (const task of (data.notifications || [])) {
-          const msgId = pendingImageTasksRef.current.get(task.id)
-          if (!msgId) continue
+
+      // Strategy: poll each individual task directly (more reliable than notifications)
+      const entries = Array.from(pendingImageTasksRef.current.entries())
+      for (const [taskId, msgId] of entries) {
+        try {
+          const res = await fetch(`${API_BASE}/v1/tasks/${taskId}`, { headers: AUTH_HEADERS })
+          if (!res.ok) continue
+          const task = await res.json()
           if (task.status === 'completed' && task.result?.url) {
             const imageUrl = `${API_BASE}${task.result.url}`
-            setMessages(prev => prev.map(m =>
-              m.id === msgId
-                ? { ...m, content: '🖼️ Here\'s your image:', image_url: imageUrl, streaming: false }
-                : m
-            ))
-            pendingImageTasksRef.current.delete(task.id)
-            fetch(`${API_BASE}/v1/tasks/${task.id}/acknowledge`, { method: 'POST', headers: AUTH_HEADERS }).catch(() => {})
-            // Persist relative image URL to DB so it works on both local and remote access
-            fetch(`${API_BASE}/v1/conversations/messages/${msgId}/image`, {
-              method: 'PATCH', headers: AUTH_HEADERS,
-              body: JSON.stringify({ image_url: task.result.url })
-            }).catch(() => {})
+            handleImageTaskComplete(taskId, msgId, imageUrl, task.result.url)
           } else if (task.status === 'failed') {
             setMessages(prev => prev.map(m =>
               m.id === msgId
                 ? { ...m, content: `❌ Image generation failed: ${task.error || 'Unknown error'}`, streaming: false }
                 : m
             ))
-            pendingImageTasksRef.current.delete(task.id)
+            pendingImageTasksRef.current.delete(taskId)
           }
-        }
-      } catch { /* silent */ }
+        } catch { /* silent — will retry next cycle */ }
+      }
     }
     const interval = setInterval(poll, 3000)
     return () => clearInterval(interval)
-  }, [])
+  }, [handleImageTaskComplete])
 
   // ── Init ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     const init = async () => {
       try {
-        const [personasRes, modelsRes, convsRes, identityRes] = await Promise.all([
+        const [modelsRes, personasRes, convsRes, identityRes] = await Promise.all([
           fetch(`${API_BASE}/v1/models`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
-          fetch(`${API_BASE}/v1/personas`, { headers: AUTH_HEADERS }).then(r => r.json()),
-          fetch(`${API_BASE}/v1/conversations?limit=100&pinned_first=true`, { headers: AUTH_HEADERS }).then(r => r.json()),
-          fetch(`${API_BASE}/v1/identity/status`, { headers: AUTH_HEADERS }).then(r => r.json()),
+          fetch(`${API_BASE}/v1/personas`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+          fetch(`${API_BASE}/v1/conversations?limit=100&pinned_first=true`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+          fetch(`${API_BASE}/v1/identity/status`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({})),
         ])
 
         const ps: Persona[] = personasRes.data || []
@@ -1212,7 +1316,10 @@ export default function ChatPage() {
         role: m.role,
         content: m.content,
         created_at: m.created_at,
-        image_url: m.image_url ? `${API_BASE}${m.image_url}` : undefined,
+        // Handle both relative (/v1/img/...) and already-absolute URLs
+        image_url: m.image_url
+          ? (m.image_url.startsWith('http') ? m.image_url : `${API_BASE}${m.image_url}`)
+          : undefined,
       }))
       setMessages(msgs)
 
@@ -1242,6 +1349,7 @@ export default function ChatPage() {
 
   // ── New chat ──────────────────────────────────────────────────────────────
   const newChat = () => {
+    // Just clear local state — conversation is created on first message, not before
     setActiveConvId(null)
     setMessages([])
     setTitleValue('')
@@ -1342,16 +1450,41 @@ export default function ChatPage() {
         setActiveConvId(convId)
         localStorage.setItem('devforge_last_session', convId)
         router.replace(`/chat?session=${convId}`, { scroll: false })
+        // Immediately add new conversation to sidebar
+        const autoTitle = text.slice(0, 60) + (text.length > 60 ? '...' : '')
+        setConversations(prev => {
+          if (prev.some(c => c.id === convId)) return prev
+          return [{
+            id: convId!,
+            title: autoTitle,
+            pinned: false,
+            keep_forever: false,
+            last_message_at: new Date().toISOString(),
+            message_count: 2,
+            created_at: new Date().toISOString(),
+            persona_id: selectedPersonaId,
+          }, ...prev]
+        })
+        setTitleValue(autoTitle)
         refreshConversations()
       } else if (convId) {
-        setConversations(prev => prev.map(c =>
-          c.id === convId ? { ...c, last_message_at: new Date().toISOString(), message_count: (c.message_count || 0) + 2 } : c
-        ))
+        // Auto-title on first real message (replaces "New Chat" placeholder)
         const conv = conversations.find(c => c.id === convId)
-        if (conv && !conv.title && messages.length === 0) {
-          const autoTitle = text.slice(0, 60) + (text.length > 60 ? '...' : '')
+        const needsTitle = conv && (!conv.title || conv.title === 'New Chat')
+        const autoTitle = needsTitle ? text.slice(0, 60) + (text.length > 60 ? '...' : '') : null
+        setConversations(prev => prev.map(c =>
+          c.id === convId ? {
+            ...c,
+            last_message_at: new Date().toISOString(),
+            message_count: (c.message_count || 0) + 2,
+            ...(autoTitle ? { title: autoTitle } : {}),
+          } : c
+        ))
+        if (autoTitle) {
           setTitleValue(autoTitle)
-          setConversations(prev => prev.map(c => c.id === convId ? { ...c, title: autoTitle } : c))
+          fetch(`${API_BASE}/v1/conversations/${convId}`, {
+            method: 'PATCH', headers: AUTH_HEADERS, body: JSON.stringify({ title: autoTitle })
+          }).catch(() => {})
         }
       }
 
@@ -1403,48 +1536,70 @@ export default function ChatPage() {
     }
     setMessages(prev => [...prev, userMsg, assistantMsg])
 
-    // Save to conversation — post image request as a real chat message so it persists
+    // Ensure we have a conversation for this image request
     try {
       let convId: string | null = activeConvId
-      const defaultPersonaId = personas.find((p: any) => p.is_default)?.id || selectedPersonaId
-      try {
-        const saveBody: any = {
-          model: defaultPersonaId,
-          messages: [{ role: 'user', content: `🖼️ Generate image: ${prompt}` }],
-          stream: false,
-        }
-        if (convId) saveBody.conversation_id = convId
-        const saveRes = await fetch(`${API_BASE}/v1/chat/completions`, {
-          method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify(saveBody)
-        }).then(r => r.json())
-        const newConvId = saveRes.conversation_id || saveRes.modelmesh?.conversation_id || null
-        if (newConvId && newConvId !== convId) {
-          convId = newConvId as string
-          setActiveConvId(convId)
-          localStorage.setItem('devforge_last_session', convId)
-          router.replace(`/chat?session=${convId}`, { scroll: false })
-        }
-        // Update sidebar title to reflect image request
-        if (convId) {
-          const autoTitle = `🖼️ ${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}`
-          await fetch(`${API_BASE}/v1/conversations/${convId}`, {
-            method: 'PATCH', headers: AUTH_HEADERS, body: JSON.stringify({ title: autoTitle })
-          }).catch(() => {})
-          setConversations(prev => prev.map(c =>
-            c.id === convId ? { ...c, title: autoTitle, last_message_at: new Date().toISOString() } : c
-          ))
-          setTitleValue(autoTitle)
-        }
-        refreshConversations()
-      } catch { /* non-fatal - image still generates */ }
+      const autoTitle = `🖼️ ${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}`
 
-      // Save assistant placeholder message to DB so image_url can be updated later
+      // Create conversation if we don't have one
+      if (!convId) {
+        const createRes = await fetch(`${API_BASE}/v1/conversations`, {
+          method: 'POST',
+          headers: { ...AUTH_HEADERS, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: autoTitle,
+            persona_id: selectedPersonaId || undefined,
+          })
+        }).then(r => r.json())
+        convId = createRes.id || createRes.data?.id || null
+      }
+
+      if (convId && convId !== activeConvId) {
+        setActiveConvId(convId)
+        localStorage.setItem('devforge_last_session', convId)
+        router.replace(`/chat?session=${convId}`, { scroll: false })
+      }
+
+      // Always ensure the conversation is in the sidebar immediately
+      if (convId) {
+        setConversations(prev => {
+          if (prev.some(c => c.id === convId)) {
+            // Already exists — update title
+            return prev.map(c =>
+              c.id === convId ? { ...c, title: autoTitle, last_message_at: new Date().toISOString() } : c
+            )
+          }
+          // New — prepend
+          return [{
+            id: convId!,
+            title: autoTitle,
+            pinned: false,
+            keep_forever: false,
+            last_message_at: new Date().toISOString(),
+            message_count: 1,
+            created_at: new Date().toISOString(),
+            persona_id: selectedPersonaId,
+          }, ...prev]
+        })
+        setTitleValue(autoTitle)
+        // Update backend title
+        fetch(`${API_BASE}/v1/conversations/${convId}`, {
+          method: 'PATCH', headers: AUTH_HEADERS, body: JSON.stringify({ title: autoTitle })
+        }).catch(() => {})
+      }
+
+      // Save user message + assistant placeholder to DB
       let dbAssistantId = assistantId
       if (convId) {
         try {
+          // Save user message
+          await fetch(`${API_BASE}/v1/conversations/${convId}/messages`, {
+            method: 'POST', headers: AUTH_HEADERS,
+            body: JSON.stringify({ role: 'user', content: `🖼️ Generate image: ${prompt}` })
+          })
+          // Save assistant placeholder — get its DB ID for image_url patching
           const assistantRes = await fetch(`${API_BASE}/v1/conversations/${convId}/messages`, {
-            method: 'POST',
-            headers: AUTH_HEADERS,
+            method: 'POST', headers: AUTH_HEADERS,
             body: JSON.stringify({
               role: 'assistant',
               content: `🎨 Generating image${wfName ? ` with ${wfName}` : ''}…`,
@@ -1452,12 +1607,11 @@ export default function ChatPage() {
           }).then(r => r.json())
           if (assistantRes.id) {
             dbAssistantId = assistantRes.id
-            // Update local message to use the real DB ID
             setMessages(prev => prev.map(m =>
               m.id === assistantId ? { ...m, id: dbAssistantId } : m
             ))
           }
-        } catch { /* non-fatal */ }
+        } catch { /* non-fatal — image still generates */ }
       }
 
       const taskPayload: any = {
@@ -1475,31 +1629,17 @@ export default function ChatPage() {
       pendingImageTasksRef.current.set(taskId, dbAssistantId)
       
       // Poll immediately after task submission (for fast providers that complete within 3s)
-      // This prevents missing fast-completing tasks
       setTimeout(() => {
-        const poll = async () => {
-          const msgId = pendingImageTasksRef.current.get(taskId)
-          if (!msgId) return
-          try {
-            const res = await fetch(`${API_BASE}/v1/tasks/${taskId}`, { headers: AUTH_HEADERS })
-            if (!res.ok) return
-            const task = await res.json()
-            if (task.status === 'completed' && task.result?.url) {
-              const imageUrl = `${API_BASE}${task.result.url}`
-              setMessages(prev => prev.map(m =>
-                m.id === msgId
-                  ? { ...m, content: '🖼️ Here\'s your image:', image_url: imageUrl, streaming: false }
-                  : m
-              ))
-              pendingImageTasksRef.current.delete(taskId)
-              fetch(`${API_BASE}/v1/conversations/messages/${msgId}/image`, {
-                method: 'PATCH', headers: AUTH_HEADERS,
-                body: JSON.stringify({ image_url: task.result.url })
-              }).catch(() => {})
+        const msgId = pendingImageTasksRef.current.get(taskId)
+        if (!msgId) return
+        fetch(`${API_BASE}/v1/tasks/${taskId}`, { headers: AUTH_HEADERS })
+          .then(r => r.ok ? r.json() : null)
+          .then(task => {
+            if (task?.status === 'completed' && task.result?.url) {
+              handleImageTaskComplete(taskId, msgId, `${API_BASE}${task.result.url}`, task.result.url)
             }
-          } catch { /* silent */ }
-        }
-        poll()
+          })
+          .catch(() => {})
       }, 500)
     } catch (e: any) {
       addToast({
@@ -1515,9 +1655,18 @@ export default function ChatPage() {
   const refreshConversations = async () => {
     try {
       const res = await fetch(`${API_BASE}/v1/conversations?limit=100&pinned_first=true`, { headers: AUTH_HEADERS })
+      if (!res.ok) return // don't wipe sidebar on error
       const data = await res.json()
-      setConversations(data.data || [])
-    } catch { /* silent */ }
+      const fresh: Conversation[] = data.data || []
+      if (fresh.length === 0) return // backend returned empty — keep current list
+      setConversations(prev => {
+        // Merge: use fresh list as base, but preserve any local-only entries
+        // (conversations just created that might not be in the DB response yet)
+        const freshIds = new Set(fresh.map(c => c.id))
+        const localOnly = prev.filter(c => !freshIds.has(c.id))
+        return [...localOnly, ...fresh]
+      })
+    } catch { /* network error — keep current sidebar intact */ }
   }
 
   // ── Conversation actions ──────────────────────────────────────────────────

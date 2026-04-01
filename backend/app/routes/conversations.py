@@ -22,6 +22,7 @@ router = APIRouter(prefix="/v1/conversations", tags=["conversations"], dependenc
 # ─── Message image URL persistence (must be BEFORE /{conversation_id} routes) ─
 class MessageImageUpdate(PydanticBaseModel):
     image_url: str
+    content: Optional[str] = None  # optionally update message text alongside image URL
 
 
 @router.patch("/messages/{message_id}/image")
@@ -30,7 +31,7 @@ async def update_message_image(
     body: MessageImageUpdate,
     db: AsyncSession = Depends(get_db),
 ):
-    """Save an inline image URL on a message (for persistence across reloads)."""
+    """Save an inline image URL (and optional content update) on a message."""
     try:
         msg_uuid = uuid.UUID(message_id)
     except ValueError:
@@ -42,6 +43,8 @@ async def update_message_image(
     if not msg:
         raise HTTPException(status_code=404, detail="Message not found")
     msg.image_url = body.image_url
+    if body.content is not None:
+        msg.content = body.content
     await db.commit()
     return {"ok": True}
 
