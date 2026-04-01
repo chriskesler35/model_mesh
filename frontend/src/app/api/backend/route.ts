@@ -52,7 +52,7 @@ function spawnBackend(): void {
   // Use venv python if it exists, fall back to system python
   const fs = require('fs')
   const pythonExe = fs.existsSync(VENV_PYTHON) ? VENV_PYTHON : PYTHON_EXE
-  const child = spawn(pythonExe, ['-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', String(BACKEND_PORT), '--reload'], {
+  const child = spawn(pythonExe, ['-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', String(BACKEND_PORT)], {
     cwd: BACKEND_DIR,
     detached: true,
     stdio: 'ignore',
@@ -62,7 +62,7 @@ function spawnBackend(): void {
   child.unref()
 }
 
-async function waitForBackend(timeoutMs = 15000): Promise<boolean> {
+async function waitForBackend(timeoutMs = 30000): Promise<boolean> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
     await new Promise(r => setTimeout(r, 800))
