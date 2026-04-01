@@ -435,6 +435,7 @@ function ServerTab() {
   const [restarting, setRestarting] = useState(false)
   const [restartMsg, setRestartMsg] = useState('')
   const [actionMsg, setActionMsg] = useState('')
+  const [pendingAction, setPendingAction] = useState<string | null>(null)
 
   const fetchAll = useCallback(async () => {
     try {
@@ -503,6 +504,7 @@ function ServerTab() {
 
   const pmControl = async (action: string, service = 'all') => {
     setActionMsg(`${action}ing…`)
+    setPendingAction(action)
     try {
       // Use the Next.js API route — works even when backend is down
       const res = await fetch('/api/backend', {
@@ -510,8 +512,8 @@ function ServerTab() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: action === 'restart' ? 'restart' : action === 'stop' ? 'stop' : 'start' })
       }).then(r => r.json())
-      setTimeout(() => { fetchAll(); setActionMsg(res.ok ? '' : res.message || 'Failed') }, 2000)
-    } catch { setActionMsg('Failed') }
+      setTimeout(() => { fetchAll(); setActionMsg(res.ok ? '' : res.message || 'Failed'); setPendingAction(null) }, 2000)
+    } catch { setActionMsg('Failed'); setPendingAction(null) }
   }
 
   const statusColor = (s: string) => s === 'online' ? 'text-green-600' : s === 'stopped' ? 'text-gray-400' : 'text-red-500'
@@ -528,10 +530,16 @@ function ServerTab() {
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-base font-semibold text-gray-900">Processes</h3>
             <div className="flex gap-2">
-              {actionMsg && <span className="text-xs text-gray-500 self-center">{actionMsg}</span>}
-              <button onClick={() => pmControl('restart')} className="text-xs px-2.5 py-1 rounded border border-amber-300 text-amber-700 hover:bg-amber-50">⟳ Restart All</button>
-              <button onClick={() => pmControl('stop')}    className="text-xs px-2.5 py-1 rounded border border-gray-300 text-gray-600 hover:bg-gray-50">■ Stop All</button>
-              <button onClick={() => pmControl('start', 'ecosystem.config.js')} className="text-xs px-2.5 py-1 rounded border border-green-300 text-green-700 hover:bg-green-50">▶ Start All</button>
+              {{actionMsg && <span className="text-xs text-gray-500 self-center">{actionMsg}</span>}
+              <button onClick={() => pmControl('restart')} className="text-xs px-2.5 py-1 rounded border border-amber-300 text-amber-700 hover:bg-amber-50 disabled:opacity-50" disabled={!!pendingAction}>
+                {pendingAction === 'restart' ? <><svg className="animate-spin h-3 w-3 inline mr-1" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>Restarting…</> : '🔄 Restart All'}
+              </button>
+              <button onClick={() => pmControl('stop')} className="text-xs px-2.5 py-1 rounded border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50" disabled={!!pendingAction}>
+                {pendingAction === 'stop' ? <><svg className="animate-spin h-3 w-3 inline mr-1" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>Stopping…</> : '⏹ Stop All'}
+              </button>
+              <button onClick={() => pmControl('start', 'ecosystem.config.js')} className="text-xs px-2.5 py-1 rounded border border-green-300 text-green-700 hover:bg-green-50 disabled:opacity-50" disabled={!!pendingAction}>
+                {pendingAction === 'start' ? <><svg className="animate-spin h-3 w-3 inline mr-1" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>Starting…</> : '▶ Start All'}
+              </button>
               <button onClick={fetchAll} className="text-xs px-2.5 py-1 rounded border border-gray-200 text-gray-500 hover:bg-gray-50">↻</button>
             </div>
           </div>
@@ -661,7 +669,11 @@ function ServerTab() {
           )}
           <button onClick={restart} disabled={restarting || !info}
             className="inline-flex items-center gap-2 px-4 py-2 border border-amber-300 text-sm font-medium rounded-md text-amber-700 bg-white hover:bg-amber-50 disabled:opacity-50">
-            {restarting ? <><span className="animate-spin">⟳</span> Restarting…</> : <>⟳ Reload Worker</>}
+            {restarting ? (
+  <><svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"/></svg> Restarting…</>
+) : (
+  <>🔄 Reload Worker</>
+)}
           </button>
         </div>
       </div>
