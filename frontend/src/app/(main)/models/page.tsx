@@ -81,7 +81,16 @@ export default function ModelsPage() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
   const [syncing, setSyncing] = useState(false)
   const [syncResult, setSyncResult] = useState<string | null>(null)
-  const [formData, setFormData] = useState({
+  const [formData, setFormData] = useState<{
+    model_id: string
+    display_name: string
+    provider_id: string
+    cost_per_1m_input: number
+    cost_per_1m_output: number
+    context_window: number
+    capabilities: Record<string, boolean>
+    is_active: boolean
+  }>({
     model_id: '',
     display_name: '',
     provider_id: '',

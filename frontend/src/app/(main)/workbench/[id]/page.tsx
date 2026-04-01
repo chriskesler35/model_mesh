@@ -1,5 +1,9 @@
 'use client'
 
+// Dynamic rendering for workbench
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
+
 import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
@@ -155,13 +159,13 @@ export default function WorkbenchSessionPage() {
           setFiles(prev => {
             const exists = prev.find(f => f.path === evt.payload.path)
             if (exists) return prev
-            return [...prev, { path: evt.payload.path, status: 'created', content: evt.payload.content }]
+            return [...prev, { path: evt.payload.path, status: 'created' as const, content: evt.payload.content }]
           })
         }
         if (evt.type === 'file_modified') {
           setFiles(prev => prev.map(f =>
-            f.path === evt.payload.path ? { ...f, status: 'modified', diff: evt.payload.diff } : f
-          ).concat(prev.find(f => f.path === evt.payload.path) ? [] : [{ path: evt.payload.path, status: 'modified', diff: evt.payload.diff }])
+            f.path === evt.payload.path ? { ...f, status: 'modified' as const, diff: evt.payload.diff } : f
+          ).concat(prev.find(f => f.path === evt.payload.path) ? [] : [{ path: evt.payload.path, status: 'modified' as const, diff: evt.payload.diff }])
           )
         }
         if (evt.type === 'waiting') {

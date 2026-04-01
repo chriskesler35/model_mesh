@@ -135,13 +135,13 @@ export default function ProjectDetailPage() {
     let lastStatus: string | null = null
     const poll = async () => {
       try {
-        const res = await fetch(\/v1/workbench/sessions\, { headers: AUTH_HEADERS })
+        const res = await fetch('/v1/workbench/sessions', { headers: AUTH_HEADERS })
         const data = await res.json()
         const mine = (data.data || []).find((s: any) => s.project_id === id)
         if (!mine) return
-        const isActive = mine.status === \'running\' || mine.status === \'pending\'
+        const isActive = mine.status === 'running' || mine.status === 'pending'
         // When a session transitions from active -> completed/failed, refresh the tree
-        if (lastStatus && [\'running\', \'pending\'].includes(lastStatus) && !isActive) {
+        if (lastStatus && ['running', 'pending'].includes(lastStatus) && !isActive) {
           fetchProject()
         }
         lastStatus = mine.status

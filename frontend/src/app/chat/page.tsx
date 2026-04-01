@@ -2,7 +2,7 @@
 
 import { API_BASE, API_KEY, AUTH_HEADERS } from '@/lib/config'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { useToast } from '../ToastProvider'
@@ -999,25 +999,8 @@ export default function ChatPage() {
         break
       }
       case '/method': {
-        if (arg) {
-          await fetch(`${API_BASE}/v1/methods/activate`, {
-            method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify({ method_id: arg.toLowerCase() })
-          })
-          const methodMeta: Record<string, { icon: string; color: string }> = {
-            bmad: { icon: 'BMAD', color: 'purple' }, gsd: { icon: 'GSD', color: 'orange' },
-            superpowers: { icon: 'SP', color: 'blue' }, gtrack: { icon: 'GT', color: 'green' },
-            standard: { icon: 'STD', color: 'gray' }
-          }
-          const m = methodMeta[arg.toLowerCase()]
-          if (m) {
-            setActiveMethod(arg.toLowerCase() === 'standard' ? null : { id: arg.toLowerCase(), name: arg, icon: m.icon, color: m.color })
-            addToast({ type: 'success', title: 'Method switched', message: arg + ' mode active', autoClose: 2000 })
-          } else {
-            addToast({ type: 'error', title: 'Unknown method', message: 'Try: bmad, gsd, superpowers, gtrack, standard', autoClose: 3000 })
-          }
-        } else {
-          window.location.href = '/methods'
-        }
+        // Redirect to methods page (full implementation in progress)
+        window.location.href = '/methods'
         break
       }
       case '/export': {
@@ -1422,7 +1405,7 @@ export default function ChatPage() {
 
     // Save to conversation — post image request as a real chat message so it persists
     try {
-      let convId = activeConvId
+      let convId: string | null = activeConvId
       const defaultPersonaId = personas.find((p: any) => p.is_default)?.id || selectedPersonaId
       try {
         const saveBody: any = {
@@ -1436,7 +1419,7 @@ export default function ChatPage() {
         }).then(r => r.json())
         const newConvId = saveRes.conversation_id || saveRes.modelmesh?.conversation_id || null
         if (newConvId && newConvId !== convId) {
-          convId = newConvId
+          convId = newConvId as string
           setActiveConvId(convId)
           localStorage.setItem('devforge_last_session', convId)
           router.replace(`/chat?session=${convId}`, { scroll: false })
@@ -1788,7 +1771,7 @@ export default function ChatPage() {
                             const wf = workflows.find(w => w.id === selectedWorkflowId)
                             const compatList = wf?.compatible_checkpoints || []
                             // Merge compatible + all available from ComfyUI
-                            const allCkpts = [...new Set([...compatList, ...comfyCheckpoints, ...comfyUnetModels])]
+                            const allCkpts = Array.from(new Set([...compatList, ...comfyCheckpoints, ...comfyUnetModels]))
                             if (allCkpts.length === 0 && selectedCheckpoint) {
                               return <option value={selectedCheckpoint}>{selectedCheckpoint}</option>
                             }
