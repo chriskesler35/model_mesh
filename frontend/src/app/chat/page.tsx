@@ -1094,10 +1094,10 @@ export default function ChatPage() {
             ))
             pendingImageTasksRef.current.delete(task.id)
             fetch(`${API_BASE}/v1/tasks/${task.id}/acknowledge`, { method: 'POST', headers: AUTH_HEADERS }).catch(() => {})
-            // Persist image_url to DB so it survives session reload
+            // Persist relative image URL to DB so it works on both local and remote access
             fetch(`${API_BASE}/v1/conversations/messages/${msgId}/image`, {
               method: 'PATCH', headers: AUTH_HEADERS,
-              body: JSON.stringify({ image_url: imageUrl })
+              body: JSON.stringify({ image_url: task.result.url })
             }).catch(() => {})
           } else if (task.status === 'failed') {
             setMessages(prev => prev.map(m =>
