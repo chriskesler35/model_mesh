@@ -229,14 +229,14 @@ async def restart_server():
 
         import subprocess
 
-        # Get the current Python executable and working directory
         python_exe = sys.executable
         backend_dir = str(Path(__file__).parent.parent.parent)
+        restart_script = str(Path(backend_dir) / "restart.py")
 
-        # Spawn a new uvicorn process (detached)
+        # Spawn the restart helper (detached) — it waits for port to free, then starts uvicorn
         if sys.platform == "win32":
             subprocess.Popen(
-                [python_exe, "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "19000"],
+                [python_exe, restart_script],
                 cwd=backend_dir,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
                 stdout=subprocess.DEVNULL,
@@ -244,16 +244,16 @@ async def restart_server():
             )
         else:
             subprocess.Popen(
-                [python_exe, "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "19000"],
+                [python_exe, restart_script],
                 cwd=backend_dir,
                 start_new_session=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
 
-        logger.info("New process spawned — exiting current process")
-        await asyncio.sleep(0.2)
-        os._exit(0)  # Hard exit — the new process takes over
+        logger.info("Restart helper spawned — exiting current process")
+        await asyncio.sleep(0.3)
+        os._exit(0)
 
     asyncio.create_task(_do_restart())
 
