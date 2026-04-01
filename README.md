@@ -222,13 +222,16 @@ pm2 restart all
 
 ### Image Generation
 - **Provider choice** - Gemini Imagen (cloud) or ComfyUI (local) with auto-fallback
-- **Workflow templates** - SDXL Standard, Flux Schnell (fast), Flux Dev (quality), SD 1.5 — or add your own
+- **Workflow templates** - SDXL Standard, Flux Schnell (fast), Flux Dev (quality), Flux Uncensored + LoRA, SD 1.5 — or add your own
 - **Checkpoint picker** - auto-discovers models from your ComfyUI install, filtered by workflow compatibility
+- **LoRA support** - auto-discovers LoRA models from ComfyUI, with strength slider; dynamically injected into any workflow
 - **Size & negative prompt** - per-workflow size presets, optional negative prompt
+- **Editor workflow conversion** - ComfyUI editor-format workflows auto-converted to API format at generation time
 - **Model info on images** - shows which provider, checkpoint, and workflow was used
 - Natural language intent detection - just say "generate an image of..."
 - Gallery with lightbox, variations, edit-with-AI, download, delete
 - Custom workflows: drop a `.json` file in `data/workflows/` and it appears automatically
+- Workflows also discovered from your ComfyUI `workflows/` and `user/default/workflows/` directories
 - **Telegram delivery** - generated images are automatically sent to your Telegram chats
 - Generate images directly from Telegram: `/image a golden retriever skiing`
 
@@ -330,6 +333,173 @@ netsh advfirewall firewall add rule name="DevForgeAI Frontend (LAN)" dir=in acti
 ```
 
 Then access from any device on your network: `http://[server-IP]:3001`
+
+---
+
+## ComfyUI Setup & Configuration
+
+DevForgeAI can use [ComfyUI](https://github.com/comfyanonymous/ComfyUI) for local image generation. This section covers installation, GPU tuning, and workflow setup.
+
+### Prerequisites
+
+- **ComfyUI** installed somewhere on your machine (e.g. `E:\AI_Models\ComfyUI`)
+- **Python 3.11** with PyTorch + CUDA (ComfyUI's requirement)
+- At least one NVIDIA GPU with 8+ GB VRAM (12 GB recommended for Flux models)
+
+### Connecting DevForgeAI to ComfyUI
+
+1. Go to **Settings > Image Generation** in the DevForgeAI UI
+2. Set **ComfyUI Directory** to your ComfyUI install path (e.g. `E:\AI_Models\ComfyUI`)
+3. Set **Python Executable** to the Python that has PyTorch installed (e.g. `C:\...\Python311\python.exe`)
+4. Set **ComfyUI URL** to `http://localhost:8188` (default)
+5. Set **GPU Devices** to your preferred CUDA device order (e.g. `1,0` for dual-GPU with GPU 1 primary)
+6. Set **Default Image Provider** to `ComfyUI (Local)` if you want local generation by default
+
+DevForgeAI will auto-launch ComfyUI when needed and auto-discover your checkpoints, LoRAs, and workflows.
+
+### GPU Configuration
+
+ComfyUI's launch flags control how it uses your GPU(s). The right settings depend on your hardware.
+
+#### Single GPU
+
+| VRAM | Recommended flags | Notes |
+|------|-------------------|-------|
+| 24 GB (4090, 3090) | `--gpu-only --cuda-malloc --fast` | Everything stays on GPU, fastest |
+| 12 GB (3060, 4070) | `--highvram --cuda-malloc --fast` | Keeps models in VRAM, offloads only when necessary |
+| 8 GB (3070, 4060) | `--cuda-malloc --fast` | Default VRAM management, good balance |
+| 6 GB or less | `--lowvram --cuda-malloc` | Aggressive offloading to fit in limited VRAM |
+
+#### Dual GPU
+
+For dual-GPU setups, use `CUDA_VISIBLE_DEVICES` to control GPU priority:
+
+```bash
+# GPU 1 primary, GPU 0 as overflow
+set "CUDA_VISIBLE_DEVICES=1,0"
+
+# GPU 0 primary, GPU 1 as overflow
+set "CUDA_VISIBLE_DEVICES=0,1"
+```
+
+Recommended flags for dual-GPU:
+```
+--highvram --async-offload 2 --cuda-malloc --fast
+```
+
+- **`--highvram`** keeps models in VRAM as long as possible
+- **`--async-offload 2`** enables asynchronous weight transfer between GPUs (overlaps compute with data movement)
+- Do NOT use `--gpu-only` with 12 GB cards running Flux models (they need ~13 GB for UNET + CLIP + VAE + LoRA)
+- Do NOT use `--cuda-device` — it hides other GPUs. Use `CUDA_VISIBLE_DEVICES` instead
+
+#### Example Launcher Script (Windows)
+
+Create a `.bat` file for consistent startup:
+
+```batch
+@echo off
+title ComfyUI Launcher
+
+:: Kill any existing ComfyUI on port 8188
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr "LISTENING" ^| findstr ":8188 "') do (
+    taskkill /PID %%p /F >nul 2>&1
+    timeout /t 2 /nobreak >nul
+)
+
+:: GPU order: physical GPU 1 becomes cuda:0 (primary)
+set "CUDA_VISIBLE_DEVICES=1,0"
+
+:: Performance environment variables
+set "NVIDIA_TF32_OVERRIDE=1"
+set "CUDA_MODULE_LOADING=LAZY"
+set "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+
+cd /d "E:\AI_Models\ComfyUI"
+"C:\...\python.exe" main.py ^
+    --listen 0.0.0.0 ^
+    --port 8188 ^
+    --highvram ^
+    --async-offload 2 ^
+    --cuda-malloc ^
+    --fast ^
+    --preview-method auto ^
+    --enable-cors-header "*"
+```
+
+Adjust paths and GPU flags to match your setup.
+
+### Workflows
+
+DevForgeAI discovers workflow templates from three locations (in priority order):
+
+1. **`data/workflows/`** — built-in templates (SDXL Standard, Flux Dev, Flux Schnell, SD 1.5)
+2. **`{ComfyUI}/workflows/`** — your main ComfyUI workflows folder
+3. **`{ComfyUI}/user/default/workflows/`** — ComfyUI's per-user workflows
+
+#### Built-in Workflow Templates
+
+Templates use `{{placeholder}}` variables that get replaced with your UI selections:
+
+| Placeholder | Replaced with |
+|-------------|---------------|
+| `{{prompt}}` | Your text prompt |
+| `{{negative_prompt}}` | Negative prompt |
+| `{{checkpoint}}` | Selected checkpoint model |
+| `{{width}}` / `{{height}}` | Image dimensions |
+| `{{lora_name}}` | Selected LoRA model |
+| `{{lora_strength}}` | LoRA strength slider value |
+
+#### Creating Custom Workflow Templates
+
+Place a `.json` file in `data/workflows/` with this structure:
+
+```json
+{
+  "name": "My Custom Workflow",
+  "description": "Description shown in the UI",
+  "category": "txt2img",
+  "default_checkpoint": "myModel.safetensors",
+  "compatible_checkpoints": ["myModel.safetensors", "otherModel.safetensors"],
+  "default_size": "1024x1024",
+  "sizes": ["1024x1024", "768x1024", "1024x768"],
+  "workflow": {
+    "4": {
+      "class_type": "CheckpointLoaderSimple",
+      "inputs": { "ckpt_name": "{{checkpoint}}" }
+    },
+    "6": {
+      "class_type": "CLIPTextEncode",
+      "inputs": { "clip": ["4", 1], "text": "{{prompt}}" }
+    }
+  }
+}
+```
+
+The `workflow` key must contain the ComfyUI **API format** (node-ID keys with `class_type` and `inputs`), not the editor format.
+
+#### Using ComfyUI Editor Workflows Directly
+
+Workflows saved from the ComfyUI editor (with `nodes` and `links` arrays) are **automatically converted** to API format at generation time. They'll work, but since they don't have `{{placeholder}}` variables, the checkpoint/LoRA names are hardcoded to whatever was set when you saved the workflow in ComfyUI.
+
+For full control over checkpoint/LoRA selection from the DevForgeAI UI, create a template with placeholders.
+
+#### LoRA Support
+
+When using ComfyUI, the image generation panel shows a LoRA dropdown (auto-populated from your ComfyUI `models/loras/` folder) and a strength slider. If the selected workflow doesn't already include a `LoraLoader` node, one is dynamically injected and wired into the model/clip chain.
+
+### Troubleshooting ComfyUI
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| "ComfyUI not reachable" | ComfyUI not running or wrong URL | Start ComfyUI, check URL in Settings |
+| Always falls back to Gemini | ComfyUI errors are caught and Gemini is used as fallback | Check `logs/backend-error.log` for the real ComfyUI error |
+| "prompt_no_outputs" | Workflow has no SaveImage node | Ensure workflow includes a SaveImage or PreviewImage node |
+| "prompt_outputs_failed_validation" | Invalid checkpoint/sampler name | Check that the checkpoint file exists in ComfyUI's models folder |
+| Generation times out | Model loading + generation exceeds timeout | Normal for first gen (model loads into VRAM); timeout is 10 minutes |
+| OOM (Out of Memory) | Model too large for VRAM | Use `--highvram` instead of `--gpu-only`, or use FP8 model variants |
+| Models offloading to RAM | ComfyUI launched without VRAM flags | Use `--highvram` flag; check DevForgeAI isn't auto-launching with defaults |
+| Images all look the same | Workflow/checkpoint selection not reaching ComfyUI | Restart backend to pick up latest code; check dropdown selections |
+| UTF-8 BOM errors on workflows | Workflow JSON saved with BOM encoding | Handled automatically (uses `utf-8-sig` decoding) |
 
 ---
 
