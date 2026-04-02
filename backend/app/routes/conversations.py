@@ -19,6 +19,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/conversations", tags=["conversations"], dependencies=[Depends(verify_api_key)])
 
 
+def _parse_uuid(value: str) -> uuid.UUID:
+    """Parse a string as UUID, raising 404 if invalid."""
+    try:
+        return uuid.UUID(value)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=404, detail="Not found")
+
+
 # ─── Message image URL persistence (must be BEFORE /{conversation_id} routes) ─
 class MessageImageUpdate(PydanticBaseModel):
     image_url: str
@@ -142,7 +150,7 @@ async def get_conversation(
     db: AsyncSession = Depends(get_db)
 ):
     """Get a single conversation by ID."""
-    conv_uuid = uuid.UUID(conversation_id)
+    conv_uuid = _parse_uuid(conversation_id)
     conv = await db.get(Conversation, conv_uuid)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -156,7 +164,7 @@ async def update_conversation(
     db: AsyncSession = Depends(get_db)
 ):
     """Update conversation metadata (title, pinned, keep_forever)."""
-    conv_uuid = uuid.UUID(conversation_id)
+    conv_uuid = _parse_uuid(conversation_id)
     conv = await db.get(Conversation, conv_uuid)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -179,7 +187,7 @@ async def delete_conversation(
     db: AsyncSession = Depends(get_db)
 ):
     """Delete a conversation and all its messages."""
-    conv_uuid = uuid.UUID(conversation_id)
+    conv_uuid = _parse_uuid(conversation_id)
     conv = await db.get(Conversation, conv_uuid)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -197,7 +205,7 @@ async def get_messages(
     db: AsyncSession = Depends(get_db)
 ):
     """Get messages for a conversation."""
-    conv_uuid = uuid.UUID(conversation_id)
+    conv_uuid = _parse_uuid(conversation_id)
 
     conv = await db.get(Conversation, conv_uuid)
     if not conv:
@@ -237,7 +245,7 @@ async def add_message(
     db: AsyncSession = Depends(get_db),
 ):
     """Add a message to a conversation (for image placeholder, etc.)."""
-    conv_uuid = uuid.UUID(conversation_id)
+    conv_uuid = _parse_uuid(conversation_id)
 
     conv = await db.get(Conversation, conv_uuid)
     if not conv:

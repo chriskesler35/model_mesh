@@ -1,0 +1,1391 @@
+============================= test session starts =============================
+platform win32 -- Python 3.14.2, pytest-9.0.2, pluggy-1.6.0 -- C:\Python314\python.exe
+cachedir: .pytest_cache
+metadata: {'Python': '3.14.2', 'Platform': 'Windows-10-10.0.19045-SP0', 'Packages': {'pytest': '9.0.2', 'pluggy': '1.6.0'}, 'Plugins': {'asyncio': '1.3.0', 'cov': '7.1.0', 'json-report': '1.5.0', 'metadata': '3.1.1', 'anyio': '4.12.1'}}
+rootdir: G:\Model_Mesh
+plugins: asyncio-1.3.0, cov-7.1.0, json-report-1.5.0, metadata-3.1.1, anyio-4.12.1
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 231 items
+
+tests/test_agents.py::TestListAgents::test_list_agents_returns_200 PASSED [  0%]
+tests/test_agents.py::TestListAgents::test_list_agents_returns_list_or_dict PASSED [  0%]
+tests/test_agents.py::TestListAgents::test_list_agents_no_auth_rejected PASSED [  1%]
+tests/test_agents.py::TestAgentDefaults::test_agent_defaults_returns_200 PASSED [  1%]
+tests/test_agents.py::TestAgentDefaults::test_agent_defaults_returns_dict PASSED [  2%]
+tests/test_agents.py::TestAgentCRUD::test_create_agent_has_id ERROR      [  2%]
+tests/test_agents.py::TestAgentCRUD::test_get_agent_by_id ERROR          [  3%]
+tests/test_agents.py::TestAgentCRUD::test_get_agent_404_for_nonexistent ERROR [  3%]
+tests/test_agents.py::TestAgentCRUD::test_update_agent_description ERROR [  3%]
+tests/test_agents.py::TestAgentCRUD::test_update_nonexistent_agent_returns_404 ERROR [  4%]
+tests/test_agents.py::TestAgentCRUD::test_delete_agent_returns_success ERROR [  4%]
+tests/test_agents.py::TestAgentCRUD::test_delete_nonexistent_agent_returns_404 ERROR [  5%]
+tests/test_agents.py::TestCreateAgentValidation::test_create_agent_missing_required_fields_returns_422 PASSED [  5%]
+tests/test_chat.py::TestChatCompletions::test_chat_completions_basic FAILED [  6%]
+tests/test_chat.py::TestChatCompletions::test_chat_completions_with_model_override PASSED [  6%]
+tests/test_chat.py::TestChatCompletions::test_chat_completions_empty_messages PASSED [  6%]
+tests/test_chat.py::TestChatCompletions::test_chat_completions_no_body PASSED [  7%]
+tests/test_chat.py::TestChatCompletions::test_chat_completions_system_message FAILED [  7%]
+tests/test_chat.py::TestChatCompletions::test_chat_completions_multi_turn FAILED [  8%]
+tests/test_collaboration.py::TestCollabUsers::test_list_users PASSED     [  8%]
+tests/test_collaboration.py::TestCollabUsers::test_create_user PASSED    [  9%]
+tests/test_collaboration.py::TestCollabUsers::test_update_user PASSED    [  9%]
+tests/test_collaboration.py::TestCollabUsers::test_delete_user PASSED    [  9%]
+tests/test_collaboration.py::TestCollabWorkspaces::test_list_workspaces PASSED [ 10%]
+tests/test_collaboration.py::TestCollabWorkspaces::test_create_workspace PASSED [ 10%]
+tests/test_collaboration.py::TestCollabWorkspaces::test_update_workspace PASSED [ 11%]
+tests/test_collaboration.py::TestCollabWorkspaces::test_delete_workspace PASSED [ 11%]
+tests/test_collaboration.py::TestCollabHandoffs::test_list_handoffs PASSED [ 12%]
+tests/test_collaboration.py::TestCollabHandoffs::test_create_handoff PASSED [ 12%]
+tests/test_collaboration.py::TestCollabHandoffs::test_accept_handoff PASSED [ 12%]
+tests/test_collaboration.py::TestCollabAudit::test_get_audit_log PASSED  [ 13%]
+tests/test_collaboration.py::TestCollabAudit::test_create_audit_entry FAILED [ 13%]
+tests/test_conversations.py::TestListConversations::test_list_conversations_returns_200 PASSED [ 14%]
+tests/test_conversations.py::TestListConversations::test_list_conversations_returns_list_or_dict PASSED [ 14%]
+tests/test_conversations.py::TestConversationCRUD::test_create_conversation_has_id PASSED [ 15%]
+tests/test_conversations.py::TestConversationCRUD::test_get_conversation_by_id PASSED [ 15%]
+tests/test_conversations.py::TestConversationCRUD::test_get_conversation_404_for_nonexistent FAILED [ 16%]
+tests/test_conversations.py::TestConversationCRUD::test_update_conversation_title PASSED [ 16%]
+tests/test_conversations.py::TestConversationCRUD::test_update_nonexistent_conversation_returns_404 FAILED [ 16%]
+tests/test_conversations.py::TestConversationCRUD::test_delete_conversation_returns_success PASSED [ 17%]
+tests/test_conversations.py::TestConversationCRUD::test_delete_nonexistent_conversation_returns_404 FAILED [ 17%]
+tests/test_conversations.py::TestConversationMessages::test_list_messages_returns_200 PASSED [ 18%]
+tests/test_conversations.py::TestConversationMessages::test_list_messages_returns_list_or_dict PASSED [ 18%]
+tests/test_conversations.py::TestConversationMessages::test_list_messages_404_for_nonexistent_conversation FAILED [ 19%]
+tests/test_conversations.py::TestConversationMessages::test_create_message_returns_success PASSED [ 19%]
+tests/test_conversations.py::TestConversationMessages::test_create_message_missing_content_returns_422 PASSED [ 19%]
+tests/test_conversations.py::TestMessageImageUpdate::test_update_message_image_returns_success_or_422 PASSED [ 20%]
+tests/test_conversations.py::TestMessageImageUpdate::test_update_nonexistent_message_image_returns_404 FAILED [ 20%]
+tests/test_conversations.py::TestConversationCleanup::test_cleanup_endpoint_returns_200_or_204 PASSED [ 21%]
+tests/test_health.py::TestBasicHealth::test_health_returns_200 FAILED    [ 21%]
+tests/test_health.py::TestBasicHealth::test_health_response_has_status FAILED [ 22%]
+tests/test_health.py::TestSystemHealth::test_system_health_returns_200 PASSED [ 22%]
+tests/test_health.py::TestSystemHealth::test_system_health_is_json PASSED [ 22%]
+tests/test_health.py::TestSystemInfo::test_system_info_returns_200 PASSED [ 23%]
+tests/test_health.py::TestSystemInfo::test_system_info_has_expected_fields PASSED [ 23%]
+tests/test_health.py::TestSystemProcesses::test_system_processes_returns_200 PASSED [ 24%]
+tests/test_health.py::TestSystemProcesses::test_system_processes_returns_list_or_dict PASSED [ 24%]
+tests/test_health.py::TestSystemLogs::test_system_logs_returns_200 PASSED [ 25%]
+tests/test_health.py::TestSystemLogs::test_system_logs_returns_list_or_dict PASSED [ 25%]
+tests/test_health.py::TestSystemSnapshots::test_list_snapshots_returns_200 PASSED [ 25%]
+tests/test_health.py::TestSystemSnapshots::test_list_snapshots_returns_list_or_dict PASSED [ 26%]
+tests/test_health.py::TestSystemSnapshots::test_create_snapshot_returns_success PASSED [ 26%]
+tests/test_health.py::TestSystemSnapshots::test_create_snapshot_returns_json PASSED [ 27%]
+tests/test_health.py::TestSystemRestart::test_restart_requires_auth PASSED [ 27%]
+tests/test_health.py::TestSystemRestart::test_restart_with_auth SKIPPED  [ 28%]
+tests/test_identity.py::TestIdentityStatus::test_identity_status_returns_200 PASSED [ 28%]
+tests/test_identity.py::TestIdentityStatus::test_identity_status_returns_dict PASSED [ 29%]
+tests/test_identity.py::TestIdentitySoul::test_get_soul_returns_200 PASSED [ 29%]
+tests/test_identity.py::TestIdentitySoul::test_get_soul_returns_content PASSED [ 29%]
+tests/test_identity.py::TestIdentitySoul::test_put_soul_updates_content PASSED [ 30%]
+tests/test_identity.py::TestIdentitySoul::test_put_soul_missing_content_returns_422 PASSED [ 30%]
+tests/test_identity.py::TestIdentityUser::test_get_identity_user_returns_200 PASSED [ 31%]
+tests/test_identity.py::TestIdentityUser::test_get_identity_user_returns_dict PASSED [ 31%]
+tests/test_identity.py::TestIdentityUser::test_put_identity_user_updates PASSED [ 32%]
+tests/test_identity.py::TestIdentityFile::test_get_identity_file_returns_200 PASSED [ 32%]
+tests/test_identity.py::TestIdentityFile::test_get_identity_file_returns_dict PASSED [ 32%]
+tests/test_identity.py::TestIdentityFile::test_put_identity_file_updates PASSED [ 33%]
+tests/test_identity.py::TestIdentitySetup::test_setup_endpoint_returns_success_or_already_setup FAILED [ 33%]
+tests/test_images.py::TestListImages::test_list_images_returns_200 PASSED [ 34%]
+tests/test_images.py::TestListImages::test_list_images_returns_list_or_dict PASSED [ 34%]
+tests/test_images.py::TestImageUpload::test_upload_image_returns_success FAILED [ 35%]
+tests/test_images.py::TestImageUpload::test_upload_no_file_returns_422 PASSED [ 35%]
+tests/test_images.py::TestImageByID::test_get_image_by_id SKIPPED (I...) [ 35%]
+tests/test_images.py::TestImageByID::test_get_image_404_for_nonexistent PASSED [ 36%]
+tests/test_images.py::TestImageByID::test_download_image SKIPPED (Im...) [ 36%]
+tests/test_images.py::TestImageByID::test_download_nonexistent_image_returns_404 PASSED [ 37%]
+tests/test_images.py::TestImageByID::test_delete_image_returns_success SKIPPED [ 37%]
+tests/test_images.py::TestImageByID::test_delete_nonexistent_image_returns_404 PASSED [ 38%]
+tests/test_images.py::TestImageVariations::test_variations_nonexistent_image_returns_404 PASSED [ 38%]
+tests/test_images.py::TestImageVariations::test_variations_with_real_image SKIPPED [ 38%]
+tests/test_images.py::TestImageGeneration::test_generation_returns_success_or_no_provider PASSED [ 39%]
+tests/test_images.py::TestImageGeneration::test_generation_missing_prompt_returns_422 PASSED [ 39%]
+tests/test_images.py::TestImageEdit::test_edit_no_file_returns_422 PASSED [ 40%]
+tests/test_images.py::TestImageEdit::test_edit_with_image_returns_result_or_no_provider FAILED [ 40%]
+tests/test_methods.py::TestListMethods::test_list_methods_returns_200 PASSED [ 41%]
+tests/test_methods.py::TestListMethods::test_list_methods_returns_list_or_dict PASSED [ 41%]
+tests/test_methods.py::TestActiveMethods::test_get_active_method_returns_200_or_204 PASSED [ 41%]
+tests/test_methods.py::TestActiveMethods::test_get_active_method_prompt_returns_200_or_204 PASSED [ 42%]
+tests/test_methods.py::TestActivateMethod::test_activate_nonexistent_method_returns_404_or_422 PASSED [ 42%]
+tests/test_methods.py::TestActivateMethod::test_activate_first_available_method SKIPPED [ 43%]
+tests/test_methods.py::TestMethodStack::test_get_or_set_stack_returns_success PASSED [ 43%]
+tests/test_methods.py::TestMethodStack::test_add_to_stack_missing_id_returns_422 PASSED [ 44%]
+tests/test_methods.py::TestMethodStack::test_remove_from_stack_missing_id_returns_422 PASSED [ 44%]
+tests/test_methods.py::TestMethodStack::test_delete_stack_clears_it PASSED [ 45%]
+tests/test_methods.py::TestGetMethodById::test_get_method_by_id_returns_200_or_404 PASSED [ 45%]
+tests/test_methods.py::TestGetMethodById::test_get_first_real_method SKIPPED [ 45%]
+tests/test_misc.py::TestModelLookup::test_lookup_known_model PASSED      [ 46%]
+tests/test_misc.py::TestModelLookup::test_lookup_unknown_model PASSED    [ 46%]
+tests/test_misc.py::TestModelLookup::test_suggestions_ollama PASSED      [ 47%]
+tests/test_misc.py::TestModelLookup::test_suggestions_openrouter PASSED  [ 47%]
+tests/test_misc.py::TestModelLookup::test_suggestions_unknown_provider PASSED [ 48%]
+tests/test_misc.py::TestModelSync::test_sync_status FAILED               [ 48%]
+tests/test_misc.py::TestModelSync::test_run_sync FAILED                  [ 48%]
+tests/test_misc.py::TestModelValidate::test_validate_model FAILED        [ 49%]
+tests/test_misc.py::TestModelValidate::test_validate_empty FAILED        [ 49%]
+tests/test_misc.py::TestTasks::test_list_tasks PASSED                    [ 50%]
+tests/test_misc.py::TestTasks::test_create_task FAILED                   [ 50%]
+tests/test_misc.py::TestTasks::test_get_task SKIPPED (No task to get)    [ 51%]
+tests/test_misc.py::TestTasks::test_acknowledge_task SKIPPED (No tas...) [ 51%]
+tests/test_misc.py::TestTasks::test_notifications PASSED                 [ 51%]
+tests/test_misc.py::TestContext::test_get_memory PASSED                  [ 52%]
+tests/test_misc.py::TestContext::test_update_memory FAILED               [ 52%]
+tests/test_misc.py::TestContext::test_get_snapshots PASSED               [ 53%]
+tests/test_misc.py::TestContext::test_recover_nonexistent PASSED         [ 53%]
+tests/test_misc.py::TestHardware::test_hardware_status PASSED            [ 54%]
+tests/test_misc.py::TestHardware::test_hardware_check_model PASSED       [ 54%]
+tests/test_misc.py::TestUserAndMemory::test_get_user_profile PASSED      [ 54%]
+tests/test_misc.py::TestUserAndMemory::test_update_user_profile PASSED   [ 55%]
+tests/test_misc.py::TestUserAndMemory::test_list_memory_files PASSED     [ 55%]
+tests/test_misc.py::TestUserAndMemory::test_create_memory_file FAILED    [ 56%]
+tests/test_misc.py::TestUserAndMemory::test_get_memory_file SKIPPED      [ 56%]
+tests/test_misc.py::TestUserAndMemory::test_update_memory_file SKIPPED   [ 57%]
+tests/test_misc.py::TestUserAndMemory::test_delete_memory_file SKIPPED   [ 57%]
+tests/test_misc.py::TestUserAndMemory::test_get_modifications PASSED     [ 58%]
+tests/test_misc.py::TestProviders::test_list_providers PASSED            [ 58%]
+tests/test_models.py::TestListModels::test_list_models_returns_200 PASSED [ 58%]
+tests/test_models.py::TestListModels::test_list_models_returns_list_or_dict PASSED [ 59%]
+tests/test_models.py::TestListModels::test_list_models_no_auth_rejected PASSED [ 59%]
+tests/test_models.py::TestModelCRUD::test_create_model_returns_id ERROR  [ 60%]
+tests/test_models.py::TestModelCRUD::test_get_model_by_id ERROR          [ 60%]
+tests/test_models.py::TestModelCRUD::test_get_model_404_for_nonexistent ERROR [ 61%]
+tests/test_models.py::TestModelCRUD::test_update_model_description ERROR [ 61%]
+tests/test_models.py::TestModelCRUD::test_update_model_404_for_nonexistent ERROR [ 61%]
+tests/test_models.py::TestModelCRUD::test_delete_model_returns_success ERROR [ 62%]
+tests/test_models.py::TestModelCRUD::test_delete_model_404_for_nonexistent ERROR [ 62%]
+tests/test_models.py::TestCreateModelValidation::test_create_model_missing_required_fields_returns_422 PASSED [ 63%]
+tests/test_models.py::TestModelsByProvider::test_get_models_by_provider_returns_200_or_404 PASSED [ 63%]
+tests/test_models.py::TestModelsByProvider::test_get_models_by_unknown_provider PASSED [ 64%]
+tests/test_personas.py::TestListPersonas::test_list_personas_returns_200 PASSED [ 64%]
+tests/test_personas.py::TestListPersonas::test_list_personas_returns_list_or_dict PASSED [ 64%]
+tests/test_personas.py::TestListPersonas::test_list_personas_no_auth_rejected PASSED [ 65%]
+tests/test_personas.py::TestPersonaCRUD::test_create_persona_has_id PASSED [ 65%]
+tests/test_personas.py::TestPersonaCRUD::test_get_persona_by_id PASSED   [ 66%]
+tests/test_personas.py::TestPersonaCRUD::test_get_persona_404_for_nonexistent PASSED [ 66%]
+tests/test_personas.py::TestPersonaCRUD::test_update_persona_description PASSED [ 67%]
+tests/test_personas.py::TestPersonaCRUD::test_update_persona_system_prompt PASSED [ 67%]
+tests/test_personas.py::TestPersonaCRUD::test_update_nonexistent_persona_returns_404 FAILED [ 67%]
+tests/test_personas.py::TestPersonaCRUD::test_delete_persona_returns_success PASSED [ 68%]
+tests/test_personas.py::TestPersonaCRUD::test_delete_nonexistent_persona_returns_404 FAILED [ 68%]
+tests/test_personas.py::TestCreatePersonaValidation::test_create_persona_missing_name_returns_422 PASSED [ 69%]
+tests/test_preferences.py::TestPreferences::test_list_preferences PASSED [ 69%]
+tests/test_preferences.py::TestPreferences::test_create_preference PASSED [ 70%]
+tests/test_preferences.py::TestPreferences::test_update_preference PASSED [ 70%]
+tests/test_preferences.py::TestPreferences::test_delete_preference PASSED [ 70%]
+tests/test_preferences.py::TestPreferences::test_detect_preferences PASSED [ 71%]
+tests/test_preferences.py::TestPreferences::test_create_preference_with_category PASSED [ 71%]
+tests/test_preferences.py::TestPreferences::test_create_duplicate_key PASSED [ 72%]
+tests/test_projects.py::TestProjectTemplates::test_list_templates_returns_200 PASSED [ 72%]
+tests/test_projects.py::TestProjectTemplates::test_list_templates_returns_list_or_dict PASSED [ 73%]
+tests/test_projects.py::TestListProjects::test_list_projects_returns_200 PASSED [ 73%]
+tests/test_projects.py::TestListProjects::test_list_projects_returns_list_or_dict PASSED [ 74%]
+tests/test_projects.py::TestProjectCRUD::test_create_project_has_id ERROR [ 74%]
+tests/test_projects.py::TestProjectCRUD::test_get_project_by_id ERROR    [ 74%]
+tests/test_projects.py::TestProjectCRUD::test_get_project_404_for_nonexistent ERROR [ 75%]
+tests/test_projects.py::TestProjectCRUD::test_update_project_description ERROR [ 75%]
+tests/test_projects.py::TestProjectCRUD::test_update_nonexistent_project_returns_404 ERROR [ 76%]
+tests/test_projects.py::TestProjectCRUD::test_delete_project_returns_success ERROR [ 76%]
+tests/test_projects.py::TestProjectCRUD::test_delete_nonexistent_project_returns_404 ERROR [ 77%]
+tests/test_projects.py::TestProjectFiles::test_list_project_files_returns_200_or_404 ERROR [ 77%]
+tests/test_projects.py::TestProjectFiles::test_read_project_file_nonexistent_returns_404 ERROR [ 77%]
+tests/test_projects.py::TestProjectFiles::test_list_files_404_for_nonexistent_project ERROR [ 78%]
+tests/test_projects.py::TestProjectSandbox::test_get_sandbox_status_returns_200_or_404 ERROR [ 78%]
+tests/test_projects.py::TestProjectSandbox::test_post_sandbox_returns_success_or_error ERROR [ 79%]
+tests/test_remote.py::TestRemoteHealth::test_remote_health FAILED        [ 79%]
+tests/test_remote.py::TestRemoteHealth::test_tailscale_info PASSED       [ 80%]
+tests/test_remote.py::TestRemoteSessions::test_list_sessions PASSED      [ 80%]
+tests/test_remote.py::TestRemoteSessions::test_create_session PASSED     [ 80%]
+tests/test_remote.py::TestRemoteSessions::test_get_session PASSED        [ 81%]
+tests/test_remote.py::TestRemoteSessions::test_cancel_session PASSED     [ 81%]
+tests/test_remote.py::TestRemoteSessions::test_delete_session PASSED     [ 82%]
+tests/test_remote.py::TestRemoteSessions::test_get_nonexistent_session PASSED [ 82%]
+tests/test_remote.py::TestTelegram::test_telegram_status PASSED          [ 83%]
+tests/test_remote.py::TestTelegram::test_telegram_webhook_info PASSED    [ 83%]
+tests/test_remote.py::TestTelegram::test_telegram_send_no_token PASSED   [ 83%]
+tests/test_settings.py::TestApiKeys::test_list_api_keys PASSED           [ 84%]
+tests/test_settings.py::TestApiKeys::test_set_api_key FAILED             [ 84%]
+tests/test_settings.py::TestApiKeys::test_get_api_key_masked PASSED      [ 85%]
+tests/test_settings.py::TestApiKeys::test_delete_api_key FAILED          [ 85%]
+tests/test_settings.py::TestApiKeys::test_delete_nonexistent_key PASSED  [ 86%]
+tests/test_settings.py::TestAppSettings::test_list_app_settings PASSED   [ 86%]
+tests/test_settings.py::TestAppSettings::test_set_app_setting PASSED     [ 87%]
+tests/test_settings.py::TestAppSettings::test_get_app_setting PASSED     [ 87%]
+tests/test_settings.py::TestAppSettings::test_update_app_setting PASSED  [ 87%]
+tests/test_settings.py::TestAppSettings::test_get_nonexistent_setting PASSED [ 88%]
+tests/test_settings.py::TestAppSettings::test_known_settings PASSED      [ 88%]
+tests/test_settings.py::TestAppSettings::test_cleanup_test_setting PASSED [ 89%]
+tests/test_stats.py::TestStats::test_get_costs_default PASSED            [ 89%]
+tests/test_stats.py::TestStats::test_get_costs_custom_period PASSED      [ 90%]
+tests/test_stats.py::TestStats::test_get_costs_one_day PASSED            [ 90%]
+tests/test_stats.py::TestStats::test_get_usage_default PASSED            [ 90%]
+tests/test_stats.py::TestStats::test_get_usage_custom_period PASSED      [ 91%]
+tests/test_stats.py::TestStats::test_success_rate_valid_range PASSED     [ 91%]
+tests/test_stats.py::TestStats::test_by_model_structure PASSED           [ 92%]
+tests/test_stats.py::TestStats::test_by_provider_structure PASSED        [ 92%]
+tests/test_workbench.py::TestListWorkbenchSessions::test_list_sessions_returns_200 PASSED [ 93%]
+tests/test_workbench.py::TestListWorkbenchSessions::test_list_sessions_returns_list_or_dict PASSED [ 93%]
+tests/test_workbench.py::TestWorkbenchSessionCRUD::test_create_session_has_id ERROR [ 93%]
+tests/test_workbench.py::TestWorkbenchSessionCRUD::test_get_session_by_id ERROR [ 94%]
+tests/test_workbench.py::TestWorkbenchSessionCRUD::test_get_session_404_for_nonexistent ERROR [ 94%]
+tests/test_workbench.py::TestWorkbenchSessionCRUD::test_send_message_returns_success_or_error ERROR [ 95%]
+tests/test_workbench.py::TestWorkbenchSessionCRUD::test_cancel_session_returns_success_or_not_running ERROR [ 95%]
+tests/test_workbench.py::TestWorkbenchSessionCRUD::test_delete_session_returns_success ERROR [ 96%]
+tests/test_workbench.py::TestWorkbenchSessionCRUD::test_delete_nonexistent_session_returns_404 ERROR [ 96%]
+tests/test_workbench.py::TestWorkbenchSessionStream::test_stream_nonexistent_session_returns_404 PASSED [ 96%]
+tests/test_workbench.py::TestWorkbenchSessionStream::test_stream_valid_session_returns_sse_or_no_content SKIPPED [ 97%]
+tests/test_workflows.py::TestWorkflows::test_list_workflows PASSED       [ 97%]
+tests/test_workflows.py::TestWorkflows::test_get_workflow_by_id PASSED   [ 98%]
+tests/test_workflows.py::TestWorkflows::test_get_nonexistent_workflow PASSED [ 98%]
+tests/test_workflows.py::TestComfyUI::test_comfyui_status PASSED         [ 99%]
+tests/test_workflows.py::TestComfyUI::test_comfyui_checkpoints PASSED    [ 99%]
+tests/test_workflows.py::TestComfyUI::test_comfyui_loras PASSED          [100%]
+
+=================================== ERRORS ====================================
+__________ ERROR at setup of TestAgentCRUD.test_create_agent_has_id ___________
+
+self = <test_agents.TestAgentCRUD object at 0x00000241B1DAE5D0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_agent(self, client):
+        """Create a test agent and clean it up after each test."""
+        payload = {
+            "name": f"TestAgent-{uuid.uuid4().hex[:8]}",
+            "description": "A test agent created by pytest",
+            "system_prompt": "You are a test agent. Respond concisely.",
+            "provider": "ollama",
+            "model": "llama3.2:1b",
+        }
+        r = client.post("/v1/agents", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","agent_type"],"msg":"Field required","input":{"name":"TestAgent-57c643f7","description":"A test agent created by pytest","system_prompt":"You are a test agent. Respond concisely.","provider":"ollama","model":"llama3.2:1b"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_agents.py:64: AssertionError
+____________ ERROR at setup of TestAgentCRUD.test_get_agent_by_id _____________
+
+self = <test_agents.TestAgentCRUD object at 0x00000241B1DAE710>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_agent(self, client):
+        """Create a test agent and clean it up after each test."""
+        payload = {
+            "name": f"TestAgent-{uuid.uuid4().hex[:8]}",
+            "description": "A test agent created by pytest",
+            "system_prompt": "You are a test agent. Respond concisely.",
+            "provider": "ollama",
+            "model": "llama3.2:1b",
+        }
+        r = client.post("/v1/agents", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","agent_type"],"msg":"Field required","input":{"name":"TestAgent-c8368f54","description":"A test agent created by pytest","system_prompt":"You are a test agent. Respond concisely.","provider":"ollama","model":"llama3.2:1b"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_agents.py:64: AssertionError
+_____ ERROR at setup of TestAgentCRUD.test_get_agent_404_for_nonexistent ______
+
+self = <test_agents.TestAgentCRUD object at 0x00000241B1D8E2C0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_agent(self, client):
+        """Create a test agent and clean it up after each test."""
+        payload = {
+            "name": f"TestAgent-{uuid.uuid4().hex[:8]}",
+            "description": "A test agent created by pytest",
+            "system_prompt": "You are a test agent. Respond concisely.",
+            "provider": "ollama",
+            "model": "llama3.2:1b",
+        }
+        r = client.post("/v1/agents", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","agent_type"],"msg":"Field required","input":{"name":"TestAgent-2e8794b2","description":"A test agent created by pytest","system_prompt":"You are a test agent. Respond concisely.","provider":"ollama","model":"llama3.2:1b"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_agents.py:64: AssertionError
+________ ERROR at setup of TestAgentCRUD.test_update_agent_description ________
+
+self = <test_agents.TestAgentCRUD object at 0x00000241B1D8DA70>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_agent(self, client):
+        """Create a test agent and clean it up after each test."""
+        payload = {
+            "name": f"TestAgent-{uuid.uuid4().hex[:8]}",
+            "description": "A test agent created by pytest",
+            "system_prompt": "You are a test agent. Respond concisely.",
+            "provider": "ollama",
+            "model": "llama3.2:1b",
+        }
+        r = client.post("/v1/agents", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","agent_type"],"msg":"Field required","input":{"name":"TestAgent-604d784c","description":"A test agent created by pytest","system_prompt":"You are a test agent. Respond concisely.","provider":"ollama","model":"llama3.2:1b"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_agents.py:64: AssertionError
+__ ERROR at setup of TestAgentCRUD.test_update_nonexistent_agent_returns_404 __
+
+self = <test_agents.TestAgentCRUD object at 0x00000241B1DB7530>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_agent(self, client):
+        """Create a test agent and clean it up after each test."""
+        payload = {
+            "name": f"TestAgent-{uuid.uuid4().hex[:8]}",
+            "description": "A test agent created by pytest",
+            "system_prompt": "You are a test agent. Respond concisely.",
+            "provider": "ollama",
+            "model": "llama3.2:1b",
+        }
+        r = client.post("/v1/agents", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","agent_type"],"msg":"Field required","input":{"name":"TestAgent-33e330f8","description":"A test agent created by pytest","system_prompt":"You are a test agent. Respond concisely.","provider":"ollama","model":"llama3.2:1b"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_agents.py:64: AssertionError
+______ ERROR at setup of TestAgentCRUD.test_delete_agent_returns_success ______
+
+self = <test_agents.TestAgentCRUD object at 0x00000241B1DC1370>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_agent(self, client):
+        """Create a test agent and clean it up after each test."""
+        payload = {
+            "name": f"TestAgent-{uuid.uuid4().hex[:8]}",
+            "description": "A test agent created by pytest",
+            "system_prompt": "You are a test agent. Respond concisely.",
+            "provider": "ollama",
+            "model": "llama3.2:1b",
+        }
+        r = client.post("/v1/agents", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","agent_type"],"msg":"Field required","input":{"name":"TestAgent-077dbf41","description":"A test agent created by pytest","system_prompt":"You are a test agent. Respond concisely.","provider":"ollama","model":"llama3.2:1b"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_agents.py:64: AssertionError
+__ ERROR at setup of TestAgentCRUD.test_delete_nonexistent_agent_returns_404 __
+
+self = <test_agents.TestAgentCRUD object at 0x00000241B1DC1480>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_agent(self, client):
+        """Create a test agent and clean it up after each test."""
+        payload = {
+            "name": f"TestAgent-{uuid.uuid4().hex[:8]}",
+            "description": "A test agent created by pytest",
+            "system_prompt": "You are a test agent. Respond concisely.",
+            "provider": "ollama",
+            "model": "llama3.2:1b",
+        }
+        r = client.post("/v1/agents", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","agent_type"],"msg":"Field required","input":{"name":"TestAgent-248eb689","description":"A test agent created by pytest","system_prompt":"You are a test agent. Respond concisely.","provider":"ollama","model":"llama3.2:1b"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_agents.py:64: AssertionError
+________ ERROR at setup of TestModelCRUD.test_create_model_returns_id _________
+
+self = <test_models.TestModelCRUD object at 0x00000241B1F22990>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def created_model(self, client):
+        """Create a test model before each test and delete it after."""
+        payload = {
+            "name": f"test-model-{uuid.uuid4().hex[:8]}",
+            "provider": "ollama",
+            "model_id": "llama3.2:1b",
+            "description": "Test model created by pytest",
+            "context_window": 4096,
+        }
+        r = client.post("/v1/models", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","provider_id"],"msg":"Field required","input":{"name":"test-model-555c7de3","provider":"ollama","model_id":"llama3.2:1b","description":"Test model created by pytest","context_window":4096}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_models.py:53: AssertionError
+____________ ERROR at setup of TestModelCRUD.test_get_model_by_id _____________
+
+self = <test_models.TestModelCRUD object at 0x00000241B1F22AD0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def created_model(self, client):
+        """Create a test model before each test and delete it after."""
+        payload = {
+            "name": f"test-model-{uuid.uuid4().hex[:8]}",
+            "provider": "ollama",
+            "model_id": "llama3.2:1b",
+            "description": "Test model created by pytest",
+            "context_window": 4096,
+        }
+        r = client.post("/v1/models", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","provider_id"],"msg":"Field required","input":{"name":"test-model-0597a47e","provider":"ollama","model_id":"llama3.2:1b","description":"Test model created by pytest","context_window":4096}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_models.py:53: AssertionError
+_____ ERROR at setup of TestModelCRUD.test_get_model_404_for_nonexistent ______
+
+self = <test_models.TestModelCRUD object at 0x00000241B1ED9CD0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def created_model(self, client):
+        """Create a test model before each test and delete it after."""
+        payload = {
+            "name": f"test-model-{uuid.uuid4().hex[:8]}",
+            "provider": "ollama",
+            "model_id": "llama3.2:1b",
+            "description": "Test model created by pytest",
+            "context_window": 4096,
+        }
+        r = client.post("/v1/models", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","provider_id"],"msg":"Field required","input":{"name":"test-model-8c84597f","provider":"ollama","model_id":"llama3.2:1b","description":"Test model created by pytest","context_window":4096}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_models.py:53: AssertionError
+________ ERROR at setup of TestModelCRUD.test_update_model_description ________
+
+self = <test_models.TestModelCRUD object at 0x00000241B1ED9E00>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def created_model(self, client):
+        """Create a test model before each test and delete it after."""
+        payload = {
+            "name": f"test-model-{uuid.uuid4().hex[:8]}",
+            "provider": "ollama",
+            "model_id": "llama3.2:1b",
+            "description": "Test model created by pytest",
+            "context_window": 4096,
+        }
+        r = client.post("/v1/models", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","provider_id"],"msg":"Field required","input":{"name":"test-model-a710e6a8","provider":"ollama","model_id":"llama3.2:1b","description":"Test model created by pytest","context_window":4096}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_models.py:53: AssertionError
+____ ERROR at setup of TestModelCRUD.test_update_model_404_for_nonexistent ____
+
+self = <test_models.TestModelCRUD object at 0x00000241B1EA0830>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def created_model(self, client):
+        """Create a test model before each test and delete it after."""
+        payload = {
+            "name": f"test-model-{uuid.uuid4().hex[:8]}",
+            "provider": "ollama",
+            "model_id": "llama3.2:1b",
+            "description": "Test model created by pytest",
+            "context_window": 4096,
+        }
+        r = client.post("/v1/models", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","provider_id"],"msg":"Field required","input":{"name":"test-model-6464dc36","provider":"ollama","model_id":"llama3.2:1b","description":"Test model created by pytest","context_window":4096}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_models.py:53: AssertionError
+______ ERROR at setup of TestModelCRUD.test_delete_model_returns_success ______
+
+self = <test_models.TestModelCRUD object at 0x00000241B1F33570>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def created_model(self, client):
+        """Create a test model before each test and delete it after."""
+        payload = {
+            "name": f"test-model-{uuid.uuid4().hex[:8]}",
+            "provider": "ollama",
+            "model_id": "llama3.2:1b",
+            "description": "Test model created by pytest",
+            "context_window": 4096,
+        }
+        r = client.post("/v1/models", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","provider_id"],"msg":"Field required","input":{"name":"test-model-abb56363","provider":"ollama","model_id":"llama3.2:1b","description":"Test model created by pytest","context_window":4096}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_models.py:53: AssertionError
+____ ERROR at setup of TestModelCRUD.test_delete_model_404_for_nonexistent ____
+
+self = <test_models.TestModelCRUD object at 0x00000241B1F33790>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def created_model(self, client):
+        """Create a test model before each test and delete it after."""
+        payload = {
+            "name": f"test-model-{uuid.uuid4().hex[:8]}",
+            "provider": "ollama",
+            "model_id": "llama3.2:1b",
+            "description": "Test model created by pytest",
+            "context_window": 4096,
+        }
+        r = client.post("/v1/models", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","provider_id"],"msg":"Field required","input":{"name":"test-model-a5433168","provider":"ollama","model_id":"llama3.2:1b","description":"Test model created by pytest","context_window":4096}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_models.py:53: AssertionError
+________ ERROR at setup of TestProjectCRUD.test_create_project_has_id _________
+
+self = <test_projects.TestProjectCRUD object at 0x00000241B2F88550>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_project(self, client):
+        """Create a test project and clean it up after each test."""
+        payload = {
+            "name": f"TestProject-{uuid.uuid4().hex[:8]}",
+            "description": "A test project created by pytest",
+            "template": "blank",
+        }
+        r = client.post("/v1/projects/", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","path"],"msg":"Field required","input":{"name":"TestProject-6639b9e1","description":"A test project created by pytest","template":"blank"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_projects.py:59: AssertionError
+__________ ERROR at setup of TestProjectCRUD.test_get_project_by_id ___________
+
+self = <test_projects.TestProjectCRUD object at 0x00000241B2F88690>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_project(self, client):
+        """Create a test project and clean it up after each test."""
+        payload = {
+            "name": f"TestProject-{uuid.uuid4().hex[:8]}",
+            "description": "A test project created by pytest",
+            "template": "blank",
+        }
+        r = client.post("/v1/projects/", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","path"],"msg":"Field required","input":{"name":"TestProject-c84e43ee","description":"A test project created by pytest","template":"blank"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_projects.py:59: AssertionError
+___ ERROR at setup of TestProjectCRUD.test_get_project_404_for_nonexistent ____
+
+self = <test_projects.TestProjectCRUD object at 0x00000241B1EDA520>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_project(self, client):
+        """Create a test project and clean it up after each test."""
+        payload = {
+            "name": f"TestProject-{uuid.uuid4().hex[:8]}",
+            "description": "A test project created by pytest",
+            "template": "blank",
+        }
+        r = client.post("/v1/projects/", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","path"],"msg":"Field required","input":{"name":"TestProject-9730976c","description":"A test project created by pytest","template":"blank"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_projects.py:59: AssertionError
+______ ERROR at setup of TestProjectCRUD.test_update_project_description ______
+
+self = <test_projects.TestProjectCRUD object at 0x00000241B1EDA650>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_project(self, client):
+        """Create a test project and clean it up after each test."""
+        payload = {
+            "name": f"TestProject-{uuid.uuid4().hex[:8]}",
+            "description": "A test project created by pytest",
+            "template": "blank",
+        }
+        r = client.post("/v1/projects/", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","path"],"msg":"Field required","input":{"name":"TestProject-73831b6d","description":"A test project created by pytest","template":"blank"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_projects.py:59: AssertionError
+_ ERROR at setup of TestProjectCRUD.test_update_nonexistent_project_returns_404 _
+
+self = <test_projects.TestProjectCRUD object at 0x00000241B1EA0A70>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_project(self, client):
+        """Create a test project and clean it up after each test."""
+        payload = {
+            "name": f"TestProject-{uuid.uuid4().hex[:8]}",
+            "description": "A test project created by pytest",
+            "template": "blank",
+        }
+        r = client.post("/v1/projects/", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","path"],"msg":"Field required","input":{"name":"TestProject-e64ad2d1","description":"A test project created by pytest","template":"blank"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_projects.py:59: AssertionError
+____ ERROR at setup of TestProjectCRUD.test_delete_project_returns_success ____
+
+self = <test_projects.TestProjectCRUD object at 0x00000241B2F72140>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_project(self, client):
+        """Create a test project and clean it up after each test."""
+        payload = {
+            "name": f"TestProject-{uuid.uuid4().hex[:8]}",
+            "description": "A test project created by pytest",
+            "template": "blank",
+        }
+        r = client.post("/v1/projects/", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","path"],"msg":"Field required","input":{"name":"TestProject-2fb8e35b","description":"A test project created by pytest","template":"blank"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_projects.py:59: AssertionError
+_ ERROR at setup of TestProjectCRUD.test_delete_nonexistent_project_returns_404 _
+
+self = <test_projects.TestProjectCRUD object at 0x00000241B2F72360>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_project(self, client):
+        """Create a test project and clean it up after each test."""
+        payload = {
+            "name": f"TestProject-{uuid.uuid4().hex[:8]}",
+            "description": "A test project created by pytest",
+            "template": "blank",
+        }
+        r = client.post("/v1/projects/", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","path"],"msg":"Field required","input":{"name":"TestProject-f57387eb","description":"A test project created by pytest","template":"blank"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_projects.py:59: AssertionError
+_ ERROR at setup of TestProjectFiles.test_list_project_files_returns_200_or_404 _
+
+self = <test_projects.TestProjectFiles object at 0x00000241B2F887D0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_project(self, client):
+        """Create a test project for file listing tests."""
+        r = client.post("/v1/projects/", json={
+            "name": f"FileTest-{uuid.uuid4().hex[:8]}",
+            "description": "File listing test",
+        })
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","path"],"msg":"Field required","input":{"name":"FileTest-b339598a","description":"File listing test"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_projects.py:116: AssertionError
+_ ERROR at setup of TestProjectFiles.test_read_project_file_nonexistent_returns_404 _
+
+self = <test_projects.TestProjectFiles object at 0x00000241B2F88910>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_project(self, client):
+        """Create a test project for file listing tests."""
+        r = client.post("/v1/projects/", json={
+            "name": f"FileTest-{uuid.uuid4().hex[:8]}",
+            "description": "File listing test",
+        })
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","path"],"msg":"Field required","input":{"name":"FileTest-874ef625","description":"File listing test"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_projects.py:116: AssertionError
+_ ERROR at setup of TestProjectFiles.test_list_files_404_for_nonexistent_project _
+
+self = <test_projects.TestProjectFiles object at 0x00000241B1EDA780>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_project(self, client):
+        """Create a test project for file listing tests."""
+        r = client.post("/v1/projects/", json={
+            "name": f"FileTest-{uuid.uuid4().hex[:8]}",
+            "description": "File listing test",
+        })
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","path"],"msg":"Field required","input":{"name":"FileTest-fdddb324","description":"File listing test"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_projects.py:116: AssertionError
+_ ERROR at setup of TestProjectSandbox.test_get_sandbox_status_returns_200_or_404 _
+
+self = <test_projects.TestProjectSandbox object at 0x00000241B2F88A50>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_project(self, client):
+        """Create a test project for sandbox tests."""
+        r = client.post("/v1/projects/", json={
+            "name": f"SandboxTest-{uuid.uuid4().hex[:8]}",
+            "description": "Sandbox test",
+        })
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","path"],"msg":"Field required","input":{"name":"SandboxTest-0dc543c7","description":"Sandbox test"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_projects.py:150: AssertionError
+_ ERROR at setup of TestProjectSandbox.test_post_sandbox_returns_success_or_error _
+
+self = <test_projects.TestProjectSandbox object at 0x00000241B2F88B90>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_project(self, client):
+        """Create a test project for sandbox tests."""
+        r = client.post("/v1/projects/", json={
+            "name": f"SandboxTest-{uuid.uuid4().hex[:8]}",
+            "description": "Sandbox test",
+        })
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","path"],"msg":"Field required","input":{"name":"SandboxTest-501ca4a9","description":"Sandbox test"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_projects.py:150: AssertionError
+____ ERROR at setup of TestWorkbenchSessionCRUD.test_create_session_has_id ____
+
+self = <test_workbench.TestWorkbenchSessionCRUD object at 0x00000241B2F8A490>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_session(self, client):
+        """Create a workbench session and clean it up after each test."""
+        payload = {
+            "agent_id": None,
+            "title": f"TestSession-{uuid.uuid4().hex[:8]}",
+        }
+        r = client.post("/v1/workbench/sessions", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","task"],"msg":"Field required","input":{"agent_id":null,"title":"TestSession-a58fc37c"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_workbench.py:41: AssertionError
+______ ERROR at setup of TestWorkbenchSessionCRUD.test_get_session_by_id ______
+
+self = <test_workbench.TestWorkbenchSessionCRUD object at 0x00000241B2F8A5D0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_session(self, client):
+        """Create a workbench session and clean it up after each test."""
+        payload = {
+            "agent_id": None,
+            "title": f"TestSession-{uuid.uuid4().hex[:8]}",
+        }
+        r = client.post("/v1/workbench/sessions", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","task"],"msg":"Field required","input":{"agent_id":null,"title":"TestSession-8cf8f21d"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_workbench.py:41: AssertionError
+_ ERROR at setup of TestWorkbenchSessionCRUD.test_get_session_404_for_nonexistent _
+
+self = <test_workbench.TestWorkbenchSessionCRUD object at 0x00000241B1EDB950>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_session(self, client):
+        """Create a workbench session and clean it up after each test."""
+        payload = {
+            "agent_id": None,
+            "title": f"TestSession-{uuid.uuid4().hex[:8]}",
+        }
+        r = client.post("/v1/workbench/sessions", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","task"],"msg":"Field required","input":{"agent_id":null,"title":"TestSession-5ae5e551"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_workbench.py:41: AssertionError
+_ ERROR at setup of TestWorkbenchSessionCRUD.test_send_message_returns_success_or_error _
+
+self = <test_workbench.TestWorkbenchSessionCRUD object at 0x00000241B1EDBA80>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_session(self, client):
+        """Create a workbench session and clean it up after each test."""
+        payload = {
+            "agent_id": None,
+            "title": f"TestSession-{uuid.uuid4().hex[:8]}",
+        }
+        r = client.post("/v1/workbench/sessions", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","task"],"msg":"Field required","input":{"agent_id":null,"title":"TestSession-49a965dc"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_workbench.py:41: AssertionError
+_ ERROR at setup of TestWorkbenchSessionCRUD.test_cancel_session_returns_success_or_not_running _
+
+self = <test_workbench.TestWorkbenchSessionCRUD object at 0x00000241B1EA1370>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_session(self, client):
+        """Create a workbench session and clean it up after each test."""
+        payload = {
+            "agent_id": None,
+            "title": f"TestSession-{uuid.uuid4().hex[:8]}",
+        }
+        r = client.post("/v1/workbench/sessions", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","task"],"msg":"Field required","input":{"agent_id":null,"title":"TestSession-09557dd5"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_workbench.py:41: AssertionError
+_ ERROR at setup of TestWorkbenchSessionCRUD.test_delete_session_returns_success _
+
+self = <test_workbench.TestWorkbenchSessionCRUD object at 0x00000241B2FC58C0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_session(self, client):
+        """Create a workbench session and clean it up after each test."""
+        payload = {
+            "agent_id": None,
+            "title": f"TestSession-{uuid.uuid4().hex[:8]}",
+        }
+        r = client.post("/v1/workbench/sessions", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","task"],"msg":"Field required","input":{"agent_id":null,"title":"TestSession-e4b9f619"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_workbench.py:41: AssertionError
+_ ERROR at setup of TestWorkbenchSessionCRUD.test_delete_nonexistent_session_returns_404 _
+
+self = <test_workbench.TestWorkbenchSessionCRUD object at 0x00000241B2FC5AE0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.fixture(autouse=True)
+    def setup_session(self, client):
+        """Create a workbench session and clean it up after each test."""
+        payload = {
+            "agent_id": None,
+            "title": f"TestSession-{uuid.uuid4().hex[:8]}",
+        }
+        r = client.post("/v1/workbench/sessions", json=payload)
+>       assert r.status_code in (200, 201), f"Setup failed: {r.status_code} {r.text}"
+E       AssertionError: Setup failed: 422 {"detail":[{"type":"missing","loc":["body","task"],"msg":"Field required","input":{"agent_id":null,"title":"TestSession-2e483754"}}]}
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_workbench.py:41: AssertionError
+================================== FAILURES ===================================
+_______________ TestChatCompletions.test_chat_completions_basic _______________
+
+self = <test_chat.TestChatCompletions object at 0x00000241B1DAEE90>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_chat_completions_basic(self, client):
+        """POST /v1/chat/completions with a simple message."""
+        payload = {
+            "messages": [
+                {"role": "user", "content": "Say hello in exactly 3 words."}
+            ],
+            "persona": "default"
+        }
+        r = client.post("/v1/chat/completions", json=payload, timeout=60.0)
+>       assert r.status_code == 200
+E       assert 422 == 200
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_chat.py:24: AssertionError
+__________ TestChatCompletions.test_chat_completions_system_message ___________
+
+self = <test_chat.TestChatCompletions object at 0x00000241B1DB7AD0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_chat_completions_system_message(self, client):
+        """POST /v1/chat/completions with system + user messages."""
+        payload = {
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant. Always respond in uppercase."},
+                {"role": "user", "content": "Say hi."}
+            ],
+            "persona": "default"
+        }
+        r = client.post("/v1/chat/completions", json=payload, timeout=60.0)
+>       assert r.status_code == 200
+E       assert 422 == 200
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_chat.py:63: AssertionError
+____________ TestChatCompletions.test_chat_completions_multi_turn _____________
+
+self = <test_chat.TestChatCompletions object at 0x00000241B1DC1E10>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_chat_completions_multi_turn(self, client):
+        """POST /v1/chat/completions with multi-turn conversation."""
+        payload = {
+            "messages": [
+                {"role": "user", "content": "My name is TestBot."},
+                {"role": "assistant", "content": "Hello TestBot!"},
+                {"role": "user", "content": "What is my name?"}
+            ],
+            "persona": "default"
+        }
+        r = client.post("/v1/chat/completions", json=payload, timeout=60.0)
+>       assert r.status_code == 200
+E       assert 422 == 200
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_chat.py:76: AssertionError
+___________________ TestCollabAudit.test_create_audit_entry ___________________
+
+self = <test_collaboration.TestCollabAudit object at 0x00000241B1DAFD90>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_create_audit_entry(self, client):
+        """POST /v1/collab/audit creates an audit event."""
+        payload = {
+            "action": "test_action",
+            "user_id": "test_user",
+            "details": "Automated test audit entry"
+        }
+        r = client.post("/v1/collab/audit", json=payload)
+>       assert r.status_code in (200, 201)
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_collaboration.py:139: AssertionError
+_______ TestConversationCRUD.test_get_conversation_404_for_nonexistent ________
+
+self = <test_conversations.TestConversationCRUD object at 0x00000241B1D8DCD0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_get_conversation_404_for_nonexistent(self, client):
+        """GET /v1/conversations/{id} with a nonexistent id should return 404."""
+        r = client.get("/v1/conversations/nonexistent-fake-id-99999")
+>       assert r.status_code == 404, f"Expected 404, got {r.status_code}: {r.text}"
+E       AssertionError: Expected 404, got 500: Internal Server Error
+E       assert 500 == 404
+E        +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests\test_conversations.py:64: AssertionError
+____ TestConversationCRUD.test_update_nonexistent_conversation_returns_404 ____
+
+self = <test_conversations.TestConversationCRUD object at 0x00000241B1DB7D10>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_update_nonexistent_conversation_returns_404(self, client):
+        """PATCH /v1/conversations/{id} with bogus id should return 404."""
+        r = client.patch("/v1/conversations/nonexistent-fake-id-99999", json={"title": "x"})
+>       assert r.status_code == 404, f"Expected 404, got {r.status_code}: {r.text}"
+E       AssertionError: Expected 404, got 500: Internal Server Error
+E       assert 500 == 404
+E        +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests\test_conversations.py:77: AssertionError
+____ TestConversationCRUD.test_delete_nonexistent_conversation_returns_404 ____
+
+self = <test_conversations.TestConversationCRUD object at 0x00000241B1DC3BD0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_delete_nonexistent_conversation_returns_404(self, client):
+        """DELETE /v1/conversations/{id} with bogus id should return 404."""
+        r = client.delete("/v1/conversations/nonexistent-fake-id-99999")
+>       assert r.status_code == 404, f"Expected 404, got {r.status_code}: {r.text}"
+E       AssertionError: Expected 404, got 500: Internal Server Error
+E       assert 500 == 404
+E        +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests\test_conversations.py:88: AssertionError
+_ TestConversationMessages.test_list_messages_404_for_nonexistent_conversation _
+
+self = <test_conversations.TestConversationMessages object at 0x00000241B1D8FBB0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_list_messages_404_for_nonexistent_conversation(self, client):
+        """GET /v1/conversations/{id}/messages with bogus id should return 404."""
+        r = client.get("/v1/conversations/nonexistent-fake-id-99999/messages")
+>       assert r.status_code == 404, f"Expected 404, got {r.status_code}: {r.text}"
+E       AssertionError: Expected 404, got 500: Internal Server Error
+E       assert 500 == 404
+E        +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests\test_conversations.py:119: AssertionError
+__ TestMessageImageUpdate.test_update_nonexistent_message_image_returns_404 ___
+
+self = <test_conversations.TestMessageImageUpdate object at 0x00000241B1EFC910>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_update_nonexistent_message_image_returns_404(self, client):
+        """PATCH /v1/conversations/messages/{id}/image with bogus id should return 404."""
+        r = client.patch(
+            "/v1/conversations/messages/nonexistent-fake-id-99999/image",
+            json={"image_url": "https://example.com/test.png"}
+        )
+>       assert r.status_code == 404, f"Expected 404, got {r.status_code}: {r.text}"
+E       AssertionError: Expected 404, got 400: {"detail":"Invalid message ID"}
+E       assert 400 == 404
+E        +  where 400 = <Response [400 Bad Request]>.status_code
+
+tests\test_conversations.py:176: AssertionError
+___________________ TestBasicHealth.test_health_returns_200 ___________________
+
+self = <test_health.TestBasicHealth object at 0x00000241B1EFD450>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_health_returns_200(self, client):
+        """GET /v1/health should return 200 and indicate the service is up."""
+        r = client.get("/v1/health")
+>       assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
+E       AssertionError: Expected 200, got 404: {"detail":"Not Found"}
+E       assert 404 == 200
+E        +  where 404 = <Response [404 Not Found]>.status_code
+
+tests\test_health.py:22: AssertionError
+_______________ TestBasicHealth.test_health_response_has_status _______________
+
+self = <test_health.TestBasicHealth object at 0x00000241B1EFD590>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_health_response_has_status(self, client):
+        """GET /v1/health response body should contain a status field."""
+        r = client.get("/v1/health")
+>       assert r.status_code == 200
+E       assert 404 == 200
+E        +  where 404 = <Response [404 Not Found]>.status_code
+
+tests\test_health.py:27: AssertionError
+___ TestIdentitySetup.test_setup_endpoint_returns_success_or_already_setup ____
+
+self = <test_identity.TestIdentitySetup object at 0x00000241B1EFF250>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_setup_endpoint_returns_success_or_already_setup(self, client):
+        """POST /v1/identity/setup should return 200 or indicate already configured."""
+        r = client.post("/v1/identity/setup", json={})
+>       assert r.status_code in (200, 201, 400, 409), (
+            f"Unexpected: {r.status_code}: {r.text}"
+        )
+E       AssertionError: Unexpected: 422: {"detail":[{"type":"missing","loc":["body","soul"],"msg":"Field required","input":{}},{"type":"missing","loc":["body","user"],"msg":"Field required","input":{}},{"type":"missing","loc":["body","identity"],"msg":"Field required","input":{}}]}
+E       assert 422 in (200, 201, 400, 409)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_identity.py:126: AssertionError
+______________ TestImageUpload.test_upload_image_returns_success ______________
+
+self = <test_images.TestImageUpload object at 0x00000241B1EFF890>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_upload_image_returns_success(self, client):
+        """POST /v1/images/upload with a valid PNG should return 200 or 201."""
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00"
+            b"\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        r = client.post(
+            "/v1/images/upload",
+            files={"file": ("test.png", io.BytesIO(png_bytes), "image/png")},
+            data={"name": f"pytest-{uuid.uuid4().hex[:8]}"}
+        )
+>       assert r.status_code in (200, 201, 422), f"Unexpected: {r.status_code}: {r.text}"
+E       AssertionError: Unexpected: 500: Internal Server Error
+E       assert 500 in (200, 201, 422)
+E        +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests\test_images.py:66: AssertionError
+______ TestImageEdit.test_edit_with_image_returns_result_or_no_provider _______
+
+self = <test_images.TestImageEdit object at 0x00000241B1F20410>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.mark.slow
+    def test_edit_with_image_returns_result_or_no_provider(self, client):
+        """POST /v1/images/edit with an image should return 200 or 422/503."""
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00"
+            b"\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        r = client.post(
+            "/v1/images/edit",
+            files={"image": ("test.png", io.BytesIO(png_bytes), "image/png")},
+            data={"prompt": "Make it red"}
+        )
+>       assert r.status_code in (200, 201, 422, 503), f"Unexpected: {r.status_code}: {r.text}"
+E       AssertionError: Unexpected: 500: Internal Server Error
+E       assert 500 in (200, 201, 422, 503)
+E        +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests\test_images.py:184: AssertionError
+_______________________ TestModelSync.test_sync_status ________________________
+
+self = <test_misc.TestModelSync object at 0x00000241B1F21590>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_sync_status(self, client):
+        """GET /v1/model-sync/sync/status returns sync info."""
+        r = client.get("/v1/model-sync/sync/status")
+>       assert r.status_code == 200
+E       assert 404 == 200
+E        +  where 404 = <Response [404 Not Found]>.status_code
+
+tests\test_misc.py:50: AssertionError
+_________________________ TestModelSync.test_run_sync _________________________
+
+self = <test_misc.TestModelSync object at 0x00000241B1F216D0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    @pytest.mark.slow
+    def test_run_sync(self, client):
+        """POST /v1/model-sync/sync triggers model sync."""
+        r = client.post("/v1/model-sync/sync")
+>       assert r.status_code in (200, 503)
+E       assert 404 in (200, 503)
+E        +  where 404 = <Response [404 Not Found]>.status_code
+
+tests\test_misc.py:56: AssertionError
+____________________ TestModelValidate.test_validate_model ____________________
+
+self = <test_misc.TestModelValidate object at 0x00000241B1F21810>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_validate_model(self, client):
+        """POST /v1/model-validate checks model availability."""
+        payload = {"model_id": "llama3.1:8b", "provider": "ollama"}
+        r = client.post("/v1/model-validate", json=payload)
+>       assert r.status_code in (200, 422)
+E       assert 404 in (200, 422)
+E        +  where 404 = <Response [404 Not Found]>.status_code
+
+tests\test_misc.py:69: AssertionError
+____________________ TestModelValidate.test_validate_empty ____________________
+
+self = <test_misc.TestModelValidate object at 0x00000241B1F21950>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_validate_empty(self, client):
+        """POST /v1/model-validate with empty body."""
+        r = client.post("/v1/model-validate", json={})
+>       assert r.status_code in (200, 422)
+E       assert 404 in (200, 422)
+E        +  where 404 = <Response [404 Not Found]>.status_code
+
+tests\test_misc.py:74: AssertionError
+_________________________ TestTasks.test_create_task __________________________
+
+self = <test_misc.TestTasks object at 0x00000241B1F21BD0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_create_task(self, client):
+        """POST /v1/tasks creates a new task."""
+        payload = {
+            "title": f"Test task {uuid.uuid4().hex[:8]}",
+            "description": "Automated test task",
+            "type": "general"
+        }
+        r = client.post("/v1/tasks", json=payload)
+>       assert r.status_code in (200, 201)
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_misc.py:95: AssertionError
+_______________________ TestContext.test_update_memory ________________________
+
+self = <test_misc.TestContext object at 0x00000241B1F21E50>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_update_memory(self, client):
+        """PUT /v1/context/memory updates memory content."""
+        r = client.put("/v1/context/memory", json={
+            "content": "Test memory content from pytest"
+        })
+>       assert r.status_code in (200, 422)
+E       assert 400 in (200, 422)
+E        +  where 400 = <Response [400 Bad Request]>.status_code
+
+tests\test_misc.py:134: AssertionError
+__________________ TestUserAndMemory.test_create_memory_file __________________
+
+self = <test_misc.TestUserAndMemory object at 0x00000241B1ED9A70>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_create_memory_file(self, client):
+        """POST /v1/memory creates a new memory file."""
+        payload = {
+            "filename": f"pytest_test_{uuid.uuid4().hex[:8]}.md",
+            "content": "# Test Memory File\nCreated by pytest."
+        }
+        r = client.post("/v1/memory", json=payload)
+>       assert r.status_code in (200, 201)
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_misc.py:195: AssertionError
+_________ TestPersonaCRUD.test_update_nonexistent_persona_returns_404 _________
+
+self = <test_personas.TestPersonaCRUD object at 0x00000241B2F706B0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_update_nonexistent_persona_returns_404(self, client):
+        """PATCH /v1/personas/{id} with bogus id should return 404."""
+        r = client.patch("/v1/personas/nonexistent-fake-id-99999", json={"description": "x"})
+>       assert r.status_code == 404, f"Expected 404, got {r.status_code}: {r.text}"
+E       AssertionError: Expected 404, got 500: Internal Server Error
+E       assert 500 == 404
+E        +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests\test_personas.py:91: AssertionError
+_________ TestPersonaCRUD.test_delete_nonexistent_persona_returns_404 _________
+
+self = <test_personas.TestPersonaCRUD object at 0x00000241B1E29350>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_delete_nonexistent_persona_returns_404(self, client):
+        """DELETE /v1/personas/{id} with bogus id should return 404."""
+        r = client.delete("/v1/personas/nonexistent-fake-id-99999")
+>       assert r.status_code == 404, f"Expected 404, got {r.status_code}: {r.text}"
+E       AssertionError: Expected 404, got 500: Internal Server Error
+E       assert 500 == 404
+E        +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests\test_personas.py:102: AssertionError
+_____________________ TestRemoteHealth.test_remote_health _____________________
+
+self = <test_remote.TestRemoteHealth object at 0x00000241B2F88CD0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_remote_health(self, client):
+        """GET /v1/remote/health returns system health."""
+        r = client.get("/v1/remote/health")
+>       assert r.status_code == 200
+E       assert 500 == 200
+E        +  where 500 = <Response [500 Internal Server Error]>.status_code
+
+tests\test_remote.py:17: AssertionError
+________________________ TestApiKeys.test_set_api_key _________________________
+
+self = <test_settings.TestApiKeys object at 0x00000241B2F89950>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_set_api_key(self, client):
+        """PUT /v1/api-keys/{provider} sets a key."""
+        r = client.put("/v1/api-keys/test_provider", json={
+            "api_key": "test_key_abc123"
+        })
+>       assert r.status_code in (200, 201)
+E       assert 422 in (200, 201)
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+tests\test_settings.py:25: AssertionError
+_______________________ TestApiKeys.test_delete_api_key _______________________
+
+self = <test_settings.TestApiKeys object at 0x00000241B1EDAFD0>
+client = <httpx.Client object at 0x00000241B1F767B0>
+
+    def test_delete_api_key(self, client):
+        """DELETE /v1/api-keys/{provider} removes the key."""
+        r = client.delete("/v1/api-keys/test_provider")
+>       assert r.status_code in (200, 204)
+E       assert 404 in (200, 204)
+E        +  where 404 = <Response [404 Not Found]>.status_code
+
+tests\test_settings.py:45: AssertionError
+--------------------------------- JSON report ---------------------------------
+report saved to: G:\Model_Mesh\tests\reports\pytest_results_2026-04-02_124035.json
+=========================== short test summary info ===========================
+FAILED tests/test_chat.py::TestChatCompletions::test_chat_completions_basic
+FAILED tests/test_chat.py::TestChatCompletions::test_chat_completions_system_message
+FAILED tests/test_chat.py::TestChatCompletions::test_chat_completions_multi_turn
+FAILED tests/test_collaboration.py::TestCollabAudit::test_create_audit_entry
+FAILED tests/test_conversations.py::TestConversationCRUD::test_get_conversation_404_for_nonexistent
+FAILED tests/test_conversations.py::TestConversationCRUD::test_update_nonexistent_conversation_returns_404
+FAILED tests/test_conversations.py::TestConversationCRUD::test_delete_nonexistent_conversation_returns_404
+FAILED tests/test_conversations.py::TestConversationMessages::test_list_messages_404_for_nonexistent_conversation
+FAILED tests/test_conversations.py::TestMessageImageUpdate::test_update_nonexistent_message_image_returns_404
+FAILED tests/test_health.py::TestBasicHealth::test_health_returns_200 - Asser...
+FAILED tests/test_health.py::TestBasicHealth::test_health_response_has_status
+FAILED tests/test_identity.py::TestIdentitySetup::test_setup_endpoint_returns_success_or_already_setup
+FAILED tests/test_images.py::TestImageUpload::test_upload_image_returns_success
+FAILED tests/test_images.py::TestImageEdit::test_edit_with_image_returns_result_or_no_provider
+FAILED tests/test_misc.py::TestModelSync::test_sync_status - assert 404 == 200
+FAILED tests/test_misc.py::TestModelSync::test_run_sync - assert 404 in (200,...
+FAILED tests/test_misc.py::TestModelValidate::test_validate_model - assert 40...
+FAILED tests/test_misc.py::TestModelValidate::test_validate_empty - assert 40...
+FAILED tests/test_misc.py::TestTasks::test_create_task - assert 422 in (200, ...
+FAILED tests/test_misc.py::TestContext::test_update_memory - assert 400 in (2...
+FAILED tests/test_misc.py::TestUserAndMemory::test_create_memory_file - asser...
+FAILED tests/test_personas.py::TestPersonaCRUD::test_update_nonexistent_persona_returns_404
+FAILED tests/test_personas.py::TestPersonaCRUD::test_delete_nonexistent_persona_returns_404
+FAILED tests/test_remote.py::TestRemoteHealth::test_remote_health - assert 50...
+FAILED tests/test_settings.py::TestApiKeys::test_set_api_key - assert 422 in ...
+FAILED tests/test_settings.py::TestApiKeys::test_delete_api_key - assert 404 ...
+ERROR tests/test_agents.py::TestAgentCRUD::test_create_agent_has_id - Asserti...
+ERROR tests/test_agents.py::TestAgentCRUD::test_get_agent_by_id - AssertionEr...
+ERROR tests/test_agents.py::TestAgentCRUD::test_get_agent_404_for_nonexistent
+ERROR tests/test_agents.py::TestAgentCRUD::test_update_agent_description - As...
+ERROR tests/test_agents.py::TestAgentCRUD::test_update_nonexistent_agent_returns_404
+ERROR tests/test_agents.py::TestAgentCRUD::test_delete_agent_returns_success
+ERROR tests/test_agents.py::TestAgentCRUD::test_delete_nonexistent_agent_returns_404
+ERROR tests/test_models.py::TestModelCRUD::test_create_model_returns_id - Ass...
+ERROR tests/test_models.py::TestModelCRUD::test_get_model_by_id - AssertionEr...
+ERROR tests/test_models.py::TestModelCRUD::test_get_model_404_for_nonexistent
+ERROR tests/test_models.py::TestModelCRUD::test_update_model_description - As...
+ERROR tests/test_models.py::TestModelCRUD::test_update_model_404_for_nonexistent
+ERROR tests/test_models.py::TestModelCRUD::test_delete_model_returns_success
+ERROR tests/test_models.py::TestModelCRUD::test_delete_model_404_for_nonexistent
+ERROR tests/test_projects.py::TestProjectCRUD::test_create_project_has_id - A...
+ERROR tests/test_projects.py::TestProjectCRUD::test_get_project_by_id - Asser...
+ERROR tests/test_projects.py::TestProjectCRUD::test_get_project_404_for_nonexistent
+ERROR tests/test_projects.py::TestProjectCRUD::test_update_project_description
+ERROR tests/test_projects.py::TestProjectCRUD::test_update_nonexistent_project_returns_404
+ERROR tests/test_projects.py::TestProjectCRUD::test_delete_project_returns_success
+ERROR tests/test_projects.py::TestProjectCRUD::test_delete_nonexistent_project_returns_404
+ERROR tests/test_projects.py::TestProjectFiles::test_list_project_files_returns_200_or_404
+ERROR tests/test_projects.py::TestProjectFiles::test_read_project_file_nonexistent_returns_404
+ERROR tests/test_projects.py::TestProjectFiles::test_list_files_404_for_nonexistent_project
+ERROR tests/test_projects.py::TestProjectSandbox::test_get_sandbox_status_returns_200_or_404
+ERROR tests/test_projects.py::TestProjectSandbox::test_post_sandbox_returns_success_or_error
+ERROR tests/test_workbench.py::TestWorkbenchSessionCRUD::test_create_session_has_id
+ERROR tests/test_workbench.py::TestWorkbenchSessionCRUD::test_get_session_by_id
+ERROR tests/test_workbench.py::TestWorkbenchSessionCRUD::test_get_session_404_for_nonexistent
+ERROR tests/test_workbench.py::TestWorkbenchSessionCRUD::test_send_message_returns_success_or_error
+ERROR tests/test_workbench.py::TestWorkbenchSessionCRUD::test_cancel_session_returns_success_or_not_running
+ERROR tests/test_workbench.py::TestWorkbenchSessionCRUD::test_delete_session_returns_success
+ERROR tests/test_workbench.py::TestWorkbenchSessionCRUD::test_delete_nonexistent_session_returns_404
+=========== 26 failed, 159 passed, 13 skipped, 33 errors in 55.72s ============

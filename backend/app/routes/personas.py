@@ -9,8 +9,16 @@ from app.database import get_db
 from app.models import Persona
 from app.schemas import PersonaCreate, PersonaUpdate, PersonaResponse, PersonaList
 from app.middleware.auth import verify_api_key
+import uuid as _uuid
 
 router = APIRouter(prefix="/v1/personas", tags=["personas"], dependencies=[Depends(verify_api_key)])
+
+
+def _parse_uuid(value: str) -> _uuid.UUID:
+    try:
+        return _uuid.UUID(value)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=404, detail="Not found")
 
 
 @router.get("", response_model=PersonaList)
@@ -72,7 +80,7 @@ async def get_persona(
     """Get persona details."""
     import uuid
     try:
-        persona_uuid = uuid.UUID(persona_id)
+        persona_uuid = _parse_uuid(persona_id)
         persona = await db.get(Persona, persona_uuid)
     except ValueError:
         # Try to find by name
@@ -95,7 +103,7 @@ async def update_persona(
 ):
     """Update a persona."""
     import uuid
-    persona_uuid = uuid.UUID(persona_id)
+    persona_uuid = _parse_uuid(persona_id)
     persona = await db.get(Persona, persona_uuid)
     
     if not persona:
@@ -119,7 +127,7 @@ async def delete_persona(
 ):
     """Delete a persona."""
     import uuid
-    persona_uuid = uuid.UUID(persona_id)
+    persona_uuid = _parse_uuid(persona_id)
     persona = await db.get(Persona, persona_uuid)
     
     if not persona:

@@ -81,13 +81,14 @@ async def health_check():
     active_sessions = len([s for s in sessions.values() if s["status"] == "running"])
     
     # System info
-    import psutil
-    system_info = {
-        "cpu_percent": psutil.cpu_percent(interval=0.1),
-        "memory_percent": psutil.virtual_memory().percent,
-        "disk_percent": psutil.disk_usage('/').percent if os.name != 'nt' else psutil.disk_usage('C:\\').percent,
-        "python_version": os.sys.version,
-    }
+    system_info = {"python_version": os.sys.version}
+    try:
+        import psutil
+        system_info["cpu_percent"] = psutil.cpu_percent(interval=0.1)
+        system_info["memory_percent"] = psutil.virtual_memory().percent
+        system_info["disk_percent"] = psutil.disk_usage('C:\\').percent if os.name == 'nt' else psutil.disk_usage('/').percent
+    except Exception:
+        pass
     
     return HealthCheck(
         status="healthy",
