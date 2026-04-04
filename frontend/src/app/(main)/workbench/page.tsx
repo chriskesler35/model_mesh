@@ -98,14 +98,18 @@ export default function WorkbenchListPage() {
     try {
       const body: any = { task: task.trim(), agent_type: agentType, model }
       if (projectId) body.project_id = projectId
-      const session = await fetch(`${API_BASE}/v1/workbench/sessions`, {
+      const sessRes = await fetch(`${API_BASE}/v1/workbench/sessions`, {
         method: 'POST', headers: AUTH_HEADERS,
         body: JSON.stringify(body),
-      }).then(r => r.json())
+      })
+      const session = await sessRes.json()
+      if (!sessRes.ok || !session?.id) {
+        throw new Error(`Session creation failed: ${session?.detail || sessRes.status}`)
+      }
 
       if (asPipeline) {
         // Create a multi-agent pipeline on top of this session
-        const pipeline = await fetch(`${API_BASE}/v1/workbench/pipelines`, {
+        const pipeRes = await fetch(`${API_BASE}/v1/workbench/pipelines`, {
           method: 'POST', headers: AUTH_HEADERS,
           body: JSON.stringify({
             session_id: session.id,
@@ -114,15 +118,18 @@ export default function WorkbenchListPage() {
             auto_approve: autoApprove,
             model_overrides: Object.keys(modelOverrides).length > 0 ? modelOverrides : undefined,
           }),
-        }).then(r => r.json())
-        if (pipeline.id) {
-          router.push(`/workbench/pipelines/${pipeline.id}`)
-          return
+        })
+        const pipeline = await pipeRes.json()
+        if (!pipeRes.ok || !pipeline?.id) {
+          throw new Error(`Pipeline creation failed: ${pipeline?.detail || pipeRes.status}`)
         }
+        router.push(`/workbench/pipelines/${pipeline.id}`)
+        return
       }
       router.push(`/workbench/${session.id}`)
-    } catch (e) {
-      console.error(e)
+    } catch (e: any) {
+      console.error('Launch failed:', e)
+      alert(`Launch failed: ${e.message || 'Unknown error'}`)
       setCreating(false)
     }
   }

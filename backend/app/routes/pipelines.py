@@ -537,7 +537,6 @@ async def create_pipeline(body: PipelineCreate, db: AsyncSession = Depends(get_d
     _event_logs[pipeline_id] = []
 
     _push(pipeline_id, "pipeline_created",
-          pipeline_id=pipeline_id,
           method_id=body.method_id,
           phases=[{"name": p["name"], "role": p["role"], "model": p.get("model")} for p in template_phases],
           auto_approve=body.auto_approve)

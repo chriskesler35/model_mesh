@@ -1001,17 +1001,29 @@ async def download_image(image_id: str):
 
 @router.delete("/{image_id}")
 async def delete_image(image_id: str):
-    """Delete a generated image."""
-    
-    if image_id not in IMAGE_STORAGE:
-        raise HTTPException(
-            status_code=404,
-            detail="Image not found"
-        )
-    
-    del IMAGE_STORAGE[image_id]
-    
-    return {"status": "deleted"}
+    """Delete a generated image — removes both the metadata and the file on disk."""
+
+    # Find + delete the binary from data/images/ (this is the source of truth for the gallery)
+    deleted_file = None
+    for ext in ("png", "jpg", "jpeg", "webp", "gif"):
+        p = _IMAGE_DIR / f"{image_id}.{ext}"
+        if p.exists():
+            try:
+                p.unlink()
+                deleted_file = p.name
+                break
+            except OSError as e:
+                logger.warning(f"Could not delete {p}: {e}")
+
+    # Remove from in-memory metadata + persist
+    if image_id in IMAGE_STORAGE:
+        del IMAGE_STORAGE[image_id]
+        _save_image_storage(IMAGE_STORAGE)
+
+    if not deleted_file and image_id not in IMAGE_STORAGE:
+        raise HTTPException(status_code=404, detail="Image not found on disk or in metadata")
+
+    return {"status": "deleted", "file": deleted_file}
 
 
 @router.get("/")
