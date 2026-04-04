@@ -126,7 +126,8 @@ function renderMarkdown(text: string): string {
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 function Sidebar({
   conversations, activeId, onSelect, onNew, onDelete, onPin, onKeepForever, onRename,
-  personas, selectedPersonaId, onPersonaChange, models, selectedModelId, onModelChange, searchQuery, onSearchChange, collapsed, onToggle
+  personas, selectedPersonaId, onPersonaChange, models, selectedModelId, onModelChange,
+  searchQuery, onSearchChange, collapsed, onToggle, width, onWidthChange
 }: {
   conversations: Conversation[]
   activeId: string | null
@@ -146,7 +147,31 @@ function Sidebar({
   onSearchChange: (q: string) => void
   collapsed: boolean
   onToggle: () => void
+  width: number
+  onWidthChange: (w: number) => void
 }) {
+  const [dragging, setDragging] = useState(false)
+
+  // Drag-to-resize handler
+  useEffect(() => {
+    if (!dragging) return
+    const onMove = (e: MouseEvent) => {
+      // Clamp between 240px (min usable) and 560px (reasonable max)
+      const w = Math.max(240, Math.min(560, e.clientX))
+      onWidthChange(w)
+    }
+    const onUp = () => setDragging(false)
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    return () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+  }, [dragging, onWidthChange])
   const [menuOpen, setMenuOpen] = useState<string | null>(null)
   const [renaming, setRenaming] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -170,12 +195,15 @@ function Sidebar({
       )}
 
       {/* Sidebar panel */}
-      <aside className={`
-        fixed lg:relative inset-y-0 left-0 z-30 lg:z-auto
-        flex flex-col bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700
-        transition-all duration-200 ease-in-out
-        ${collapsed ? '-translate-x-full lg:translate-x-0 lg:w-0 lg:overflow-hidden lg:border-0' : 'translate-x-0 w-72'}
-      `}>
+      <aside
+        className={`
+          fixed lg:relative inset-y-0 left-0 z-30 lg:z-auto
+          flex flex-col bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700
+          ${dragging ? '' : 'transition-all duration-200 ease-in-out'}
+          ${collapsed ? '-translate-x-full lg:translate-x-0 lg:w-0 lg:overflow-hidden lg:border-0' : 'translate-x-0'}
+        `}
+        style={collapsed ? undefined : { width: `${width}px` }}
+      >
         {/* Logo + collapse btn */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-gray-800">
           <Link href="/" className="flex items-center gap-2 text-sm font-bold text-gray-900 dark:text-white">
@@ -348,6 +376,19 @@ function Sidebar({
           )}
         </div>
 
+        {/* Drag handle — only visible on lg+ screens when sidebar expanded */}
+        {!collapsed && (
+          <div
+            onMouseDown={() => setDragging(true)}
+            onDoubleClick={() => onWidthChange(288)}
+            title="Drag to resize • Double-click to reset"
+            className={`hidden lg:block absolute top-0 right-0 w-1 h-full cursor-col-resize group ${
+              dragging ? 'bg-orange-400' : 'hover:bg-orange-400/50 active:bg-orange-400'
+            } transition-colors`}
+          >
+            <div className="absolute top-1/2 right-0 -translate-y-1/2 w-1 h-12 bg-gray-300 dark:bg-gray-600 rounded-l opacity-0 group-hover:opacity-100 transition-opacity" />
+          </div>
+        )}
       </aside>
     </>
   )
@@ -974,6 +1015,7 @@ export default function ChatPage() {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [sidebarWidth, setSidebarWidth] = useState(288)  // px; matches old w-72
   const [searchQuery, setSearchQuery] = useState('')
   const [searchDebounce, setSearchDebounce] = useState('')
   const [activeModelName, setActiveModelName] = useState<string>('')
@@ -1142,6 +1184,7 @@ export default function ChatPage() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const imagePromptRef = useRef<HTMLTextAreaElement>(null)
   const searchTimer = useRef<ReturnType<typeof setTimeout>>()
 
   // ── Fetch available workflows when image gen opens ──────────────────────
@@ -1293,6 +1336,25 @@ export default function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Load saved sidebar width on mount
+  useEffect(() => {
+    const saved = localStorage.getItem('devforge_sidebar_width')
+    if (saved) {
+      const n = parseInt(saved, 10)
+      if (!isNaN(n) && n >= 240 && n <= 560) setSidebarWidth(n)
+    }
+    const savedCollapsed = localStorage.getItem('devforge_chat_sidebar_collapsed')
+    if (savedCollapsed === 'true') setSidebarCollapsed(true)
+  }, [])
+
+  // Persist sidebar state
+  useEffect(() => {
+    localStorage.setItem('devforge_sidebar_width', String(sidebarWidth))
+  }, [sidebarWidth])
+  useEffect(() => {
+    localStorage.setItem('devforge_chat_sidebar_collapsed', String(sidebarCollapsed))
+  }, [sidebarCollapsed])
+
   // ── Keep sidebar in sync — refresh on window focus and periodically ─────
   useEffect(() => {
     const onFocus = () => refreshConversations()
@@ -1320,12 +1382,23 @@ export default function ChatPage() {
   }, [messages])
 
   // ── Textarea auto-resize ──────────────────────────────────────────────────
+  // Grows with content up to ~40% of viewport height, then internal scroll.
   useEffect(() => {
     if (textareaRef.current) {
+      const maxH = Math.max(200, Math.floor(window.innerHeight * 0.4))
       textareaRef.current.style.height = 'auto'
-      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 144) + 'px'
+      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, maxH) + 'px'
     }
   }, [input])
+
+  // Image prompt auto-resize (same behavior as chat textarea)
+  useEffect(() => {
+    if (imagePromptRef.current) {
+      const maxH = Math.max(200, Math.floor(window.innerHeight * 0.4))
+      imagePromptRef.current.style.height = 'auto'
+      imagePromptRef.current.style.height = Math.min(imagePromptRef.current.scrollHeight, maxH) + 'px'
+    }
+  }, [imagePrompt, showImageGen])
 
   // ── Load session ──────────────────────────────────────────────────────────
   const [recoverySnapshot, setRecoverySnapshot] = useState<{conversationId: string, summary: string, messageCount: number} | null>(null)
@@ -1789,6 +1862,8 @@ export default function ChatPage() {
         onSearchChange={setSearchQuery}
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(p => !p)}
+        width={sidebarWidth}
+        onWidthChange={setSidebarWidth}
       />
 
       {/* Main chat area */}
@@ -2019,17 +2094,35 @@ export default function ChatPage() {
                     )}
                   </div>
 
+                  {/* Patience notice for local ComfyUI generation */}
+                  {imageProvider === 'comfyui-local' && (
+                    <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-purple-50 dark:bg-purple-900/20 border border-purple-100 dark:border-purple-800/40 text-xs text-purple-700 dark:text-purple-300">
+                      <span className="flex-shrink-0 mt-0.5">⏳</span>
+                      <span>
+                        <strong>Heads up:</strong> Local generation runs on your GPU and can take 30 seconds to several minutes
+                        (first use loads the model into VRAM). Gemini is faster for quick iterations — ComfyUI wins on control and privacy.
+                      </span>
+                    </div>
+                  )}
+
                   {/* Row 2: Prompt + generate button */}
                   <div className="flex gap-2 items-end">
-                    <input
-                      type="text"
+                    <textarea
+                      ref={imagePromptRef}
                       value={imagePrompt}
                       onChange={e => setImagePrompt(e.target.value)}
-                      onKeyDown={e => e.key === 'Enter' && !e.shiftKey && generateImage()}
-                      placeholder="Describe the image you want to create..."
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault()
+                          generateImage()
+                        }
+                      }}
+                      placeholder="Describe the image you want to create... (Shift+Enter for newline)"
                       disabled={generatingImage}
                       autoFocus
-                      className="flex-1 rounded-xl border border-purple-200 dark:border-purple-700 dark:bg-gray-800 dark:text-white px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent disabled:opacity-50"
+                      rows={1}
+                      className="flex-1 resize-none rounded-xl border border-purple-200 dark:border-purple-700 dark:bg-gray-800 dark:text-white px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent disabled:opacity-50 leading-relaxed whitespace-pre-wrap break-words overflow-y-auto"
+                      style={{ minHeight: '42px' }}
                     />
                     <button
                       onClick={() => generateImage()}
@@ -2051,8 +2144,8 @@ export default function ChatPage() {
                     placeholder="Message... (Ctrl+Enter to send)"
                     disabled={loading}
                     rows={1}
-                    className="flex-1 resize-none rounded-xl border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-white px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent disabled:opacity-50 leading-relaxed"
-                    style={{ minHeight: '42px', maxHeight: '144px' }}
+                    className="flex-1 resize-none rounded-xl border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-white px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent disabled:opacity-50 leading-relaxed whitespace-pre-wrap break-words overflow-y-auto"
+                    style={{ minHeight: '42px' }}
                   />
                   <button
                     onClick={sendMessage}
