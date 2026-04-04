@@ -16,10 +16,22 @@ interface Image {
   prompt?: string
   model?: string
   created_at?: string
+  variation_of?: string
 }
+
+interface ImageModel {
+  id: string
+  name: string
+  available: boolean
+  description: string
+}
+
+const PAGE_SIZE = 50
 
 export default function GalleryPage() {
   const [images, setImages] = useState<Image[]>([])
+  const [totalImages, setTotalImages] = useState(0)
+  const [page, setPage] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedImage, setSelectedImage] = useState<Image | null>(null)
@@ -28,18 +40,24 @@ export default function GalleryPage() {
   const [editPrompt, setEditPrompt] = useState('')
   const [editing, setEditing] = useState(false)
   const [uploadDragging, setUploadDragging] = useState(false)
+  // Variation model selection
+  const [availableModels, setAvailableModels] = useState<ImageModel[]>([])
+  const [variationModel, setVariationModel] = useState<string>('gemini-imagen')
+  const [showVariationMenu, setShowVariationMenu] = useState<string | null>(null)
 
   // Moved to component scope so all handlers can call it
-  const fetchImages = useCallback(async () => {
+  const fetchImages = useCallback(async (pageNum: number = 0) => {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch(`${API_BASE}/v1/images/`, {
+      const offset = pageNum * PAGE_SIZE
+      const res = await fetch(`${API_BASE}/v1/images/?limit=${PAGE_SIZE}&offset=${offset}`, {
         headers: { 'Authorization': `Bearer ${API_KEY}` }
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
       const data = await res.json()
       setImages(data.data || [])
+      setTotalImages(data.total || 0)
     } catch (e: any) {
       console.error('Failed to fetch images:', e)
       setError(e.message || 'Failed to load images')
@@ -49,8 +67,34 @@ export default function GalleryPage() {
   }, [])
 
   useEffect(() => {
-    fetchImages()
-  }, [fetchImages])
+    fetchImages(page)
+  }, [fetchImages, page])
+
+  // Fetch available image generation models (for variation selector)
+  useEffect(() => {
+    fetch(`${API_BASE}/v1/images/models/available`, {
+      headers: { 'Authorization': `Bearer ${API_KEY}` }
+    })
+      .then(r => r.ok ? r.json() : { data: [] })
+      .then(d => {
+        const models: ImageModel[] = d.data || []
+        setAvailableModels(models)
+        // Default to first available model
+        const firstAvailable = models.find(m => m.available)
+        if (firstAvailable) setVariationModel(firstAvailable.id)
+      })
+      .catch(() => {})
+  }, [])
+
+  const totalPages = Math.ceil(totalImages / PAGE_SIZE)
+
+  // Close variation menu on outside click
+  useEffect(() => {
+    if (!showVariationMenu) return
+    const handler = () => setShowVariationMenu(null)
+    document.addEventListener('click', handler)
+    return () => document.removeEventListener('click', handler)
+  }, [showVariationMenu])
 
   const downloadImage = async (image: Image) => {
     try {
@@ -83,10 +127,11 @@ export default function GalleryPage() {
       const data = await response.json()
       if (!response.ok) throw new Error(data.detail || 'Edit failed')
       if (data.data?.[0]) {
-        setImages(prev => [data.data[0], ...prev])
         setEditingImage(null)
         setEditPrompt('')
         setSelectedImage(null)
+        setPage(0)
+        await fetchImages(0)
       }
     } catch (e: any) {
       alert('Edit failed: ' + e.message)
@@ -106,7 +151,8 @@ export default function GalleryPage() {
           body: JSON.stringify({ base64, filename: file.name, mime_type: file.type || 'image/png' })
         })
         if (response.ok) {
-          await fetchImages() // now in scope
+          setPage(0)
+          await fetchImages(0)
         } else {
           const data = await response.json()
           alert('Upload failed: ' + (data.detail || response.status))
@@ -139,21 +185,21 @@ export default function GalleryPage() {
     }
   }
 
-  const generateVariation = async (imageId: string) => {
+  const generateVariation = async (imageId: string, modelId?: string) => {
     setGenerating(imageId)
+    setShowVariationMenu(null)
     try {
       const response = await fetch(`${API_BASE}/v1/images/${imageId}/variations`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({})
+        body: JSON.stringify({ model: modelId || variationModel })
       })
       const data = await response.json()
       if (!response.ok) throw new Error(data.detail || 'Failed to generate variation')
       if (data.data?.[0]) {
-        // Normalize URL — backend may return /v1/images/{id} or /v1/img/{id}
-        const img = data.data[0]
-        img.url = `/v1/img/${img.id}`
-        setImages(prev => [img, ...prev])
+        // Variations are saved to data/images/ — refresh to pull in the new file + keep sort order
+        setPage(0)
+        await fetchImages(0)
         setSelectedImage(null)
       }
     } catch (e: any) {
@@ -177,7 +223,7 @@ export default function GalleryPage() {
       <div className="flex flex-col items-center justify-center min-h-[50vh] gap-4">
         <div className="text-red-500 dark:text-red-400">Error: {error}</div>
         <button
-          onClick={fetchImages}
+          onClick={() => fetchImages(page)}
           className="px-4 py-2 bg-orange-600 text-white rounded-md hover:bg-orange-700 text-sm"
         >
           Retry
@@ -192,15 +238,43 @@ export default function GalleryPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Image Gallery</h1>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            {images.length} image{images.length !== 1 ? 's' : ''}
+            {totalImages} image{totalImages !== 1 ? 's' : ''} · newest first
+            {totalPages > 1 && (
+              <span> · page {page + 1} of {totalPages}</span>
+            )}
           </p>
         </div>
-        <button
-          onClick={fetchImages}
-          className="px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white border border-gray-300 dark:border-gray-600 rounded-md"
-        >
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          {totalPages > 1 && (
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setPage(p => Math.max(0, p - 1))}
+                disabled={page === 0}
+                className="px-2 py-1 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white border border-gray-300 dark:border-gray-600 rounded-md disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Previous page"
+              >
+                ←
+              </button>
+              <span className="text-xs text-gray-500 dark:text-gray-400 min-w-[60px] text-center">
+                {page + 1} / {totalPages}
+              </span>
+              <button
+                onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+                disabled={page >= totalPages - 1}
+                className="px-2 py-1 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white border border-gray-300 dark:border-gray-600 rounded-md disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Next page"
+              >
+                →
+              </button>
+            </div>
+          )}
+          <button
+            onClick={() => fetchImages(page)}
+            className="px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white border border-gray-300 dark:border-gray-600 rounded-md"
+          >
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Upload Zone */}
@@ -275,16 +349,39 @@ export default function GalleryPage() {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                     </svg>
                   </button>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); generateVariation(image.id) }}
-                    className="p-2 bg-white rounded-full text-orange-600 hover:bg-gray-100 disabled:opacity-50"
-                    title="Generate Variation"
-                    disabled={generating === image.id}
-                  >
-                    <svg className={`w-5 h-5 ${generating === image.id ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                  </button>
+                  <div className="relative">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setShowVariationMenu(showVariationMenu === image.id ? null : image.id) }}
+                      className="p-2 bg-white rounded-full text-orange-600 hover:bg-gray-100 disabled:opacity-50"
+                      title="Generate Variation (pick model)"
+                      disabled={generating === image.id}
+                    >
+                      <svg className={`w-5 h-5 ${generating === image.id ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                    </button>
+                    {showVariationMenu === image.id && (
+                      <div
+                        className="absolute z-10 top-full mt-1 right-0 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 min-w-[220px]"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="px-3 py-1 text-[10px] uppercase tracking-wider font-semibold text-gray-400">
+                          Generate variation with
+                        </div>
+                        {availableModels.map(m => (
+                          <button
+                            key={m.id}
+                            onClick={(e) => { e.stopPropagation(); generateVariation(image.id, m.id) }}
+                            disabled={!m.available}
+                            className="w-full text-left px-3 py-2 text-xs hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <div className="font-medium text-gray-900 dark:text-white">{m.name}</div>
+                            <div className="text-[10px] text-gray-500 dark:text-gray-400 truncate">{m.description}</div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                   <button
                     onClick={(e) => { e.stopPropagation(); deleteImage(image.id) }}
                     className="p-2 bg-white rounded-full text-red-600 hover:bg-gray-100"
@@ -357,13 +454,28 @@ export default function GalleryPage() {
                   >
                     Edit with AI
                   </button>
-                  <button
-                    onClick={() => generateVariation(selectedImage.id)}
-                    disabled={generating === selectedImage.id}
-                    className="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-orange-600 hover:bg-orange-700 disabled:opacity-50"
-                  >
-                    {generating === selectedImage.id ? 'Generating...' : 'Variation'}
-                  </button>
+                  <div className="inline-flex rounded-md overflow-hidden">
+                    <button
+                      onClick={() => generateVariation(selectedImage.id, variationModel)}
+                      disabled={generating === selectedImage.id}
+                      className="px-3 py-1.5 text-sm font-medium text-white bg-orange-600 hover:bg-orange-700 disabled:opacity-50"
+                    >
+                      {generating === selectedImage.id ? 'Generating...' : 'Variation'}
+                    </button>
+                    <select
+                      value={variationModel}
+                      onChange={(e) => setVariationModel(e.target.value)}
+                      disabled={generating === selectedImage.id}
+                      className="px-2 py-1.5 text-xs text-white bg-orange-700 hover:bg-orange-800 disabled:opacity-50 border-l border-orange-400 focus:outline-none cursor-pointer"
+                      title="Choose model"
+                    >
+                      {availableModels.map(m => (
+                        <option key={m.id} value={m.id} disabled={!m.available} className="text-gray-900">
+                          {m.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                   <button
                     onClick={() => downloadImage(selectedImage)}
                     className="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"

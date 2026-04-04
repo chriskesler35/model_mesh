@@ -156,6 +156,10 @@ class ImageResponse(BaseModel):
     width: int
     height: int
     format: str
+    prompt: Optional[str] = None
+    model: Optional[str] = None
+    created_at: Optional[str] = None
+    variation_of: Optional[str] = None
 
 
 class ImageListResponse(BaseModel):
@@ -784,6 +788,28 @@ async def generate_image(
     return ImageListResponse(data=images, total=len(images))
 
 
+@router.get("/models/available")
+async def list_image_models(db: AsyncSession = Depends(get_db)):
+    """List image generation backends available for generation + variations."""
+    backends = [
+        {
+            "id": "gemini-imagen",
+            "name": "Gemini (Imagen / Nano Banana)",
+            "requires": "GEMINI_API_KEY",
+            "available": bool(os.environ.get("GEMINI_API_KEY") or getattr(settings, "gemini_api_key", None)),
+            "description": "Fast cloud generation via Google",
+        },
+        {
+            "id": "comfyui-local",
+            "name": "ComfyUI (Local)",
+            "requires": "ComfyUI running on localhost",
+            "available": True,  # always exposed; runtime checks reachability + falls back to Gemini
+            "description": "Local SDXL/FLUX workflows — falls back to Gemini on failure",
+        },
+    ]
+    return {"data": backends}
+
+
 @router.get("/{image_id}")
 async def get_image(image_id: str):
     """Retrieve a generated image by ID."""
@@ -858,29 +884,72 @@ async def list_images(
     limit: int = 50,
     offset: int = 0
 ):
-    """List all generated images."""
-    
+    """List ALL images found in data/images, sorted newest-first by file mtime.
+
+    Paginates (50 per page by default). Merges filesystem-discovered files with
+    IMAGE_STORAGE metadata — any image file on disk gets returned even if its
+    metadata is missing (stub response with disk-derived fields).
+    """
+    from datetime import datetime as _dt
+
+    _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    # Scan directory for all image files
+    disk_files = []
+    try:
+        for p in _IMAGE_DIR.iterdir():
+            if not p.is_file():
+                continue
+            if p.name.startswith("_"):  # skip _meta.json etc
+                continue
+            if p.suffix.lower() not in _IMAGE_EXTS:
+                continue
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            disk_files.append((p.stem, p.suffix.lstrip(".").lower(), mtime))
+    except FileNotFoundError:
+        disk_files = []
+
+    # Sort newest first by mtime
+    disk_files.sort(key=lambda t: t[2], reverse=True)
+    total = len(disk_files)
+
+    # Paginate
+    page_slice = disk_files[offset:offset + limit]
+
     images = []
-    for image_id, data in list(IMAGE_STORAGE.items())[offset:offset + limit]:
+    for image_id, ext, mtime in page_slice:
+        meta = IMAGE_STORAGE.get(image_id, {})
         try:
-            width, height = map(int, data["size"].split('x'))
+            size_str = meta.get("size", "0x0")
+            width, height = map(int, size_str.split("x"))
         except (ValueError, AttributeError):
             width, height = 0, 0
+        created_at = _dt.utcfromtimestamp(mtime).isoformat() + "Z"
         images.append(ImageResponse(
             id=image_id,
-            url=f"/v1/images/{image_id}",
-            revised_prompt=data.get("revised_prompt"),
+            url=f"/v1/img/{image_id}",
+            revised_prompt=meta.get("revised_prompt"),
             width=width,
             height=height,
-            format=data["format"]
+            format=meta.get("format") or ext,
+            prompt=meta.get("prompt"),
+            model=meta.get("model"),
+            created_at=created_at,
+            variation_of=meta.get("variation_of"),
         ))
-    
-    return ImageListResponse(data=images, total=len(IMAGE_STORAGE))
+
+    return ImageListResponse(data=images, total=total)
+
+
 
 
 class ImageVariationRequest(BaseModel):
-    size: Optional[str] = None  # If None, use original size
+    size: Optional[str] = None   # If None, use original size
     format: Optional[str] = None  # If None, use original format
+    model: Optional[str] = None   # "gemini-imagen" | "comfyui-local" — if None, use original's model
+    prompt: Optional[str] = None  # Override prompt (for guided variations)
 
 
 @router.post("/{image_id}/variations", response_model=ImageListResponse)
@@ -889,20 +958,27 @@ async def generate_variation(
     request: Optional[ImageVariationRequest] = None,
     db: AsyncSession = Depends(get_db)
 ):
-    """Generate a variation of an existing image."""
-    
-    if image_id not in IMAGE_STORAGE:
-        raise HTTPException(
-            status_code=404,
-            detail="Original image not found"
+    """Generate a variation of an existing image. User can choose which model to use."""
+
+    # Try in-memory storage first, then fall back to disk metadata
+    original = IMAGE_STORAGE.get(image_id)
+    if not original:
+        # Check if the image file exists on disk even without metadata
+        found_on_disk = any(
+            (_IMAGE_DIR / f"{image_id}.{ext}").exists()
+            for ext in ("png", "jpg", "jpeg", "webp")
         )
-    
-    original = IMAGE_STORAGE[image_id]
-    prompt = original["prompt"]
+        if not found_on_disk:
+            raise HTTPException(status_code=404, detail="Original image not found")
+        # Minimal stub for on-disk-only images
+        original = {"prompt": "", "model": "gemini-imagen", "size": "1024x1024", "format": "png"}
+
+    prompt = (request.prompt if request and request.prompt else original.get("prompt")) or "High-quality image"
     negative_prompt = original.get("negative_prompt")
-    model = original["model"]
-    size = request.size if request and request.size else original["size"]
-    format = request.format if request and request.format else original["format"]
+    # User-chosen model takes precedence over original's model
+    model = (request.model if request and request.model else original.get("model")) or "gemini-imagen"
+    size = request.size if request and request.size else original.get("size", "1024x1024")
+    format = request.format if request and request.format else original.get("format", "png")
     
     try:
         if model == "gemini-imagen":
@@ -940,7 +1016,7 @@ async def generate_variation(
                 detail=f"Model '{model}' does not support image generation"
             )
         
-        # Store the variation
+        # Store the variation — _store_image() writes binary to data/images/{id}.{ext}
         variation_id = str(uuid.uuid4())
         IMAGE_STORAGE[variation_id] = {
             "base64": result["base64"],
@@ -950,13 +1026,14 @@ async def generate_variation(
             "size": size,
             "model": model,
             "negative_prompt": negative_prompt,
-            "variation_of": image_id
+            "variation_of": image_id,
         }
-        
+
         width, height = map(int, size.split('x'))
-        
+
         _store_image(variation_id, IMAGE_STORAGE[variation_id])
 
+        from datetime import datetime as _dt
         return ImageListResponse(
             data=[ImageResponse(
                 id=variation_id,
@@ -964,7 +1041,11 @@ async def generate_variation(
                 revised_prompt=result.get("revised_prompt"),
                 width=width,
                 height=height,
-                format=format
+                format=format,
+                prompt=prompt,
+                model=model,
+                created_at=_dt.utcnow().isoformat() + "Z",
+                variation_of=image_id,
             )],
             total=1
         )
