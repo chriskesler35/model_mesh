@@ -474,8 +474,13 @@ function InlineImage({ src, meta }: { src: string; meta?: Message['image_meta'] 
         {/* Action links */}
         {status === 'loaded' && (
           <div className="flex gap-3 px-0.5">
-            <a href={imgSrc} download className="text-xs text-indigo-500 hover:text-indigo-700 dark:text-indigo-400 hover:underline">
-              ↓ Download
+            <a
+              href={imgSrc}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-indigo-500 hover:text-indigo-700 dark:text-indigo-400 hover:underline"
+            >
+              ↓ Download ↗
             </a>
             <button onClick={() => setLightbox(true)} className="text-xs text-gray-400 hover:text-gray-600 hover:underline">
               View full size ↗
@@ -499,11 +504,12 @@ function InlineImage({ src, meta }: { src: string; meta?: Message['image_meta'] 
             <div className="absolute top-3 right-3 flex gap-2">
               <a
                 href={imgSrc}
-                download
+                target="_blank"
+                rel="noopener noreferrer"
                 className="px-3 py-1.5 rounded-lg bg-white/90 dark:bg-gray-800/90 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-white dark:hover:bg-gray-700 shadow transition-colors"
                 onClick={e => e.stopPropagation()}
               >
-                ↓ Download
+                ↓ Download ↗
               </a>
               <button
                 onClick={() => setLightbox(false)}
@@ -1261,11 +1267,21 @@ export default function ChatPage() {
                 : m
             ))
             pendingImageTasksRef.current.delete(taskId)
+          } else if (task.user_message) {
+            // Running/pending — show live progress from the backend
+            const progress = task.progress ? ` (${task.progress}%)` : ''
+            const statusContent = `🎨 ${task.user_message}${progress}`
+            setMessages(prev => prev.map(m =>
+              m.id === msgId && m.content !== statusContent
+                ? { ...m, content: statusContent }
+                : m
+            ))
           }
         } catch { /* silent — will retry next cycle */ }
       }
     }
-    const interval = setInterval(poll, 3000)
+    // Poll faster while any task is pending — shows live ComfyUI progress
+    const interval = setInterval(poll, 1500)
     return () => clearInterval(interval)
   }, [handleImageTaskComplete])
 
@@ -2035,7 +2051,24 @@ export default function ChatPage() {
             <div className="flex gap-2 items-end relative">
               {/* Toggle: chat <-> image mode */}
               <button
-                onClick={() => setShowImageGen(prev => !prev)}
+                onClick={() => {
+                  // Switching modes — move any already-typed text over so the
+                  // user doesn't have to retype their prompt.
+                  if (!showImageGen) {
+                    // chat → image: carry chat draft into image prompt
+                    if (input.trim() && !imagePrompt.trim()) {
+                      setImagePrompt(input)
+                      setInput('')
+                    }
+                  } else {
+                    // image → chat: carry image draft into chat input
+                    if (imagePrompt.trim() && !input.trim()) {
+                      setInput(imagePrompt)
+                      setImagePrompt('')
+                    }
+                  }
+                  setShowImageGen(prev => !prev)
+                }}
                 title={showImageGen ? 'Switch to chat' : 'Generate an image'}
                 className={`flex-shrink-0 p-2.5 rounded-xl border transition-colors ${
                   showImageGen

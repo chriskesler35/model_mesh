@@ -378,11 +378,108 @@ def _inject_prompt_into_workflow(workflow: dict, prompt: str) -> dict:
     return workflow
 
 
+# Friendly labels for common ComfyUI node types — used in progress messages
+_NODE_LABELS = {
+    "CheckpointLoaderSimple": "Loading checkpoint",
+    "UNETLoader": "Loading UNET model",
+    "DualCLIPLoader": "Loading CLIP models",
+    "CLIPLoader": "Loading CLIP",
+    "VAELoader": "Loading VAE",
+    "LoraLoader": "Applying LoRA",
+    "LoraLoaderModelOnly": "Applying LoRA",
+    "CLIPTextEncode": "Encoding prompt",
+    "EmptyLatentImage": "Preparing canvas",
+    "EmptySD3LatentImage": "Preparing canvas",
+    "KSampler": "Sampling",
+    "KSamplerAdvanced": "Sampling",
+    "SamplerCustom": "Sampling",
+    "VAEDecode": "Decoding image",
+    "SaveImage": "Saving image",
+    "PreviewImage": "Finalizing preview",
+    "UnetLoaderGGUF": "Loading GGUF model",
+}
+
+
+def _friendly_node_label(class_type: str) -> str:
+    """Return a human-friendly label for a ComfyUI node class."""
+    if class_type in _NODE_LABELS:
+        return _NODE_LABELS[class_type]
+    # Fall back to a prettified class name
+    return class_type.replace("_", " ")
+
+
+async def _stream_comfyui_progress(
+    comfyui_url: str,
+    prompt_id: str,
+    workflow: dict,
+    progress_cb,
+    stop_event: "asyncio.Event",
+):
+    """Subscribe to ComfyUI's WebSocket and forward progress updates.
+
+    ComfyUI emits events:
+      - executing {node, prompt_id}         → a node is starting
+      - progress  {value, max, node}        → sampler step progress
+      - executed  {node, output, prompt_id} → node finished
+    """
+    import websockets  # pyright: ignore
+    ws_url = comfyui_url.replace("http://", "ws://").replace("https://", "wss://").rstrip("/") + "/ws"
+    try:
+        async with websockets.connect(ws_url, ping_interval=20) as ws:
+            while not stop_event.is_set():
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                except Exception:
+                    break
+                if not isinstance(raw, str):
+                    continue  # binary preview frames — ignore
+                try:
+                    msg = json.loads(raw)
+                except Exception:
+                    continue
+                msg_type = msg.get("type")
+                data = msg.get("data", {})
+                if data.get("prompt_id") and data.get("prompt_id") != prompt_id:
+                    continue  # not our job
+
+                if msg_type == "executing":
+                    node_id = data.get("node")
+                    if node_id is None:
+                        continue  # execution finished
+                    node = workflow.get(str(node_id), {})
+                    label = _friendly_node_label(node.get("class_type", ""))
+                    try:
+                        await progress_cb(f"{label}…", None)
+                    except Exception:
+                        pass
+                elif msg_type == "progress":
+                    val = data.get("value", 0)
+                    mx = data.get("max", 1) or 1
+                    percent = int((val / mx) * 100) if mx else 0
+                    try:
+                        await progress_cb(f"Sampling step {val}/{mx}", percent)
+                    except Exception:
+                        pass
+                elif msg_type == "execution_success":
+                    try:
+                        await progress_cb("Finalizing image…", 100)
+                    except Exception:
+                        pass
+                    break
+                elif msg_type == "execution_error":
+                    break
+    except Exception as e:
+        logger.debug(f"ComfyUI WS stream ended: {e}")
+
+
 async def generate_with_comfyui(
     prompt: str,
     comfyui_url: str,
     workflow_id: str = None,
     comfyui_dir: str = "",
+    progress_cb=None,  # async callable: progress_cb(message: str, percent: int)
     # Legacy params kept for backward compat with callers — IGNORED for ComfyUI.
     # Workflow is treated as-saved: checkpoint, LoRA, size, negative prompt,
     # sampler, steps all come from the workflow JSON itself.
@@ -472,13 +569,21 @@ async def generate_with_comfyui(
             
             result = queue_response.json()
             prompt_id = result.get("prompt_id")
-            
+
             if not prompt_id:
                 raise HTTPException(
                     status_code=500,
                     detail="ComfyUI did not return a prompt ID"
                 )
-            
+
+            # Start WebSocket listener for live progress (if callback provided)
+            ws_stop_event = asyncio.Event()
+            ws_task = None
+            if progress_cb is not None:
+                ws_task = asyncio.create_task(
+                    _stream_comfyui_progress(comfyui_url, prompt_id, workflow, progress_cb, ws_stop_event)
+                )
+
             # Poll for completion — 10 minutes max (model loading + generation on RTX 3060)
             max_poll = 600
             for attempt in range(max_poll):
@@ -502,6 +607,13 @@ async def generate_with_comfyui(
                             msgs = status_info.get("messages", [])
                             err_detail = str(msgs) if msgs else "unknown error"
                             logger.error(f"ComfyUI execution failed: {err_detail[:300]}")
+                            # Stop the WS streamer before raising
+                            ws_stop_event.set()
+                            if ws_task:
+                                try:
+                                    await asyncio.wait_for(ws_task, timeout=1.0)
+                                except Exception:
+                                    pass
                             raise HTTPException(status_code=500, detail=f"ComfyUI execution error: {err_detail[:300]}")
 
                         outputs = entry.get("outputs", {})
@@ -526,11 +638,25 @@ async def generate_with_comfyui(
                                         image_bytes = img_response.content
                                         elapsed = attempt + 1
                                         logger.info(f"ComfyUI generation complete in {elapsed}s, image: {filename}")
+                                        # Stop the WS streamer before returning
+                                        ws_stop_event.set()
+                                        if ws_task:
+                                            try:
+                                                await asyncio.wait_for(ws_task, timeout=1.0)
+                                            except Exception:
+                                                pass
                                         return {
                                             "base64": base64.b64encode(image_bytes).decode('utf-8'),
                                             "revised_prompt": prompt
                                         }
-            
+
+            # Timed out — stop the WS streamer
+            ws_stop_event.set()
+            if ws_task:
+                try:
+                    await asyncio.wait_for(ws_task, timeout=1.0)
+                except Exception:
+                    pass
             raise HTTPException(
                 status_code=504,
                 detail=f"ComfyUI generation timed out after {max_poll // 60} minutes"

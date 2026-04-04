@@ -104,12 +104,33 @@ async def _run_image_gen(task_id: str, params: dict):
                     task.user_message = f"Generating with ComfyUI ({workflow_id or 'sdxl-standard'})…"
                     task.progress = 40
                     await db.commit()
+
+                    # Throttle DB writes so we don't commit on every WS event
+                    _last_update = {"ts": 0.0}
+
+                    async def _report_progress(message: str, percent):
+                        """Update task.user_message + progress from ComfyUI WS events."""
+                        import time as _t
+                        now = _t.monotonic()
+                        if now - _last_update["ts"] < 0.4:
+                            return  # throttle: at most ~2.5 updates/sec
+                        _last_update["ts"] = now
+                        try:
+                            task.user_message = f"ComfyUI: {message}"
+                            if percent is not None:
+                                # Map 0-100 into our 40-90 task progress band
+                                task.progress = 40 + int(percent * 0.5)
+                            await db.commit()
+                        except Exception:
+                            pass  # non-fatal
+
                     try:
                         result = await generate_with_comfyui(
                             prompt=prompt,
                             comfyui_url=comfyui_url,
                             workflow_id=workflow_id,
                             comfyui_dir=comfyui_dir,
+                            progress_cb=_report_progress,
                         )
                     except Exception as comfy_err:
                         err_detail = str(comfy_err)
