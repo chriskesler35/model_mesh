@@ -1093,10 +1093,11 @@ async def list_images(
 
 
 class ImageVariationRequest(BaseModel):
-    size: Optional[str] = None   # If None, use original size
-    format: Optional[str] = None  # If None, use original format
-    model: Optional[str] = None   # "gemini-imagen" | "comfyui-local" — if None, use original's model
-    prompt: Optional[str] = None  # Override prompt (for guided variations)
+    size: Optional[str] = None      # If None, use original size
+    format: Optional[str] = None    # If None, use original format
+    model: Optional[str] = None     # "gemini-imagen" | "comfyui-local" — if None, use original's model
+    prompt: Optional[str] = None    # Override prompt (for guided variations)
+    workflow_id: Optional[str] = None  # ComfyUI workflow to use for img2img (defaults to "sdxl-img2img")
 
 
 @router.post("/{image_id}/variations", response_model=ImageListResponse)
@@ -1156,9 +1157,10 @@ async def generate_variation(
             result = await _gemini_image_edit(source_b64, source_mime, variation_prompt, api_key)
 
         elif model == "comfyui-local":
-            # ComfyUI img2img — uploads source image and runs sdxl-img2img workflow
+            # ComfyUI img2img — uploads source image and runs the chosen img2img workflow
             comfyui_url = await get_setting("comfyui_url", db)
             comfyui_dir = await get_setting("comfyui_dir", db)
+            chosen_workflow = (request.workflow_id if request and request.workflow_id else None) or "sdxl-img2img"
             try:
                 comfyui_available = await ensure_comfyui(comfyui_url)
                 if not comfyui_available:
@@ -1168,6 +1170,7 @@ async def generate_variation(
                     prompt=prompt or "high quality variation",
                     comfyui_url=comfyui_url,
                     comfyui_dir=comfyui_dir,
+                    workflow_id=chosen_workflow,
                 )
             except Exception as comfy_err:
                 logger.warning(f"ComfyUI img2img failed, falling back to Gemini: {comfy_err}")

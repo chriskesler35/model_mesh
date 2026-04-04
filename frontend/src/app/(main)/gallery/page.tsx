@@ -26,6 +26,14 @@ interface ImageModel {
   description: string
 }
 
+interface Workflow {
+  id: string
+  name: string
+  description?: string
+  category?: string
+  default_checkpoint?: string
+}
+
 const PAGE_SIZE = 50
 
 export default function GalleryPage() {
@@ -43,6 +51,9 @@ export default function GalleryPage() {
   // Variation model selection (applies to all variation buttons)
   const [availableModels, setAvailableModels] = useState<ImageModel[]>([])
   const [variationModel, setVariationModel] = useState<string>('gemini-imagen')
+  // ComfyUI img2img workflow selection (only relevant when variationModel === "comfyui-local")
+  const [img2imgWorkflows, setImg2imgWorkflows] = useState<Workflow[]>([])
+  const [variationWorkflow, setVariationWorkflow] = useState<string>('sdxl-img2img')
 
   // Moved to component scope so all handlers can call it
   const fetchImages = useCallback(async (pageNum: number = 0) => {
@@ -81,6 +92,29 @@ export default function GalleryPage() {
         // Default to first available model
         const firstAvailable = models.find(m => m.available)
         if (firstAvailable) setVariationModel(firstAvailable.id)
+      })
+      .catch(() => {})
+  }, [])
+
+  // Fetch img2img workflows (used when user picks ComfyUI for variation)
+  useEffect(() => {
+    fetch(`${API_BASE}/v1/workflows`, {
+      headers: { 'Authorization': `Bearer ${API_KEY}` }
+    })
+      .then(r => r.ok ? r.json() : { data: [] })
+      .then(d => {
+        const all: Workflow[] = d.data || []
+        // Filter to img2img workflows. Accept either an explicit category or
+        // workflow id/name containing img2img — users may name custom ones differently.
+        const imgWorkflows = all.filter(w =>
+          w.category === 'img2img' ||
+          w.id.toLowerCase().includes('img2img') ||
+          (w.name || '').toLowerCase().includes('img2img')
+        )
+        setImg2imgWorkflows(imgWorkflows)
+        // Default to sdxl-img2img if present, else the first img2img workflow
+        const preferred = imgWorkflows.find(w => w.id === 'sdxl-img2img') || imgWorkflows[0]
+        if (preferred) setVariationWorkflow(preferred.id)
       })
       .catch(() => {})
   }, [])
@@ -179,10 +213,16 @@ export default function GalleryPage() {
   const generateVariation = async (imageId: string, modelId?: string) => {
     setGenerating(imageId)
     try {
+      const chosenModel = modelId || variationModel
+      const body: any = { model: chosenModel }
+      // Include workflow_id only when using ComfyUI (Gemini ignores it)
+      if (chosenModel === 'comfyui-local' && variationWorkflow) {
+        body.workflow_id = variationWorkflow
+      }
       const response = await fetch(`${API_BASE}/v1/images/${imageId}/variations`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: modelId || variationModel })
+        body: JSON.stringify(body)
       })
       const data = await response.json()
       if (!response.ok) throw new Error(data.detail || 'Failed to generate variation')
@@ -250,6 +290,24 @@ export default function GalleryPage() {
                   </option>
                 ))}
               </select>
+              {variationModel === 'comfyui-local' && (
+                img2imgWorkflows.length > 0 ? (
+                  <select
+                    value={variationWorkflow}
+                    onChange={(e) => setVariationWorkflow(e.target.value)}
+                    className="px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white rounded-md focus:outline-none focus:ring-1 focus:ring-orange-400"
+                    title="ComfyUI img2img workflow"
+                  >
+                    {img2imgWorkflows.map(w => (
+                      <option key={w.id} value={w.id}>{w.name || w.id}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="text-[10px] text-amber-600 dark:text-amber-400" title="No img2img workflows found in data/workflows/">
+                    no img2img workflows
+                  </span>
+                )
+              )}
             </div>
           )}
           {totalPages > 1 && (
