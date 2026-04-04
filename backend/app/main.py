@@ -73,6 +73,7 @@ from app.routes.remote import router as remote_router
 from app.routes.telegram_bot import router as telegram_router
 from app.routes.identity import router as identity_router
 from app.routes.workbench import router as workbench_router
+from app.routes.pipelines import router as pipelines_router
 from app.routes.projects import router as projects_router
 from app.routes.methods import router as methods_router
 from app.routes.sandbox import router as sandbox_router
@@ -188,6 +189,7 @@ app.include_router(remote_router)
 app.include_router(telegram_router)
 app.include_router(identity_router)
 app.include_router(workbench_router)
+app.include_router(pipelines_router)
 app.include_router(projects_router)
 app.include_router(methods_router)
 app.include_router(sandbox_router)
