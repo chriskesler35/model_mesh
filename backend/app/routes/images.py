@@ -18,7 +18,7 @@ from app.models import Model
 from app.middleware.auth import verify_api_key
 from app.config import settings
 from app.services.app_settings_helper import get_setting
-from app.routes.workflows import find_workflow_path, _convert_editor_to_api
+from app.routes.workflows import find_workflow_path, _convert_editor_to_api, _fetch_object_info_schema
 from pydantic import BaseModel
 from typing import Optional, List
 import os
@@ -318,154 +318,135 @@ def _hydrate_workflow(workflow_template: dict, variables: dict) -> dict:
     return hydrated
 
 
+def _inject_prompt_into_workflow(workflow: dict, prompt: str) -> dict:
+    """Inject the user's prompt into a workflow's primary positive CLIPTextEncode node.
+
+    Strategy — we trust the workflow completely for everything else (checkpoint,
+    LoRA, size, negative prompt, sampler, etc.) and ONLY replace the text in:
+      1. Any CLIPTextEncode node containing the literal string "{{prompt}}"
+      2. OR: the positive conditioning input to the KSampler if no placeholder found
+    """
+    # First pass: find {{prompt}} placeholder and replace it
+    raw = json.dumps(workflow)
+    if "{{prompt}}" in raw:
+        safe_prompt = json.dumps(prompt)[1:-1]  # JSON-escape the prompt string
+        raw = raw.replace("{{prompt}}", safe_prompt)
+        workflow = json.loads(raw)
+        # Also randomize any {{seed}} = 0 patterns that may still be strings
+        for node in workflow.values():
+            if isinstance(node, dict):
+                inputs = node.get("inputs", {})
+                if "seed" in inputs and (inputs["seed"] == 0 or inputs["seed"] == "0"):
+                    inputs["seed"] = random.randint(1, 2**32 - 1)
+        return workflow
+
+    # Second pass: no placeholder — find the positive-conditioning text node.
+    # KSampler/KSamplerAdvanced has a "positive" input pointing to a CLIPTextEncode.
+    # We follow that link and replace its "text" field.
+    positive_text_node_id = None
+    for nid, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        if node.get("class_type") in ("KSampler", "KSamplerAdvanced", "SamplerCustom", "SamplerCustomAdvanced"):
+            positive_ref = node.get("inputs", {}).get("positive")
+            if isinstance(positive_ref, list) and len(positive_ref) == 2:
+                positive_text_node_id = str(positive_ref[0])
+                break
+
+    if positive_text_node_id and positive_text_node_id in workflow:
+        target = workflow[positive_text_node_id]
+        if isinstance(target, dict) and "inputs" in target and "text" in target["inputs"]:
+            target["inputs"]["text"] = prompt
+            logger.info(f"Injected prompt into positive text node {positive_text_node_id}")
+        else:
+            logger.warning(f"Positive node {positive_text_node_id} has no 'text' input")
+    else:
+        # Last resort: replace text in the first CLIPTextEncode node found
+        for nid, node in workflow.items():
+            if isinstance(node, dict) and node.get("class_type") == "CLIPTextEncode":
+                node.get("inputs", {})["text"] = prompt
+                logger.info(f"Injected prompt into first CLIPTextEncode node {nid} (fallback)")
+                break
+
+    # Randomize seed if it's 0
+    for node in workflow.values():
+        if isinstance(node, dict):
+            inputs = node.get("inputs", {})
+            if "seed" in inputs and (inputs["seed"] == 0 or inputs["seed"] == "0"):
+                inputs["seed"] = random.randint(1, 2**32 - 1)
+
+    return workflow
+
+
 async def generate_with_comfyui(
     prompt: str,
     comfyui_url: str,
+    workflow_id: str = None,
+    comfyui_dir: str = "",
+    # Legacy params kept for backward compat with callers — IGNORED for ComfyUI.
+    # Workflow is treated as-saved: checkpoint, LoRA, size, negative prompt,
+    # sampler, steps all come from the workflow JSON itself.
     size: str = "1024x1024",
     negative_prompt: str = None,
-    workflow_id: str = None,
     checkpoint: str = None,
-    comfyui_dir: str = "",
     lora: str = None,
     lora_strength: float = 1.0,
 ) -> dict:
-    """Generate image using ComfyUI local installation.
+    """Generate an image using ComfyUI.
 
-    If workflow_id is provided, loads the template from data/workflows/ or the
-    ComfyUI installation directories. Otherwise falls back to sdxl-standard
-    if it exists, or a minimal hardcoded SDXL workflow.
+    User picks a pre-saved workflow + types a prompt. Everything else
+    (checkpoint, LoRA, size, negative prompt, sampler, steps) comes from the
+    workflow as it was saved in ComfyUI. To change those, edit the workflow
+    in ComfyUI's editor and save it.
     """
-
-    width, height = map(int, size.split('x'))
-
-    logger.info(f"ComfyUI gen: workflow={workflow_id}, checkpoint={checkpoint}, lora={lora}, size={size}")
-
-    # Try to load a workflow template
     effective_workflow_id = workflow_id or "sdxl-standard"
-    template_path = find_workflow_path(effective_workflow_id, comfyui_dir)
-    effective_checkpoint = checkpoint
+    logger.info(f"ComfyUI gen: workflow={effective_workflow_id}, prompt={prompt[:60]}…")
 
-    if template_path:
-        try:
-            raw_text = template_path.read_text(encoding="utf-8-sig")  # handle BOM
-            template_data = json.loads(raw_text)
-            if not effective_checkpoint:
-                effective_checkpoint = template_data.get("default_checkpoint", "")
-            # Extract the API-format workflow — our templates store it under "workflow"
-            workflow_json = template_data.get("workflow", {})
-            is_api_format = workflow_json and any(
-                isinstance(v, dict) and "class_type" in v for v in workflow_json.values()
+    # Load the workflow file
+    template_path = find_workflow_path(effective_workflow_id, comfyui_dir)
+    if not template_path:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Workflow '{effective_workflow_id}' not found. Save it in ComfyUI first or check the workflow list.",
+        )
+
+    try:
+        raw_text = template_path.read_text(encoding="utf-8-sig")  # handle BOM
+        template_data = json.loads(raw_text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load workflow: {e}")
+
+    # Extract the API-format workflow nodes
+    workflow_json = template_data.get("workflow", template_data)
+    is_api_format = workflow_json and isinstance(workflow_json, dict) and any(
+        isinstance(v, dict) and "class_type" in v for v in workflow_json.values()
+    )
+
+    # If it's ComfyUI editor format (nodes/links arrays), convert it.
+    # Fetch ComfyUI's own node schema so the converter knows which widget
+    # values map to which input names for each node class.
+    if not is_api_format and isinstance(template_data, dict) and "nodes" in template_data:
+        logger.info(f"Converting editor-format workflow: {template_path.name}")
+        node_schema = await _fetch_object_info_schema(comfyui_url)
+        workflow_json = _convert_editor_to_api(template_data, node_schema=node_schema)
+        if not workflow_json:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Workflow '{effective_workflow_id}' has no output nodes. "
+                       f"Add a SaveImage/PreviewImage node in ComfyUI and save the workflow.",
             )
 
-            if not is_api_format and "nodes" in template_data:
-                # ComfyUI editor-format file — convert to API format
-                logger.info(f"Converting editor-format workflow: {template_path.name}")
-                workflow_json = _convert_editor_to_api(template_data)
-                if workflow_json:
-                    is_api_format = True
-                else:
-                    logger.warning(f"Failed to convert {template_path.name} — no output nodes found")
-
-            if not is_api_format:
-                logger.warning(f"Template {template_path.name} has no usable workflow, using fallback")
-                workflow = None
-            else:
-                logger.info(f"ComfyUI using template: {template_path.name}, checkpoint: {effective_checkpoint}")
-                workflow = _hydrate_workflow(workflow_json, {
-                    "prompt": prompt,
-                    "negative_prompt": negative_prompt or "",
-                    "width": str(width),
-                    "height": str(height),
-                    "checkpoint": effective_checkpoint,
-                    "lora_name": lora or "",
-                    "lora_strength": str(lora_strength),
-                })
-        except Exception as e:
-            logger.warning(f"Failed to load workflow template {effective_workflow_id}: {e}, using fallback")
-            workflow = None
-    else:
-        logger.warning(f"Workflow template not found: {effective_workflow_id}, using fallback")
-        workflow = None
-
-    # Fallback: hardcoded minimal SDXL workflow
-    if workflow is None:
-        seed = random.randint(1, 2**32 - 1)
-        ckpt_node = "4"
-        model_source = [ckpt_node, 0]  # model output
-        clip_source = [ckpt_node, 1]   # clip output
-
-        workflow = {
-            "3": {
-                "class_type": "KSampler",
-                "inputs": {
-                    "cfg": 7.5, "denoise": 1.0,
-                    "latent_image": ["5", 0], "model": model_source,
-                    "negative": ["7", 0], "positive": ["6", 0],
-                    "sampler_name": "euler", "scheduler": "normal",
-                    "steps": 20, "seed": seed,
-                }
-            },
-            ckpt_node: {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": effective_checkpoint or "sdxl_base.safetensors"}},
-            "5": {"class_type": "EmptyLatentImage", "inputs": {"batch_size": 1, "height": height, "width": width}},
-            "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": clip_source, "text": prompt}},
-            "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": clip_source, "text": negative_prompt or ""}},
-            "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": [ckpt_node, 2]}},
-            "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "modelmesh", "images": ["8", 0]}},
-        }
-
-        # Inject LoRA into the fallback workflow
-        if lora:
-            lora_node_id = "10"
-            workflow[lora_node_id] = {
-                "class_type": "LoraLoader",
-                "inputs": {
-                    "lora_name": lora,
-                    "strength_model": lora_strength,
-                    "strength_clip": lora_strength,
-                    "model": [ckpt_node, 0],
-                    "clip": [ckpt_node, 1],
-                }
-            }
-            # Rewire: KSampler + CLIP encoders use LoRA outputs instead of checkpoint
-            workflow["3"]["inputs"]["model"] = [lora_node_id, 0]
-            workflow["6"]["inputs"]["clip"] = [lora_node_id, 1]
-            workflow["7"]["inputs"]["clip"] = [lora_node_id, 1]
-
-    # If LoRA specified and workflow from template doesn't have a LoraLoader, inject one
-    if lora and workflow is not None:
-        has_lora = any(
-            n.get("class_type") == "LoraLoader" for n in workflow.values() if isinstance(n, dict)
+    if not workflow_json or not any(
+        isinstance(v, dict) and "class_type" in v for v in workflow_json.values()
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Workflow '{effective_workflow_id}' is not valid. "
+                   f"Save it from ComfyUI's editor to generate a valid API-format file.",
         )
-        if not has_lora:
-            # Find the CheckpointLoaderSimple node and inject LoRA after it
-            ckpt_id = None
-            for nid, node in workflow.items():
-                if isinstance(node, dict) and node.get("class_type") == "CheckpointLoaderSimple":
-                    ckpt_id = nid
-                    break
-            if ckpt_id:
-                lora_id = str(max(int(k) for k in workflow.keys() if k.isdigit()) + 1)
-                workflow[lora_id] = {
-                    "class_type": "LoraLoader",
-                    "inputs": {
-                        "lora_name": lora,
-                        "strength_model": lora_strength,
-                        "strength_clip": lora_strength,
-                        "model": [ckpt_id, 0],
-                        "clip": [ckpt_id, 1],
-                    }
-                }
-                # Rewire nodes that reference the checkpoint's model/clip outputs
-                for nid, node in workflow.items():
-                    if nid == lora_id or not isinstance(node, dict):
-                        continue
-                    inputs = node.get("inputs", {})
-                    for key, val in inputs.items():
-                        if isinstance(val, list) and len(val) == 2 and val[0] == ckpt_id:
-                            if val[1] == 0:  # model output
-                                inputs[key] = [lora_id, 0]
-                            elif val[1] == 1:  # clip output
-                                inputs[key] = [lora_id, 1]
+
+    # Inject ONLY the prompt — everything else is trusted from the workflow
+    workflow = _inject_prompt_into_workflow(workflow_json, prompt)
 
     try:
         async with httpx.AsyncClient(timeout=600.0) as client:
@@ -611,15 +592,10 @@ async def generate_image(
                     if not comfyui_available:
                         raise Exception("ComfyUI not reachable after auto-launch attempt")
                     result = await generate_with_comfyui(
-                        request.prompt,
-                        comfyui_url,
-                        request.size,
-                        request.negative_prompt,
-                        request.workflow_id,
-                        request.checkpoint,
-                        comfyui_dir,
-                        request.lora,
-                        request.lora_strength,
+                        prompt=request.prompt,
+                        comfyui_url=comfyui_url,
+                        workflow_id=request.workflow_id,
+                        comfyui_dir=comfyui_dir,
                     )
                 except Exception as comfy_err:
                     comfyui_failed = True
@@ -818,7 +794,12 @@ async def generate_variation(
                 comfyui_available = await ensure_comfyui(comfyui_url)
                 if not comfyui_available:
                     raise Exception("ComfyUI not reachable")
-                result = await generate_with_comfyui(prompt, comfyui_url, size, negative_prompt, comfyui_dir=comfyui_dir)
+                result = await generate_with_comfyui(
+                    prompt=prompt,
+                    comfyui_url=comfyui_url,
+                    workflow_id=original.get("workflow_id"),
+                    comfyui_dir=comfyui_dir,
+                )
             except Exception as comfy_err:
                 # ComfyUI failed (unreachable, timed out, errored) — fall back to Gemini
                 logger.warning(f"ComfyUI failed for variation, falling back to Gemini: {comfy_err}")
@@ -997,11 +978,11 @@ async def edit_image(req: ImageEditRequest, db: AsyncSession = Depends(get_db)):
 
     # Determine which model originally created this image
     original_model = None
-    original_negative_prompt = None
+    original_workflow_id = None
     if req.source_image_id and req.source_image_id in IMAGE_STORAGE:
         stored = IMAGE_STORAGE[req.source_image_id]
         original_model = stored.get("model")
-        original_negative_prompt = stored.get("negative_prompt")
+        original_workflow_id = stored.get("workflow_id")
 
     result = None
     used_model = original_model
@@ -1014,7 +995,12 @@ async def edit_image(req: ImageEditRequest, db: AsyncSession = Depends(get_db)):
             comfyui_available = await ensure_comfyui(comfyui_url)
             if not comfyui_available:
                 raise Exception("ComfyUI not reachable")
-            result = await generate_with_comfyui(req.prompt, comfyui_url, req.size, original_negative_prompt, comfyui_dir=comfyui_dir)
+            result = await generate_with_comfyui(
+                prompt=req.prompt,
+                comfyui_url=comfyui_url,
+                workflow_id=original_workflow_id,
+                comfyui_dir=comfyui_dir,
+            )
         except Exception as comfy_err:
             logger.warning(f"ComfyUI failed for edit, falling back to Gemini: {comfy_err}")
             used_model = None  # will fall through to Gemini below
@@ -1042,7 +1028,7 @@ async def edit_image(req: ImageEditRequest, db: AsyncSession = Depends(get_db)):
         "format": fmt,
         "size": req.size,
         "model": used_model,
-        "negative_prompt": original_negative_prompt,
+        "workflow_id": original_workflow_id,
         "source_image_id": req.source_image_id,
     })
 

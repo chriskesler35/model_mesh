@@ -979,6 +979,8 @@ export default function ChatPage() {
   const [activeModelName, setActiveModelName] = useState<string>('')
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleValue, setTitleValue] = useState('')
+  const [shareModal, setShareModal] = useState<{ url: string; expires_at: string | null } | null>(null)
+  const [sharing, setSharing] = useState(false)
   const [loadingMessages, setLoadingMessages] = useState(false)
   const [userExists, setUserExists] = useState(true)   // assume true until checked
   const [aiName, setAiName] = useState('Aria')
@@ -1128,18 +1130,11 @@ export default function ChatPage() {
   const [imagePrompt, setImagePrompt] = useState('')
   const [generatingImage, setGeneratingImage] = useState(false)
   const [imageProvider, setImageProvider] = useState<'gemini-imagen' | 'comfyui-local'>('gemini-imagen')
-  const [imageNegPrompt, setImageNegPrompt] = useState('')
 
-  // Workflow / checkpoint state for ComfyUI
-  const [workflows, setWorkflows] = useState<Array<{id: string, name: string, description: string, category: string, default_checkpoint: string, default_size: string, sizes: string[], compatible_checkpoints: string[]}>>([])
+  // Workflow list for ComfyUI — user picks one saved workflow, nothing else.
+  // To change checkpoint/LoRA/size/negative prompt, edit and save the workflow in ComfyUI.
+  const [workflows, setWorkflows] = useState<Array<{id: string, name: string, description: string, category: string}>>([])
   const [selectedWorkflowId, setSelectedWorkflowId] = useState('sdxl-standard')
-  const [comfyCheckpoints, setComfyCheckpoints] = useState<string[]>([])
-  const [comfyUnetModels, setComfyUnetModels] = useState<string[]>([])
-  const [selectedCheckpoint, setSelectedCheckpoint] = useState('')
-  const [selectedSize, setSelectedSize] = useState('1024x1024')
-  const [comfyLoras, setComfyLoras] = useState<string[]>([])
-  const [selectedLora, setSelectedLora] = useState('')
-  const [loraStrength, setLoraStrength] = useState(1.0)
   const [comfyStatus, setComfyStatus] = useState<'online' | 'offline' | 'checking'>('checking')
 
   // Track pending image tasks: taskId → assistantMessageId
@@ -1149,41 +1144,26 @@ export default function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const searchTimer = useRef<ReturnType<typeof setTimeout>>()
 
-  // ── Fetch workflows + checkpoints when image gen opens ───────────────────
+  // ── Fetch available workflows when image gen opens ──────────────────────
   useEffect(() => {
     if (!showImageGen) return
     const load = async () => {
       try {
-        const [wfRes, ckRes, stRes, loraRes] = await Promise.all([
+        const [wfRes, stRes] = await Promise.all([
           fetch(`${API_BASE}/v1/workflows`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
-          fetch(`${API_BASE}/v1/comfyui/checkpoints`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ checkpoints: [], unet_models: [], status: 'offline' })),
           fetch(`${API_BASE}/v1/comfyui/status`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ status: 'offline' })),
-          fetch(`${API_BASE}/v1/comfyui/loras`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ loras: [], status: 'offline' })),
         ])
         setWorkflows(wfRes.data || [])
-        setComfyCheckpoints(ckRes.checkpoints || [])
-        setComfyUnetModels(ckRes.unet_models || [])
-        setComfyLoras(loraRes.loras || [])
         setComfyStatus(stRes.status === 'online' ? 'online' : 'offline')
-        // Set defaults from first workflow if available
-        if (wfRes.data?.length > 0) {
-          const wf = wfRes.data.find((w: any) => w.id === selectedWorkflowId) || wfRes.data[0]
-          if (!selectedCheckpoint) setSelectedCheckpoint(wf.default_checkpoint || '')
-          setSelectedSize(wf.default_size || '1024x1024')
+        // Default to the first workflow if current selection isn't in the list
+        if (wfRes.data?.length > 0 && !wfRes.data.find((w: any) => w.id === selectedWorkflowId)) {
+          setSelectedWorkflowId(wfRes.data[0].id)
         }
       } catch { /* silent */ }
     }
     load()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showImageGen])
-
-  // When workflow changes, update defaults
-  useEffect(() => {
-    const wf = workflows.find(w => w.id === selectedWorkflowId)
-    if (wf) {
-      setSelectedCheckpoint(wf.default_checkpoint || '')
-      setSelectedSize(wf.default_size || '1024x1024')
-    }
-  }, [selectedWorkflowId, workflows])
 
   // ── Poll for image task completion → inject inline ────────────────────────
   // Helper to handle a completed image task
@@ -1566,15 +1546,11 @@ export default function ChatPage() {
 
     const provider = imageProvider
     const wfId = provider === 'comfyui-local' ? selectedWorkflowId : undefined
-    const ckpt = provider === 'comfyui-local' ? selectedCheckpoint : undefined
-    const size = provider === 'comfyui-local' ? selectedSize : '1024x1024'
-    const negPrompt = provider === 'comfyui-local' ? imageNegPrompt : undefined
-    const loraName = provider === 'comfyui-local' && selectedLora ? selectedLora : undefined
-    const loraStr = provider === 'comfyui-local' && selectedLora ? loraStrength : undefined
     const wfName = workflows.find(w => w.id === wfId)?.name
+    // Gemini-only size. For ComfyUI, size comes from the workflow.
+    const size = provider === 'comfyui-local' ? undefined : '1024x1024'
 
     setImagePrompt('')
-    setImageNegPrompt('')
 
     // Add user + placeholder messages to local state
     const userMsg: Message = {
@@ -1591,7 +1567,7 @@ export default function ChatPage() {
       streaming: true,
       created_at: new Date().toISOString(),
       image_meta: provider === 'comfyui-local'
-        ? { provider: 'ComfyUI', workflow: wfName || wfId || '', checkpoint: ckpt || '' }
+        ? { provider: 'ComfyUI', workflow: wfName || wfId || '', checkpoint: '' }
         : { provider: 'Gemini', workflow: '', checkpoint: '' },
     }
     setMessages(prev => [...prev, userMsg, assistantMsg])
@@ -1677,14 +1653,12 @@ export default function ChatPage() {
       const taskPayload: any = {
         prompt,
         model: provider,
-        size,
         format: 'png',
       }
+      // ComfyUI: size/checkpoint/LoRA/negative prompt come from the saved workflow.
+      // Gemini: we set size here (workflow has no equivalent concept).
+      if (size) taskPayload.size = size
       if (wfId) taskPayload.workflow_id = wfId
-      if (ckpt) taskPayload.checkpoint = ckpt
-      if (negPrompt) taskPayload.negative_prompt = negPrompt
-      if (loraName) taskPayload.lora = loraName
-      if (loraStr !== undefined) taskPayload.lora_strength = loraStr
 
       const taskId = await submitTask('image_gen', taskPayload, convId || undefined)
       // Map task → message so we can inject the image inline when done (use real DB ID)
@@ -1875,6 +1849,38 @@ export default function ChatPage() {
             {activeConv?.keep_forever && (
               <span title="Kept forever" className="text-xs">♾️</span>
             )}
+            {activeConvId && (
+              <button
+                title="Share this conversation"
+                disabled={sharing}
+                onClick={async () => {
+                  setSharing(true)
+                  try {
+                    const res = await fetch(`${API_BASE}/v1/shares`, {
+                      method: 'POST',
+                      headers: AUTH_HEADERS,
+                      body: JSON.stringify({
+                        resource_type: 'conversation',
+                        resource_id: activeConvId,
+                        access_level: 'view',
+                        expires_in_days: 7,
+                      }),
+                    })
+                    if (!res.ok) throw new Error('Failed to create share link')
+                    const share = await res.json()
+                    const fullUrl = `${window.location.origin}/share/${share.token}`
+                    setShareModal({ url: fullUrl, expires_at: share.expires_at })
+                  } catch (e: any) {
+                    addToast({ type: 'error', title: 'Share failed', message: e.message, autoClose: 4000 })
+                  } finally {
+                    setSharing(false)
+                  }
+                }}
+                className="text-xs p-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 hover:text-orange-600 transition-colors"
+              >
+                {sharing ? '…' : '🔗'}
+              </button>
+            )}
           </div>
         </div>
 
@@ -1987,83 +1993,23 @@ export default function ChatPage() {
 
                     {imageProvider === 'comfyui-local' && (
                       <>
-                        {/* Workflow */}
+                        {/* Workflow picker — only selection needed; everything
+                            else (checkpoint, LoRA, size, negative prompt) is
+                            baked into the saved workflow. Edit in ComfyUI to change. */}
                         <select
                           value={selectedWorkflowId}
                           onChange={e => setSelectedWorkflowId(e.target.value)}
-                          className="text-xs rounded-lg border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 py-1.5 pl-2 pr-6 focus:ring-purple-400 focus:border-purple-400"
+                          className="text-xs rounded-lg border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 py-1.5 pl-2 pr-6 focus:ring-purple-400 focus:border-purple-400 max-w-[240px]"
+                          title="Saved ComfyUI workflow (edit in ComfyUI to change settings)"
                         >
-                          {workflows.map(w => (
-                            <option key={w.id} value={w.id}>{w.name}</option>
-                          ))}
-                          {workflows.length === 0 && <option value="sdxl-standard">SDXL Standard</option>}
-                        </select>
-
-                        {/* Checkpoint */}
-                        <select
-                          value={selectedCheckpoint}
-                          onChange={e => setSelectedCheckpoint(e.target.value)}
-                          className="text-xs rounded-lg border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 py-1.5 pl-2 pr-6 focus:ring-purple-400 focus:border-purple-400 max-w-[200px]"
-                          title={selectedCheckpoint}
-                        >
-                          {(() => {
-                            const wf = workflows.find(w => w.id === selectedWorkflowId)
-                            const compatList = wf?.compatible_checkpoints || []
-                            // Merge compatible + all available from ComfyUI
-                            const allCkpts = Array.from(new Set([...compatList, ...comfyCheckpoints, ...comfyUnetModels]))
-                            if (allCkpts.length === 0 && selectedCheckpoint) {
-                              return <option value={selectedCheckpoint}>{selectedCheckpoint}</option>
-                            }
-                            return allCkpts.map(c => (
-                              <option key={c} value={c}>{c}</option>
+                          {workflows.length === 0 ? (
+                            <option value="sdxl-standard">SDXL Standard</option>
+                          ) : (
+                            workflows.map(w => (
+                              <option key={w.id} value={w.id}>{w.name}</option>
                             ))
-                          })()}
+                          )}
                         </select>
-
-                        {/* Size */}
-                        <select
-                          value={selectedSize}
-                          onChange={e => setSelectedSize(e.target.value)}
-                          className="text-xs rounded-lg border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 py-1.5 pl-2 pr-6 focus:ring-purple-400 focus:border-purple-400"
-                        >
-                          {(() => {
-                            const wf = workflows.find(w => w.id === selectedWorkflowId)
-                            const sizes = wf?.sizes || ['1024x1024']
-                            return sizes.map(s => (
-                              <option key={s} value={s}>{s}</option>
-                            ))
-                          })()}
-                        </select>
-
-                        {/* LoRA */}
-                        {comfyLoras.length > 0 && (
-                          <select
-                            value={selectedLora}
-                            onChange={e => setSelectedLora(e.target.value)}
-                            className="text-xs rounded-lg border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 py-1.5 pl-2 pr-6 focus:ring-purple-400 focus:border-purple-400 max-w-[180px]"
-                            title={selectedLora || 'No LoRA'}
-                          >
-                            <option value="">No LoRA</option>
-                            {comfyLoras.map(l => (
-                              <option key={l} value={l}>{l.replace(/\.[^.]+$/, '')}</option>
-                            ))}
-                          </select>
-                        )}
-
-                        {/* LoRA strength */}
-                        {selectedLora && (
-                          <div className="flex items-center gap-1">
-                            <input
-                              type="range"
-                              min="0" max="2" step="0.05"
-                              value={loraStrength}
-                              onChange={e => setLoraStrength(parseFloat(e.target.value))}
-                              className="w-16 h-1 accent-purple-500"
-                              title={`LoRA strength: ${loraStrength}`}
-                            />
-                            <span className="text-xs text-gray-400 w-7">{loraStrength.toFixed(1)}</span>
-                          </div>
-                        )}
 
                         {/* Status dot */}
                         <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${
@@ -2073,30 +2019,18 @@ export default function ChatPage() {
                     )}
                   </div>
 
-                  {/* Row 2: Prompt + negative prompt + generate button */}
+                  {/* Row 2: Prompt + generate button */}
                   <div className="flex gap-2 items-end">
-                    <div className="flex-1 flex flex-col gap-1.5">
-                      <input
-                        type="text"
-                        value={imagePrompt}
-                        onChange={e => setImagePrompt(e.target.value)}
-                        onKeyDown={e => e.key === 'Enter' && !e.shiftKey && generateImage()}
-                        placeholder="Describe the image you want to create..."
-                        disabled={generatingImage}
-                        autoFocus
-                        className="w-full rounded-xl border border-purple-200 dark:border-purple-700 dark:bg-gray-800 dark:text-white px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent disabled:opacity-50"
-                      />
-                      {imageProvider === 'comfyui-local' && (
-                        <input
-                          type="text"
-                          value={imageNegPrompt}
-                          onChange={e => setImageNegPrompt(e.target.value)}
-                          placeholder="Negative prompt (optional)"
-                          disabled={generatingImage}
-                          className="w-full rounded-lg border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 px-3 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-purple-300 focus:border-transparent disabled:opacity-50"
-                        />
-                      )}
-                    </div>
+                    <input
+                      type="text"
+                      value={imagePrompt}
+                      onChange={e => setImagePrompt(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && !e.shiftKey && generateImage()}
+                      placeholder="Describe the image you want to create..."
+                      disabled={generatingImage}
+                      autoFocus
+                      className="flex-1 rounded-xl border border-purple-200 dark:border-purple-700 dark:bg-gray-800 dark:text-white px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent disabled:opacity-50"
+                    />
                     <button
                       onClick={() => generateImage()}
                       disabled={generatingImage || !imagePrompt.trim()}
@@ -2151,6 +2085,46 @@ export default function ChatPage() {
           </div>
         </div>
       </div>
+
+      {/* Share link modal */}
+      {shareModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setShareModal(null)}>
+          <div className="w-full max-w-lg bg-white dark:bg-gray-900 rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="px-6 py-4 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
+              <h2 className="text-base font-semibold text-gray-900 dark:text-white">🔗 Share this conversation</h2>
+              <button onClick={() => setShareModal(null)} className="text-gray-400 hover:text-gray-600 p-1">✕</button>
+            </div>
+            <div className="px-6 py-5 space-y-3">
+              <p className="text-xs text-gray-500">
+                Anyone with this link can view this conversation (read-only).
+                {shareModal.expires_at && ` Expires ${new Date(shareModal.expires_at).toLocaleDateString()}.`}
+              </p>
+              <div className="flex items-center gap-2">
+                <input
+                  readOnly
+                  value={shareModal.url}
+                  onClick={e => (e.target as HTMLInputElement).select()}
+                  className="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-orange-400"
+                />
+                <button
+                  onClick={async () => {
+                    await navigator.clipboard.writeText(shareModal.url)
+                    addToast({ type: 'success', title: 'Copied!', message: 'Share link copied to clipboard', autoClose: 2000 })
+                  }}
+                  className="px-4 py-2 text-sm font-medium rounded-lg bg-orange-500 hover:bg-orange-600 text-white"
+                >
+                  Copy
+                </button>
+              </div>
+            </div>
+            <div className="px-6 py-3 border-t border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50 flex justify-end">
+              <button onClick={() => setShareModal(null)} className="px-4 py-1.5 text-sm font-medium rounded-lg border border-gray-300 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800">
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

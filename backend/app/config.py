@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     # Application
     modelmesh_api_key: str = "modelmesh_local_dev_key"
     ollama_base_url: str = "http://localhost:11434"
+
+    # JWT auth (multi-user collaboration)
+    jwt_secret: str = "change-me-in-production-this-is-not-secure"
+    jwt_algorithm: str = "HS256"
+    jwt_expiry_hours: int = 24 * 7  # 7-day tokens for LAN/Tailscale use
     
     # Memory
     memory_ttl_seconds: int = 86400  # 24 hours

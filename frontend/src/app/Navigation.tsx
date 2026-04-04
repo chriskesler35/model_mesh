@@ -55,6 +55,75 @@ function ThemeToggle({ collapsed }: { collapsed: boolean }) {
   )
 }
 
+interface CurrentUser {
+  id: string
+  username: string
+  display_name: string
+  role: string
+  auth_method: string
+}
+
+function UserMenu({ collapsed }: { collapsed: boolean }) {
+  const [user, setUser] = useState<CurrentUser | null>(null)
+
+  useEffect(() => {
+    // Try to read cached user from localStorage first
+    const cached = localStorage.getItem('devforge_user')
+    if (cached) {
+      try { setUser(JSON.parse(cached)) } catch {}
+    }
+    // Then verify with /v1/auth/me
+    const { getApiBase, getAuthToken } = require('@/lib/config')
+    fetch(`${getApiBase()}/v1/auth/me`, {
+      headers: { 'Authorization': `Bearer ${getAuthToken()}` }
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(u => { if (u) { setUser(u); localStorage.setItem('devforge_user', JSON.stringify(u)) } })
+      .catch(() => {})
+  }, [])
+
+  const logout = () => {
+    localStorage.removeItem('devforge_auth_token')
+    localStorage.removeItem('devforge_user')
+    window.location.href = '/login'
+  }
+
+  const goToLogin = () => { window.location.href = '/login' }
+
+  if (!user) return null
+
+  const isOwner = user.auth_method === 'master_key'
+  const initial = (user.display_name || user.username || '?').charAt(0).toUpperCase()
+
+  return (
+    <div
+      title={collapsed ? `${user.display_name} (${user.role})` : undefined}
+      className="flex items-center gap-2 w-full px-3 py-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+    >
+      <div className="w-6 h-6 rounded-full bg-gradient-to-br from-orange-400 to-red-500 flex items-center justify-center text-white font-bold text-xs flex-shrink-0">
+        {initial}
+      </div>
+      {!collapsed && (
+        <>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-medium text-gray-700 dark:text-gray-300 truncate">{user.display_name}</p>
+            <p className="text-[10px] text-gray-400 truncate">{isOwner ? 'owner (master key)' : user.role}</p>
+          </div>
+          {isOwner ? (
+            <button onClick={goToLogin}
+              title="Sign in as a user"
+              className="text-[10px] text-indigo-500 hover:text-indigo-700">Sign in</button>
+          ) : (
+            <button onClick={logout}
+              title="Sign out"
+              className="text-[10px] text-gray-400 hover:text-red-500">⎋</button>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 export default function Navigation() {
   const pathname = usePathname()
 
@@ -199,6 +268,7 @@ export default function Navigation() {
             </span>
           )}
         </Link>
+        <UserMenu collapsed={collapsed} />
         <ThemeToggle collapsed={collapsed} />
       </div>
     </aside>

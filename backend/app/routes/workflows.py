@@ -19,17 +19,63 @@ router = APIRouter(prefix="/v1", tags=["workflows"], dependencies=[Depends(verif
 _WORKFLOW_DIR = Path(__file__).parent.parent.parent.parent / "data" / "workflows"
 
 
-def _convert_editor_to_api(editor_data: dict) -> Optional[dict]:
+_CONTROL_WIDGETS = {"fixed", "increment", "decrement", "randomize"}
+
+# Cache for ComfyUI object_info schemas: {comfyui_url: {class_type: [input_name, ...]}}
+_OBJECT_INFO_CACHE: dict[str, dict[str, list[str]]] = {}
+
+
+async def _fetch_object_info_schema(comfyui_url: str) -> dict[str, list[str]]:
+    """Fetch the ordered required-input names for every node class from ComfyUI.
+
+    Returns {class_type: [input_name_1, input_name_2, ...]} — the ORDER matches
+    how widget values are laid out in the editor format. Cached per-URL.
+    """
+    if comfyui_url in _OBJECT_INFO_CACHE:
+        return _OBJECT_INFO_CACHE[comfyui_url]
+
+    schema: dict[str, list[str]] = {}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{comfyui_url.rstrip('/')}/object_info")
+            if r.status_code == 200:
+                info = r.json()
+                for class_type, class_info in info.items():
+                    input_spec = class_info.get("input", {})
+                    required = input_spec.get("required", {})
+                    optional = input_spec.get("optional", {})
+                    # Preserve insertion order (Python 3.7+ dicts are ordered)
+                    names = list(required.keys()) + list(optional.keys())
+                    schema[class_type] = names
+    except Exception as e:
+        logger.warning(f"Failed to fetch ComfyUI /object_info: {e}")
+
+    _OBJECT_INFO_CACHE[comfyui_url] = schema
+    return schema
+
+
+def _convert_editor_to_api(editor_data: dict, node_schema: Optional[dict] = None) -> Optional[dict]:
     """Convert a ComfyUI editor-format workflow (nodes/links) to API format.
 
     Editor format has 'nodes' array and 'links' array.
     API format has node-ID keys mapping to {class_type, inputs}.
+
+    Args:
+        editor_data: The editor-format workflow JSON.
+        node_schema: {class_type: [input_name, ...]} from ComfyUI's /object_info.
+                     When provided, lets us resolve widget values to input names
+                     even when the editor 'inputs' array doesn't list them.
+                     Without it, we fall back to only mapping explicitly-listed
+                     inputs (which breaks many real-world workflows).
+
     Returns None if conversion fails.
     """
     nodes = editor_data.get("nodes")
     links = editor_data.get("links")
     if not isinstance(nodes, list) or not isinstance(links, list):
         return None
+
+    node_schema = node_schema or {}
 
     # Build link lookup: link_id → (from_node, from_output_idx)
     link_map = {}
@@ -51,7 +97,8 @@ def _convert_editor_to_api(editor_data: dict) -> Optional[dict]:
         node_inputs = node.get("inputs", [])
         widgets = list(node.get("widgets_values") or [])
 
-        # Map connected inputs (from links)
+        # Track which input names came from links (already resolved to [node, idx])
+        connected_names: set[str] = set()
         for inp in node_inputs:
             if not isinstance(inp, dict):
                 continue
@@ -60,31 +107,40 @@ def _convert_editor_to_api(editor_data: dict) -> Optional[dict]:
             if link_id is not None and link_id in link_map:
                 from_node, from_idx = link_map[link_id]
                 inputs[name] = [from_node, from_idx]
+                connected_names.add(name)
 
-        # Map widget values to unconnected inputs.
-        # ComfyUI editor format inserts control widgets (e.g. "randomize",
-        # "fixed", "increment", "decrement") after seed/INT inputs.
-        # These are NOT real node inputs and must be skipped.
-        _CONTROL_WIDGETS = {"fixed", "increment", "decrement", "randomize"}
-
-        unconnected = []
-        for inp in node_inputs:
-            if not isinstance(inp, dict):
-                continue
-            name = inp.get("name", "")
-            link_id = inp.get("link")
-            if link_id is None and name not in inputs:
-                unconnected.append((name, inp.get("type", "")))
+        # Figure out which input NAMES the widget values belong to.
+        # Priority:
+        #   1. If we have the schema for this class_type, use its ordered list
+        #      (ComfyUI's own truth for input order).
+        #   2. Otherwise, fall back to the editor node's own 'inputs' array
+        #      entries that are unconnected (old behavior — fragile).
+        if class_type in node_schema:
+            # Widget values fill ALL non-connected inputs in schema order.
+            # Connected inputs (from links) are skipped — they already have values.
+            ordered_names = [n for n in node_schema[class_type] if n not in connected_names]
+        else:
+            ordered_names = [
+                inp.get("name", "") for inp in node_inputs
+                if isinstance(inp, dict) and inp.get("link") is None and inp.get("name") not in connected_names
+            ]
 
         wi = 0
-        for name, inp_type in unconnected:
+        for name in ordered_names:
             if wi >= len(widgets):
                 break
-            inputs[name] = widgets[wi]
+            val = widgets[wi]
+            # Skip control widgets (seed mode: randomize/fixed/increment/decrement)
+            if isinstance(val, str) and val in _CONTROL_WIDGETS:
+                wi += 1
+                if wi >= len(widgets):
+                    break
+                val = widgets[wi]
+            inputs[name] = val
             wi += 1
-            # After INT/seed inputs, skip control widget if present
-            if inp_type in ("INT",) and wi < len(widgets) and isinstance(widgets[wi], str) and widgets[wi] in _CONTROL_WIDGETS:
-                wi += 1  # skip the control widget
+            # After seed inputs, the next value is often a control widget — skip if so
+            if name == "seed" and wi < len(widgets) and isinstance(widgets[wi], str) and widgets[wi] in _CONTROL_WIDGETS:
+                wi += 1
 
         api_workflow[node_id] = {
             "class_type": class_type,

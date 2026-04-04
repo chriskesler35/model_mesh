@@ -105,7 +105,12 @@ async def _run_image_gen(task_id: str, params: dict):
                     task.progress = 40
                     await db.commit()
                     try:
-                        result = await generate_with_comfyui(prompt, comfyui_url, size, negative_prompt, workflow_id=workflow_id, checkpoint=checkpoint, comfyui_dir=comfyui_dir, lora=lora, lora_strength=lora_strength)
+                        result = await generate_with_comfyui(
+                            prompt=prompt,
+                            comfyui_url=comfyui_url,
+                            workflow_id=workflow_id,
+                            comfyui_dir=comfyui_dir,
+                        )
                     except Exception as comfy_err:
                         err_detail = str(comfy_err)
                         # Extract useful detail from HTTPException
