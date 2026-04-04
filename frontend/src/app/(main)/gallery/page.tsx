@@ -40,10 +40,9 @@ export default function GalleryPage() {
   const [editPrompt, setEditPrompt] = useState('')
   const [editing, setEditing] = useState(false)
   const [uploadDragging, setUploadDragging] = useState(false)
-  // Variation model selection
+  // Variation model selection (applies to all variation buttons)
   const [availableModels, setAvailableModels] = useState<ImageModel[]>([])
   const [variationModel, setVariationModel] = useState<string>('gemini-imagen')
-  const [showVariationMenu, setShowVariationMenu] = useState<string | null>(null)
 
   // Moved to component scope so all handlers can call it
   const fetchImages = useCallback(async (pageNum: number = 0) => {
@@ -87,14 +86,6 @@ export default function GalleryPage() {
   }, [])
 
   const totalPages = Math.ceil(totalImages / PAGE_SIZE)
-
-  // Close variation menu on outside click
-  useEffect(() => {
-    if (!showVariationMenu) return
-    const handler = () => setShowVariationMenu(null)
-    document.addEventListener('click', handler)
-    return () => document.removeEventListener('click', handler)
-  }, [showVariationMenu])
 
   const downloadImage = async (image: Image) => {
     try {
@@ -187,7 +178,6 @@ export default function GalleryPage() {
 
   const generateVariation = async (imageId: string, modelId?: string) => {
     setGenerating(imageId)
-    setShowVariationMenu(null)
     try {
       const response = await fetch(`${API_BASE}/v1/images/${imageId}/variations`, {
         method: 'POST',
@@ -245,6 +235,23 @@ export default function GalleryPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {availableModels.length > 0 && (
+            <div className="flex items-center gap-1.5">
+              <label className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">Variation model:</label>
+              <select
+                value={variationModel}
+                onChange={(e) => setVariationModel(e.target.value)}
+                className="px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white rounded-md focus:outline-none focus:ring-1 focus:ring-orange-400"
+                title="Model used for variations"
+              >
+                {availableModels.map(m => (
+                  <option key={m.id} value={m.id} disabled={!m.available}>
+                    {m.name}{!m.available ? ' (unavailable)' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           {totalPages > 1 && (
             <div className="flex items-center gap-1">
               <button
@@ -349,39 +356,16 @@ export default function GalleryPage() {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                     </svg>
                   </button>
-                  <div className="relative">
-                    <button
-                      onClick={(e) => { e.stopPropagation(); setShowVariationMenu(showVariationMenu === image.id ? null : image.id) }}
-                      className="p-2 bg-white rounded-full text-orange-600 hover:bg-gray-100 disabled:opacity-50"
-                      title="Generate Variation (pick model)"
-                      disabled={generating === image.id}
-                    >
-                      <svg className={`w-5 h-5 ${generating === image.id ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
-                    </button>
-                    {showVariationMenu === image.id && (
-                      <div
-                        className="absolute z-10 top-full mt-1 right-0 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 min-w-[220px]"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <div className="px-3 py-1 text-[10px] uppercase tracking-wider font-semibold text-gray-400">
-                          Generate variation with
-                        </div>
-                        {availableModels.map(m => (
-                          <button
-                            key={m.id}
-                            onClick={(e) => { e.stopPropagation(); generateVariation(image.id, m.id) }}
-                            disabled={!m.available}
-                            className="w-full text-left px-3 py-2 text-xs hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            <div className="font-medium text-gray-900 dark:text-white">{m.name}</div>
-                            <div className="text-[10px] text-gray-500 dark:text-gray-400 truncate">{m.description}</div>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); generateVariation(image.id) }}
+                    className="p-2 bg-white rounded-full text-orange-600 hover:bg-gray-100 disabled:opacity-50"
+                    title={`Generate Variation (${availableModels.find(m => m.id === variationModel)?.name || variationModel})`}
+                    disabled={generating === image.id}
+                  >
+                    <svg className={`w-5 h-5 ${generating === image.id ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  </button>
                   <button
                     onClick={(e) => { e.stopPropagation(); deleteImage(image.id) }}
                     className="p-2 bg-white rounded-full text-red-600 hover:bg-gray-100"
@@ -454,28 +438,14 @@ export default function GalleryPage() {
                   >
                     Edit with AI
                   </button>
-                  <div className="inline-flex rounded-md overflow-hidden">
-                    <button
-                      onClick={() => generateVariation(selectedImage.id, variationModel)}
-                      disabled={generating === selectedImage.id}
-                      className="px-3 py-1.5 text-sm font-medium text-white bg-orange-600 hover:bg-orange-700 disabled:opacity-50"
-                    >
-                      {generating === selectedImage.id ? 'Generating...' : 'Variation'}
-                    </button>
-                    <select
-                      value={variationModel}
-                      onChange={(e) => setVariationModel(e.target.value)}
-                      disabled={generating === selectedImage.id}
-                      className="px-2 py-1.5 text-xs text-white bg-orange-700 hover:bg-orange-800 disabled:opacity-50 border-l border-orange-400 focus:outline-none cursor-pointer"
-                      title="Choose model"
-                    >
-                      {availableModels.map(m => (
-                        <option key={m.id} value={m.id} disabled={!m.available} className="text-gray-900">
-                          {m.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                  <button
+                    onClick={() => generateVariation(selectedImage.id)}
+                    disabled={generating === selectedImage.id}
+                    className="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-orange-600 hover:bg-orange-700 disabled:opacity-50"
+                    title={`Using ${availableModels.find(m => m.id === variationModel)?.name || variationModel}`}
+                  >
+                    {generating === selectedImage.id ? 'Generating...' : `Variation (${availableModels.find(m => m.id === variationModel)?.name.split(' ')[0] || variationModel})`}
+                  </button>
                   <button
                     onClick={() => downloadImage(selectedImage)}
                     className="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"

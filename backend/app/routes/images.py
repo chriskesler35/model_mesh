@@ -686,6 +686,141 @@ async def generate_with_comfyui(
         )
 
 
+async def _upload_image_to_comfyui(source_bytes: bytes, comfyui_url: str, filename: str = "devforgeai_variation.png") -> str:
+    """Upload raw image bytes to ComfyUI's /upload/image endpoint. Returns the name ComfyUI assigns."""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        files = {"image": (filename, source_bytes, "image/png")}
+        data = {"overwrite": "true"}
+        resp = await client.post(f"{comfyui_url}/upload/image", files=files, data=data)
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=resp.status_code,
+                detail=f"ComfyUI rejected image upload: {resp.text[:200]}"
+            )
+        body = resp.json()
+        # ComfyUI returns {"name": "...", "subfolder": "", "type": "input"}
+        return body.get("name") or filename
+
+
+async def generate_img2img_with_comfyui(
+    source_bytes: bytes,
+    prompt: str,
+    comfyui_url: str,
+    comfyui_dir: str = "",
+    workflow_id: str = "sdxl-img2img",
+) -> dict:
+    """Run an img2img variation via ComfyUI.
+
+    Uploads the source image to ComfyUI's input folder, then loads the
+    img2img workflow (SDXL by default) and injects the uploaded filename
+    into the LoadImage node.
+    """
+    logger.info(f"ComfyUI img2img: workflow={workflow_id}, source_bytes={len(source_bytes)}, prompt={prompt[:60]}…")
+
+    # 1. Upload source image to ComfyUI
+    uploaded_name = await _upload_image_to_comfyui(source_bytes, comfyui_url)
+    logger.info(f"Uploaded source image to ComfyUI as: {uploaded_name}")
+
+    # 2. Load the img2img workflow template
+    template_path = find_workflow_path(workflow_id, comfyui_dir)
+    if not template_path:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Img2img workflow '{workflow_id}' not found. Expected at data/workflows/{workflow_id}.json"
+        )
+
+    try:
+        raw_text = template_path.read_text(encoding="utf-8-sig")
+        template_data = json.loads(raw_text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load img2img workflow: {e}")
+
+    workflow_json = template_data.get("workflow", template_data)
+    is_api_format = workflow_json and isinstance(workflow_json, dict) and any(
+        isinstance(v, dict) and "class_type" in v for v in workflow_json.values()
+    )
+    if not is_api_format:
+        raise HTTPException(status_code=500, detail=f"Workflow '{workflow_id}' is not in API format")
+
+    # 3. Hydrate placeholders: {{init_image}}, {{prompt}}, {{checkpoint}}, {{negative_prompt}}
+    default_checkpoint = template_data.get("default_checkpoint", "sdxl.safetensors")
+    variables = {
+        "init_image": uploaded_name,
+        "prompt": prompt or "high quality variation",
+        "negative_prompt": "",
+        "checkpoint": default_checkpoint,
+        "width": 1024,
+        "height": 1024,
+    }
+    workflow = _hydrate_workflow(workflow_json, variables)
+
+    # Ensure LoadImage has the right filename (redundant safety — _hydrate_workflow
+    # uses regex, this just guarantees it landed correctly)
+    for node in workflow.values():
+        if isinstance(node, dict) and node.get("class_type") == "LoadImage":
+            node.get("inputs", {})["image"] = uploaded_name
+        # Randomize KSampler seed if still 0
+        if isinstance(node, dict) and node.get("class_type") in ("KSampler", "KSamplerAdvanced"):
+            inputs = node.get("inputs", {})
+            if inputs.get("seed") in (0, "0"):
+                inputs["seed"] = random.randint(1, 2**32 - 1)
+
+    # 4. Queue + poll the workflow
+    try:
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            queue_resp = await client.post(
+                f"{comfyui_url}/prompt",
+                json={"prompt": workflow},
+                headers={"Content-Type": "application/json"}
+            )
+            if queue_resp.status_code != 200:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"ComfyUI rejected img2img workflow: {queue_resp.text[:300]}"
+                )
+            prompt_id = queue_resp.json().get("prompt_id")
+            if not prompt_id:
+                raise HTTPException(status_code=500, detail="ComfyUI did not return a prompt ID")
+
+            # Poll history — up to 10 minutes
+            for attempt in range(600):
+                await asyncio.sleep(1)
+                hist_resp = await client.get(f"{comfyui_url}/history/{prompt_id}")
+                if hist_resp.status_code != 200:
+                    continue
+                history = hist_resp.json()
+                if prompt_id not in history:
+                    continue
+                entry = history[prompt_id]
+                status_info = entry.get("status", {})
+                if status_info.get("status_str") == "error":
+                    msgs = status_info.get("messages", [])
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"ComfyUI img2img execution error: {str(msgs)[:300]}"
+                    )
+                outputs = entry.get("outputs", {})
+                for node_id, node_output in outputs.items():
+                    if "images" in node_output:
+                        for img in node_output["images"]:
+                            view_resp = await client.get(
+                                f"{comfyui_url}/view",
+                                params={
+                                    "filename": img.get("filename", ""),
+                                    "subfolder": img.get("subfolder", ""),
+                                    "type": img.get("type", "output"),
+                                }
+                            )
+                            if view_resp.status_code == 200:
+                                return {
+                                    "base64": base64.b64encode(view_resp.content).decode(),
+                                    "revised_prompt": None,
+                                }
+            raise HTTPException(status_code=504, detail="ComfyUI img2img timed out after 10 minutes")
+    except httpx.ConnectError:
+        raise HTTPException(status_code=503, detail=f"ComfyUI not reachable at {comfyui_url}")
+
+
 @router.post("/generations", response_model=ImageListResponse)
 async def generate_image(
     request: ImageGenerationRequest,
@@ -973,47 +1108,70 @@ async def generate_variation(
         # Minimal stub for on-disk-only images
         original = {"prompt": "", "model": "gemini-imagen", "size": "1024x1024", "format": "png"}
 
-    prompt = (request.prompt if request and request.prompt else original.get("prompt")) or "High-quality image"
+    prompt = (request.prompt if request and request.prompt else original.get("prompt")) or ""
     negative_prompt = original.get("negative_prompt")
     # User-chosen model takes precedence over original's model
     model = (request.model if request and request.model else original.get("model")) or "gemini-imagen"
     size = request.size if request and request.size else original.get("size", "1024x1024")
     format = request.format if request and request.format else original.get("format", "png")
-    
+
+    # Load the SOURCE IMAGE from disk — variations are img2img, they MUST use the original pixels
+    source_bytes: Optional[bytes] = None
+    source_mime = "image/png"
+    for ext in ("png", "jpg", "jpeg", "webp"):
+        p = _IMAGE_DIR / f"{image_id}.{ext}"
+        if p.exists():
+            source_bytes = p.read_bytes()
+            source_mime = f"image/{ext}" if ext != "jpg" else "image/jpeg"
+            break
+    if not source_bytes:
+        raise HTTPException(status_code=404, detail="Source image file not found on disk — cannot do img2img variation")
+
+    # Build the variation instruction. If we have the original prompt, incorporate it.
+    # Otherwise, use a generic "make a variation" instruction.
+    if prompt.strip() and not prompt.startswith("Uploaded:"):
+        variation_prompt = f"Create a subtle variation of this image. Keep the overall subject, composition, and style the same, but introduce small differences in details, lighting, or pose. Original concept: {prompt}"
+    else:
+        variation_prompt = "Create a subtle variation of this image. Keep the overall subject, composition, and style the same, but introduce small differences in details, lighting, or pose."
+
     try:
         if model == "gemini-imagen":
-            api_key = os.environ.get('GEMINI_API_KEY') or getattr(settings, 'gemini_api_key', None)
+            # Gemini multimodal img2img via its image-edit API
+            api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY') or getattr(settings, 'gemini_api_key', None)
             if not api_key:
-                raise HTTPException(
-                    status_code=500,
-                    detail="GEMINI_API_KEY not configured"
-                )
-            result = await generate_with_gemini_imagen(prompt, api_key, size)
+                raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
+            source_b64 = base64.b64encode(source_bytes).decode()
+            result = await _gemini_image_edit(source_b64, source_mime, variation_prompt, api_key)
+
         elif model == "comfyui-local":
+            # ComfyUI img2img — uploads source image and runs sdxl-img2img workflow
             comfyui_url = await get_setting("comfyui_url", db)
             comfyui_dir = await get_setting("comfyui_dir", db)
             try:
                 comfyui_available = await ensure_comfyui(comfyui_url)
                 if not comfyui_available:
                     raise Exception("ComfyUI not reachable")
-                result = await generate_with_comfyui(
-                    prompt=prompt,
+                result = await generate_img2img_with_comfyui(
+                    source_bytes=source_bytes,
+                    prompt=prompt or "high quality variation",
                     comfyui_url=comfyui_url,
-                    workflow_id=original.get("workflow_id"),
                     comfyui_dir=comfyui_dir,
                 )
             except Exception as comfy_err:
-                # ComfyUI failed (unreachable, timed out, errored) — fall back to Gemini
-                logger.warning(f"ComfyUI failed for variation, falling back to Gemini: {comfy_err}")
+                logger.warning(f"ComfyUI img2img failed, falling back to Gemini: {comfy_err}")
                 api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY') or getattr(settings, 'gemini_api_key', None)
                 if not api_key:
-                    raise HTTPException(status_code=503, detail=f"ComfyUI failed ({comfy_err}) and no Gemini API key configured")
-                result = await generate_with_gemini_imagen(prompt, api_key, size)
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"ComfyUI img2img failed ({comfy_err}) and no Gemini API key configured for fallback"
+                    )
+                source_b64 = base64.b64encode(source_bytes).decode()
+                result = await _gemini_image_edit(source_b64, source_mime, variation_prompt, api_key)
                 model = "gemini-imagen"
         else:
             raise HTTPException(
                 status_code=400,
-                detail=f"Model '{model}' does not support image generation"
+                detail=f"Model '{model}' does not support image variations"
             )
         
         # Store the variation — _store_image() writes binary to data/images/{id}.{ext}
