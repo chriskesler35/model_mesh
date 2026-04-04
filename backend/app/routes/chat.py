@@ -136,26 +136,12 @@ async def _stream_response(
             # Convert messages to dict
             msg_dicts = [{"role": m.role, "content": m.content} for m in request.messages]
 
-            # Inject soul + user identity context + active method
+            # Inject unified identity/soul/user/method context (shared with workbench)
             try:
-                from pathlib import Path as _Path
-                from app.routes.methods import _load_state as _load_method_state, BUILT_IN_METHODS as _METHODS
-                _data = _Path(__file__).parent.parent.parent.parent / "data"
-                _soul = _data / "soul.md"
-                _user = _data / "user.md"
-                identity_parts = []
-                if _soul.exists():
-                    identity_parts.append(f"# AI Identity\n{_soul.read_text(encoding='utf-8')}")
-                if _user.exists():
-                    identity_parts.append(f"# About the User\n{_user.read_text(encoding='utf-8')}")
-                # Inject active method prompt
-                _method_state = _load_method_state()
-                _active_method = _METHODS.get(_method_state.get("active_method", "standard"), {})
-                _method_prompt = _active_method.get("system_prompt", "")
-                if _method_prompt:
-                    identity_parts.append(_method_prompt)
-                if identity_parts:
-                    msg_dicts.insert(0, {"role": "system", "content": "\n\n".join(identity_parts)})
+                from app.services.identity_context import build_identity_context
+                identity_block = build_identity_context(include_method=True)
+                if identity_block:
+                    msg_dicts.insert(0, {"role": "system", "content": identity_block})
             except Exception as _e:
                 logger.warning(f"Failed to inject identity context: {_e}")
 
@@ -270,25 +256,12 @@ async def _sync_response(
                 }
             )
 
-        # Inject soul + user identity context + active method
+        # Inject unified identity/soul/user/method context (shared with workbench)
         try:
-            from pathlib import Path as _Path
-            from app.routes.methods import _load_state as _load_method_state, BUILT_IN_METHODS as _METHODS
-            _data = _Path(r"G:\Model_Mesh\data")
-            _soul = _data / "soul.md"
-            _user = _data / "user.md"
-            identity_parts = []
-            if _soul.exists():
-                identity_parts.append(f"# AI Identity\n{_soul.read_text(encoding='utf-8')}")
-            if _user.exists():
-                identity_parts.append(f"# About the User\n{_user.read_text(encoding='utf-8')}")
-            _method_state = _load_method_state()
-            _active_method = _METHODS.get(_method_state.get("active_method", "standard"), {})
-            _method_prompt = _active_method.get("system_prompt", "")
-            if _method_prompt:
-                identity_parts.append(_method_prompt)
-            if identity_parts:
-                msg_dicts.insert(0, {"role": "system", "content": "\n\n".join(identity_parts)})
+            from app.services.identity_context import build_identity_context
+            identity_block = build_identity_context(include_method=True)
+            if identity_block:
+                msg_dicts.insert(0, {"role": "system", "content": identity_block})
         except Exception as _e:
             logger.warning(f"Failed to inject identity context: {_e}")
 

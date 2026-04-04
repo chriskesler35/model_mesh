@@ -39,6 +39,7 @@ class WorkbenchSession(Base):
     status       = Column(String(20), default="pending")   # pending|running|completed|failed|cancelled
     files        = Column(JSON, default=list)              # list of relative paths written
     events_log   = Column(JSON, default=list)              # all events for replay
+    messages     = Column(JSON, default=list)              # conversation history [{role, content}]
     input_tokens  = Column(Integer, nullable=True)
     output_tokens = Column(Integer, nullable=True)
     estimated_cost = Column(Numeric(10, 6), nullable=True)
@@ -57,6 +58,7 @@ class WorkbenchSession(Base):
             "status":         self.status,
             "files":          self.files or [],
             "events_log":     self.events_log or [],
+            "messages":       self.messages or [],
             "input_tokens":   self.input_tokens,
             "output_tokens":  self.output_tokens,
             "estimated_cost": float(self.estimated_cost) if self.estimated_cost is not None else None,

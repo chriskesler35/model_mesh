@@ -20,6 +20,10 @@ MIGRATIONS = [
     "ALTER TABLE workbench_sessions ADD COLUMN output_tokens INTEGER",
     "ALTER TABLE workbench_sessions ADD COLUMN estimated_cost NUMERIC(10, 6)",
     "ALTER TABLE workbench_sessions ADD COLUMN events_log JSON",
+    # workbench_sessions - conversational turns
+    "ALTER TABLE workbench_sessions ADD COLUMN messages JSON",
+    # workbench_sessions - link to pipeline (Option A multi-agent)
+    "ALTER TABLE workbench_sessions ADD COLUMN pipeline_id VARCHAR(36)",
     # messages - inline image URL
     "ALTER TABLE messages ADD COLUMN image_url TEXT",
 ]

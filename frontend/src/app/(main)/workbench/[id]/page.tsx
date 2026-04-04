@@ -5,6 +5,7 @@ export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+import { renderMarkdown } from '@/lib/markdown'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
@@ -27,6 +28,7 @@ const EVENT_STYLE: Record<string, { icon: string; color: string; label: string }
   error:         { icon: '❌', color: 'text-red-600 dark:text-red-400',        label: 'Error'        },
   waiting:       { icon: '⏳', color: 'text-orange-500 dark:text-orange-400',  label: 'Waiting'      },
   user_message:  { icon: '💬', color: 'text-indigo-600 dark:text-indigo-400',  label: 'You'          },
+  agent_reply:   { icon: '🤖', color: 'text-emerald-600 dark:text-emerald-400', label: 'Agent'       },
   info:          { icon: 'ℹ️',  color: 'text-gray-500 dark:text-gray-400',      label: 'Info'         },
   done:          { icon: '✅', color: 'text-green-600 dark:text-green-400',    label: 'Done'         },
   ping:          { icon: '·',  color: 'text-gray-300',                          label: ''             },
@@ -50,6 +52,7 @@ function EventRow({ evt, index }: { evt: WBEvent; index: number }) {
       case 'error':         return p.message || p.error
       case 'waiting':       return p.message || 'Waiting for human input...'
       case 'user_message':  return p.message
+      case 'agent_reply':    return p.message
       case 'info':          return p.message
       case 'done':          return p.message
       default: return JSON.stringify(p).slice(0, 100)
@@ -84,6 +87,252 @@ function EventRow({ evt, index }: { evt: WBEvent; index: number }) {
     </div>
   )
 }
+
+// ─── Agent Card ───────────────────────────────────────────────────────────────
+const AGENT_AVATARS: Record<string, { icon: string; color: string }> = {
+  coder:     { icon: '💻', color: 'from-blue-400 to-indigo-500' },
+  researcher:{ icon: '🔍', color: 'from-purple-400 to-pink-500' },
+  designer:  { icon: '🎨', color: 'from-pink-400 to-rose-500' },
+  reviewer:  { icon: '👀', color: 'from-amber-400 to-orange-500' },
+  planner:   { icon: '📋', color: 'from-emerald-400 to-teal-500' },
+  executor:  { icon: '⚙️',  color: 'from-gray-400 to-slate-500' },
+  writer:    { icon: '✍️',  color: 'from-violet-400 to-purple-500' },
+}
+
+function AgentCard({
+  agentType, model, status, currentActivity, currentRole, turnCount, fileCount,
+}: {
+  agentType: string
+  model: string
+  status: string
+  currentActivity: string | null
+  currentRole: string | null
+  turnCount: number
+  fileCount: number
+}) {
+  const meta = AGENT_AVATARS[agentType] || AGENT_AVATARS.coder
+  const statusLabel = status === 'running' ? 'Working' : status === 'waiting' ? 'Ready for you' : status === 'completed' ? 'Done' : status === 'failed' ? 'Failed' : status === 'cancelled' ? 'Cancelled' : 'Connecting'
+  const isWorking = status === 'running' || status === 'pending'
+
+  return (
+    <div className="flex items-center gap-3 px-4 py-3 bg-gradient-to-r from-white to-gray-50 dark:from-gray-900 dark:to-gray-800 border-b border-gray-200 dark:border-gray-700">
+      {/* Avatar */}
+      <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${meta.color} flex items-center justify-center text-2xl shadow-md flex-shrink-0 relative`}>
+        {meta.icon}
+        {isWorking && (
+          <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-green-400 border-2 border-white dark:border-gray-900 animate-pulse" />
+        )}
+        {status === 'waiting' && (
+          <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-orange-400 border-2 border-white dark:border-gray-900" />
+        )}
+      </div>
+
+      {/* Details */}
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-semibold text-gray-900 dark:text-white capitalize">{agentType} Agent</span>
+          {currentRole && (
+            <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-700">
+              🎭 {currentRole}
+            </span>
+          )}
+          <span className="text-xs text-gray-400">·</span>
+          <span className="text-xs text-gray-500 font-mono truncate">{model}</span>
+        </div>
+        <div className="flex items-center gap-2 mt-0.5">
+          <span className={`text-xs font-medium ${
+            isWorking ? 'text-green-600 dark:text-green-400' :
+            status === 'waiting' ? 'text-orange-600 dark:text-orange-400' :
+            status === 'failed' || status === 'error' ? 'text-red-600 dark:text-red-400' :
+            'text-gray-500'
+          }`}>
+            {statusLabel}
+          </span>
+          {currentActivity && isWorking && (
+            <>
+              <span className="text-xs text-gray-400">·</span>
+              <span className="text-xs text-gray-600 dark:text-gray-300 truncate italic">{currentActivity}</span>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Stats */}
+      <div className="flex items-center gap-3 flex-shrink-0">
+        <div className="text-center">
+          <div className="text-sm font-semibold text-gray-900 dark:text-white">{turnCount}</div>
+          <div className="text-[10px] text-gray-400 uppercase tracking-wider">Turns</div>
+        </div>
+        <div className="w-px h-8 bg-gray-200 dark:bg-gray-700" />
+        <div className="text-center">
+          <div className="text-sm font-semibold text-gray-900 dark:text-white">{fileCount}</div>
+          <div className="text-[10px] text-gray-400 uppercase tracking-wider">Files</div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+// ─── Conversation turn (groups events into a message bubble pair) ──────────────
+interface Turn {
+  userMessage: string
+  userTime: string
+  role: string | null           // role declared by agent for this turn
+  agentActivities: string[]  // plain-text descriptions of what the agent did
+  agentReply: string | null
+  filesTouched: string[]
+  turnStatus: 'running' | 'done' | 'error'
+  error: string | null
+}
+
+function buildTurns(events: WBEvent[], initialTask: string | null): Turn[] {
+  const turns: Turn[] = []
+  let current: Turn | null = null
+
+  // Seed with the initial task as turn 1
+  if (initialTask) {
+    current = {
+      userMessage: initialTask,
+      userTime: '',
+      role: null,
+      agentActivities: [],
+      agentReply: null,
+      filesTouched: [],
+      turnStatus: 'running',
+      error: null,
+    }
+  }
+
+  for (const evt of events) {
+    const p = evt.payload || {}
+    if (evt.type === 'user_message') {
+      // Close out current turn (if any) and start a new one
+      if (current) turns.push(current)
+      current = {
+        userMessage: p.message || '',
+        userTime: evt.ts,
+        role: null,
+        agentActivities: [],
+        agentReply: null,
+        filesTouched: [],
+        turnStatus: 'running',
+        error: null,
+      }
+    } else if (evt.type === 'role_change') {
+      if (current) current.role = p.role || null
+    } else if (evt.type === 'agent_thought') {
+      if (current) current.agentActivities.push(p.thought || '')
+    } else if (evt.type === 'info') {
+      if (current) current.agentActivities.push(p.message || '')
+    } else if (evt.type === 'file_created') {
+      if (current) current.filesTouched.push(p.path || '')
+    } else if (evt.type === 'file_modified') {
+      if (current) current.filesTouched.push(p.path || '')
+    } else if (evt.type === 'agent_reply') {
+      if (current) current.agentReply = p.message || ''
+    } else if (evt.type === 'done') {
+      if (current) {
+        current.turnStatus = p.status === 'waiting' || p.status === 'completed' ? 'done' : 'error'
+        if (!current.agentReply) current.agentReply = p.message || ''
+      }
+    } else if (evt.type === 'error') {
+      if (current) {
+        current.turnStatus = 'error'
+        current.error = p.message || p.error || 'Error'
+      }
+    }
+  }
+  if (current) turns.push(current)
+  return turns
+}
+
+
+function TurnBubble({ turn, isLast, isActive }: { turn: Turn; isLast: boolean; isActive: boolean }) {
+  const working = isLast && isActive && turn.turnStatus === 'running'
+
+  return (
+    <div className="space-y-3">
+      {/* User message (right-aligned) */}
+      {turn.userMessage && (
+        <div className="flex justify-end">
+          <div className="max-w-[80%] rounded-2xl rounded-tr-sm bg-orange-500 text-white px-4 py-2.5 text-sm whitespace-pre-wrap break-words shadow-sm">
+            {turn.userMessage}
+          </div>
+        </div>
+      )}
+
+      {/* Agent response (left-aligned) */}
+      <div className="flex justify-start">
+        <div className="max-w-[85%] rounded-2xl rounded-tl-sm bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden">
+          {/* Role badge — shows which role the agent took for this turn */}
+          {turn.role && (
+            <div className="px-4 pt-3 flex items-center gap-2">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider bg-gradient-to-r from-indigo-100 to-purple-100 dark:from-indigo-900/30 dark:to-purple-900/30 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-700">
+                🎭 {turn.role}
+              </span>
+            </div>
+          )}
+          {/* Activity list — collapsed once turn is done */}
+          {turn.agentActivities.length > 0 && (
+            <div className={`px-4 py-3 space-y-1.5 border-b border-gray-100 dark:border-gray-700 ${working ? '' : 'bg-gray-50 dark:bg-gray-900/50'}`}>
+              {turn.agentActivities.slice(-4).map((a, i) => (
+                <div key={i} className="flex items-start gap-2 text-xs text-gray-600 dark:text-gray-400">
+                  <span className="text-gray-400 mt-0.5">{working && i === turn.agentActivities.slice(-4).length - 1 ? '⏳' : '✓'}</span>
+                  <span className="flex-1">{a}</span>
+                </div>
+              ))}
+              {turn.agentActivities.length > 4 && (
+                <div className="text-[10px] text-gray-400 italic">({turn.agentActivities.length - 4} earlier steps)</div>
+              )}
+            </div>
+          )}
+
+          {/* Agent final reply (rendered as markdown) */}
+          {turn.agentReply ? (
+            <div
+              className="px-4 py-3 text-sm text-gray-900 dark:text-gray-100 break-words leading-relaxed prose-sm"
+              dangerouslySetInnerHTML={{ __html: `<p class="mb-2">${renderMarkdown(turn.agentReply)}</p>` }}
+            />
+          ) : working ? (
+            <div className="px-4 py-3 flex items-center gap-2 text-sm text-gray-500">
+              <div className="flex gap-1">
+                <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              </div>
+              <span className="text-xs italic">Working on it…</span>
+            </div>
+          ) : null}
+
+          {/* Files touched this turn */}
+          {turn.filesTouched.length > 0 && (
+            <div className="px-4 py-2.5 bg-gray-50 dark:bg-gray-900/50 border-t border-gray-100 dark:border-gray-700">
+              <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                {turn.filesTouched.length} file{turn.filesTouched.length === 1 ? '' : 's'} touched
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {turn.filesTouched.map((f, i) => (
+                  <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 text-[11px] font-mono text-gray-700 dark:text-gray-300">
+                    📄 {f}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Error */}
+          {turn.error && (
+            <div className="px-4 py-2.5 bg-red-50 dark:bg-red-900/20 border-t border-red-200 dark:border-red-800 text-xs text-red-700 dark:text-red-300">
+              ❌ {turn.error}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 
 // ─── File tree ────────────────────────────────────────────────────────────────
 function FileTree({ files, onSelect, selected }: { files: FileEntry[]; onSelect: (f: FileEntry) => void; selected: string | null }) {
@@ -157,9 +406,22 @@ export default function WorkbenchSessionPage() {
 
         if (evt.type === 'file_created') {
           setFiles(prev => {
-            const exists = prev.find(f => f.path === evt.payload.path)
-            if (exists) return prev
-            return [...prev, { path: evt.payload.path, status: 'created' as const, content: evt.payload.content }]
+            const existingIdx = prev.findIndex(f => f.path === evt.payload.path)
+            const entry = { path: evt.payload.path, status: 'created' as const, content: evt.payload.content }
+            if (existingIdx >= 0) {
+              // File touched again on a later turn — update its preview
+              const next = [...prev]
+              next[existingIdx] = entry
+              return next
+            }
+            return [...prev, entry]
+          })
+          // If the user is currently viewing this file, refresh its preview
+          setSelectedFile(current => {
+            if (current && current.path === evt.payload.path) {
+              return { ...current, content: evt.payload.content }
+            }
+            return current
           })
         }
         if (evt.type === 'file_modified') {
@@ -174,9 +436,17 @@ export default function WorkbenchSessionPage() {
           inputRef.current?.focus()
         }
         if (evt.type === 'done') {
-          setStatus(evt.payload.status || 'completed')
-          setWaitingForHuman(false)
-          es.close()
+          const newStatus = evt.payload.status || 'completed'
+          setStatus(newStatus)
+          // 'waiting' means turn finished but session stays open for follow-ups.
+          // Keep the SSE stream alive so the next turn's events flow in.
+          if (newStatus === 'waiting') {
+            setWaitingForHuman(true)
+            inputRef.current?.focus()
+          } else {
+            setWaitingForHuman(false)
+            es.close()
+          }
         }
         if (evt.type === 'error') {
           setStatus('error')
@@ -194,12 +464,22 @@ export default function WorkbenchSessionPage() {
   const sendIntervention = useCallback(async () => {
     if (!intervention.trim() || sending) return
     setSending(true)
-    await fetch(`${API_BASE}/v1/workbench/sessions/${id}/message`, {
+    const msg = intervention.trim()
+    const res = await fetch(`${API_BASE}/v1/workbench/sessions/${id}/message`, {
       method: 'POST', headers: AUTH_HEADERS,
-      body: JSON.stringify({ message: intervention.trim() })
+      body: JSON.stringify({ message: msg })
     })
-    setIntervention('')
-    setWaitingForHuman(false)
+    if (res.ok) {
+      // Optimistically add user's message to event log + flip status to running
+      setEvents(prev => [...prev, {
+        type: 'user_message',
+        payload: { message: msg, handled: true },
+        ts: new Date().toISOString(),
+      }])
+      setStatus('running')
+      setWaitingForHuman(false)
+      setIntervention('')
+    }
     setSending(false)
   }, [id, intervention, sending])
 
@@ -208,6 +488,20 @@ export default function WorkbenchSessionPage() {
     await fetch(`${API_BASE}/v1/workbench/sessions/${id}/cancel`, { method: 'POST', headers: AUTH_HEADERS })
     setStatus('cancelled')
   }
+
+  // Click file in the tree → fetch full content from disk (SSE payload is truncated)
+  const selectFile = useCallback(async (f: FileEntry) => {
+    // Show immediately with preview, then replace with full content
+    setSelectedFile(f)
+    if (f.diff) return  // diff view doesn't need a file read
+    try {
+      const url = `${API_BASE}/v1/workbench/sessions/${id}/files/read?path=${encodeURIComponent(f.path)}`
+      const res = await fetch(url, { headers: AUTH_HEADERS })
+      if (!res.ok) return  // keep truncated preview
+      const data = await res.json()
+      setSelectedFile({ ...f, content: data.content })
+    } catch { /* silent — keep truncated preview */ }
+  }, [id])
 
   const STATUS_BADGE: Record<string, string> = {
     connecting:   'bg-gray-100 text-gray-600',
@@ -235,17 +529,10 @@ export default function WorkbenchSessionPage() {
         </button>
 
         <div className="flex-1 min-w-0">
+          <p className="text-xs text-gray-400 uppercase tracking-wider">Session</p>
           <p className="text-sm font-semibold text-gray-900 dark:text-white truncate">
-            {session?.task || 'Loading...'}
+            {session?.task || 'Loading…'}
           </p>
-          <div className="flex items-center gap-2 mt-0.5">
-            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_BADGE[status] || 'bg-gray-100 text-gray-600'}`}>
-              {isActive && <span className="inline-block w-1.5 h-1.5 rounded-full bg-current mr-1 animate-pulse" />}
-              {status}
-            </span>
-            {session && <span className="text-xs text-gray-400">{session.agent_type} · {session.model}</span>}
-            <span className="text-xs text-gray-300">{events.filter(e => e.type !== 'ping').length} events</span>
-          </div>
         </div>
 
         <div className="flex items-center gap-2 flex-shrink-0">
@@ -271,23 +558,63 @@ export default function WorkbenchSessionPage() {
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Files ({files.length})</p>
           </div>
           <div className="flex-1 overflow-y-auto p-2">
-            <FileTree files={files} selected={selectedFile?.path || null} onSelect={f => setSelectedFile(f)} />
+            <FileTree files={files} selected={selectedFile?.path || null} onSelect={selectFile} />
           </div>
         </div>
 
-        {/* CENTER: Event stream */}
+        {/* CENTER: Conversation timeline */}
         <div className="flex-1 flex flex-col min-w-0 min-h-0">
-          <div className="flex-1 overflow-y-auto p-4 space-y-0.5 font-mono text-xs">
-            {events.length === 0 ? (
-              <div className="flex items-center justify-center h-full">
-                <div className="text-center text-gray-400">
-                  <div className="text-3xl mb-2">⚡</div>
-                  <p className="text-sm">Connecting to agent stream...</p>
-                </div>
-              </div>
-            ) : (
-              events.map((evt, i) => <EventRow key={i} evt={evt} index={i} />)
-            )}
+          {/* Agent Card header */}
+          <AgentCard
+            agentType={session?.agent_type || 'coder'}
+            model={session?.model || 'unknown'}
+            status={status}
+            currentActivity={(() => {
+              // Latest agent_thought or info from the current turn
+              for (let i = events.length - 1; i >= 0; i--) {
+                const e = events[i]
+                if (e.type === 'user_message') break
+                if (e.type === 'agent_thought') return e.payload.thought
+                if (e.type === 'info') return e.payload.message
+              }
+              return null
+            })()}
+            currentRole={(() => {
+              // Most recent role_change event (since last user_message)
+              for (let i = events.length - 1; i >= 0; i--) {
+                const e = events[i]
+                if (e.type === 'user_message') break
+                if (e.type === 'role_change') return e.payload.role
+              }
+              return null
+            })()}
+            turnCount={events.filter(e => e.type === 'user_message').length + (session?.task ? 1 : 0)}
+            fileCount={files.length}
+          />
+
+          {/* Conversation turns */}
+          <div className="flex-1 overflow-y-auto px-4 py-6 space-y-6">
+            {(() => {
+              const turns = buildTurns(events, session?.task || null)
+              if (turns.length === 0) {
+                return (
+                  <div className="flex items-center justify-center h-full">
+                    <div className="text-center text-gray-400">
+                      <div className="text-3xl mb-2">⚡</div>
+                      <p className="text-sm">Connecting to agent…</p>
+                    </div>
+                  </div>
+                )
+              }
+              return turns.map((turn, i) => (
+                <TurnBubble
+                  key={i}
+                  turn={turn}
+                  isLast={i === turns.length - 1}
+                  isActive={isActive}
+                />
+              ))
+            })()}
             <div ref={streamEndRef} />
           </div>
 
