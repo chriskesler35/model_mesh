@@ -189,13 +189,14 @@ def _save_image_storage(storage: dict):
     _IMAGE_META.write_text(json.dumps(meta, indent=2))
 
 def _store_image(image_id: str, data: dict):
-    """Store image binary + metadata to disk."""
+    """Store image binary + metadata to disk, then free base64 from memory."""
     # Save binary
     img_bytes = base64.b64decode(data["base64"])
     fmt = data.get("format", "png")
     (_IMAGE_DIR / f"{image_id}.{fmt}").write_bytes(img_bytes)
-    # Update in-memory + metadata
-    IMAGE_STORAGE[image_id] = data
+    # Update in-memory + metadata — drop base64 to prevent memory bloat
+    IMAGE_STORAGE[image_id] = {k: v for k, v in data.items() if k != "base64"}
+    IMAGE_STORAGE[image_id]["base64"] = ""  # lazy-loaded from disk on demand
     _save_image_storage(IMAGE_STORAGE)
 
 def _load_image_base64(image_id: str, fmt: str = "png") -> str:
@@ -692,11 +693,14 @@ async def get_image(image_id: str):
         )
     
     image_data = IMAGE_STORAGE[image_id]
-    image_bytes = base64.b64decode(image_data["base64"])
-    
+    b64 = image_data.get("base64") or _load_image_base64(image_id, image_data.get("format", "png"))
+    if not b64:
+        raise HTTPException(status_code=404, detail="Image file not found on disk")
+    image_bytes = base64.b64decode(b64)
+
     # Determine media type
     media_type = f"image/{image_data['format']}"
-    
+
     return Response(
         content=image_bytes,
         media_type=media_type,
@@ -709,15 +713,18 @@ async def get_image(image_id: str):
 @router.get("/{image_id}/download")
 async def download_image(image_id: str):
     """Download a generated image."""
-    
+
     if image_id not in IMAGE_STORAGE:
         raise HTTPException(
             status_code=404,
             detail="Image not found"
         )
-    
+
     image_data = IMAGE_STORAGE[image_id]
-    image_bytes = base64.b64decode(image_data["base64"])
+    b64 = image_data.get("base64") or _load_image_base64(image_id, image_data.get("format", "png"))
+    if not b64:
+        raise HTTPException(status_code=404, detail="Image file not found on disk")
+    image_bytes = base64.b64decode(b64)
     media_type = f"image/{image_data['format']}"
     
     return Response(

@@ -484,7 +484,7 @@ async def _save_messages(db, conversation_id: str, user_content: str, assistant_
                 logger.warning(f"Snapshot write failed (non-fatal): {snap_err}")
 
     except Exception as e:
-        logger.error(f"Failed to save messages: {e}")
+        logger.error(f"Failed to save messages for conv {conversation_id}: {e}", exc_info=True)
 
 
 async def _maybe_detect_preferences(messages: list[dict]):

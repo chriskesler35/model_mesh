@@ -1206,9 +1206,24 @@ export default function ChatPage() {
     const poll = async () => {
       if (pendingImageTasksRef.current.size === 0) return
 
-      // Strategy: poll each individual task directly (more reliable than notifications)
+      const now = Date.now()
       const entries = Array.from(pendingImageTasksRef.current.entries())
-      for (const [taskId, msgId] of entries) {
+      for (const [taskId, value] of entries) {
+        // Support both old format (string msgId) and new format ({msgId, startedAt})
+        const msgId = typeof value === 'string' ? value : value.msgId
+        const startedAt = typeof value === 'string' ? now : value.startedAt
+
+        // Expire tasks older than 12 minutes (ComfyUI timeout is 10 min)
+        if (now - startedAt > 12 * 60 * 1000) {
+          setMessages(prev => prev.map(m =>
+            m.id === msgId
+              ? { ...m, content: '⏱️ Image generation timed out. Try again.', streaming: false }
+              : m
+          ))
+          pendingImageTasksRef.current.delete(taskId)
+          continue
+        }
+
         try {
           const res = await fetch(`${API_BASE}/v1/tasks/${taskId}`, { headers: AUTH_HEADERS })
           if (!res.ok) continue
@@ -1673,7 +1688,7 @@ export default function ChatPage() {
 
       const taskId = await submitTask('image_gen', taskPayload, convId || undefined)
       // Map task → message so we can inject the image inline when done (use real DB ID)
-      pendingImageTasksRef.current.set(taskId, dbAssistantId)
+      pendingImageTasksRef.current.set(taskId, { msgId: dbAssistantId, startedAt: Date.now() })
       
       // Poll immediately after task submission (for fast providers that complete within 3s)
       setTimeout(() => {
