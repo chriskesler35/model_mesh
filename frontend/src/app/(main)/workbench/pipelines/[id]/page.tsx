@@ -433,6 +433,12 @@ export default function PipelinePage() {
     })
     refetch()
   }
+  const retryPipeline = async () => {
+    await fetch(`${API_BASE}/v1/workbench/pipelines/${pipelineId}/retry`, {
+      method: 'POST', headers: AUTH_HEADERS,
+    })
+    refetch()
+  }
 
   if (loading) {
     return (
@@ -488,6 +494,12 @@ export default function PipelinePage() {
           </div>
         </div>
         <div className="flex gap-2 flex-shrink-0">
+          {(pipeline.status === 'failed' || pipeline.status === 'cancelled') && (
+            <button onClick={retryPipeline}
+              className="px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-500 hover:bg-indigo-600 text-white">
+              ↻ Retry phase {pipeline.current_phase_index + 1}
+            </button>
+          )}
           {(pipeline.status === 'running' || pipeline.status === 'awaiting_approval' || pipeline.status === 'pending') && (
             <button onClick={cancelPipeline}
               className="px-3 py-1.5 text-xs font-medium rounded-lg border border-red-300 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20">

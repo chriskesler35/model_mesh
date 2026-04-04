@@ -35,6 +35,9 @@ export default function WorkbenchListPage() {
   const [asPipeline, setAsPipeline] = useState(false)
   const [pipelineMethod, setPipelineMethod] = useState<'bmad' | 'gsd' | 'superpowers'>('bmad')
   const [autoApprove, setAutoApprove] = useState(false)
+  const [phasePreview, setPhasePreview] = useState<Array<{name: string; role: string; default_model: string; artifact_type: string}>>([])
+  const [modelOverrides, setModelOverrides] = useState<Record<string, string>>({})
+  const [customizeModels, setCustomizeModels] = useState(false)
 
   const fetchSessions = useCallback(async () => {
     const [sessRes, pipeRes] = await Promise.all([
@@ -58,6 +61,18 @@ export default function WorkbenchListPage() {
     if (agentType) setAgentType(agentType)
     if (pid || agentType) setShowNew(true)
   }, [searchParams])
+
+  // Fetch phase preview when pipeline method changes
+  useEffect(() => {
+    if (!asPipeline) { setPhasePreview([]); return }
+    fetch(`${API_BASE}/v1/workbench/pipelines/methods/${pipelineMethod}/phases`, { headers: AUTH_HEADERS })
+      .then(r => r.json())
+      .then(d => {
+        setPhasePreview(d.phases || [])
+        setModelOverrides({})  // reset overrides when method changes
+      })
+      .catch(() => setPhasePreview([]))
+  }, [asPipeline, pipelineMethod])
 
   // Fetch available models for the dropdown
   useEffect(() => {
@@ -97,6 +112,7 @@ export default function WorkbenchListPage() {
             method_id: pipelineMethod,
             task: task.trim(),
             auto_approve: autoApprove,
+            model_overrides: Object.keys(modelOverrides).length > 0 ? modelOverrides : undefined,
           }),
         }).then(r => r.json())
         if (pipeline.id) {
@@ -249,6 +265,43 @@ export default function WorkbenchListPage() {
                         Auto-approve each phase
                       </label>
                     </div>
+                    {phasePreview.length > 0 && (
+                      <div className="mt-2 pt-2 border-t border-indigo-200 dark:border-indigo-800">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-[10px] uppercase tracking-wider font-semibold text-indigo-700 dark:text-indigo-300">
+                            {phasePreview.length} phases
+                          </span>
+                          <button type="button" onClick={() => setCustomizeModels(v => !v)}
+                            className="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline">
+                            {customizeModels ? '← default models' : 'customize models →'}
+                          </button>
+                        </div>
+                        <div className="space-y-1">
+                          {phasePreview.map((ph, i) => (
+                            <div key={i} className="flex items-center gap-2 text-[11px]">
+                              <span className="text-gray-400 w-4 text-right">{i + 1}.</span>
+                              <span className="font-medium text-indigo-900 dark:text-indigo-200 w-20 truncate">{ph.name}</span>
+                              <span className="text-gray-500 truncate flex-1">{ph.role}</span>
+                              {customizeModels ? (
+                                <select
+                                  value={modelOverrides[ph.name] || ph.default_model}
+                                  onChange={e => setModelOverrides(prev => ({ ...prev, [ph.name]: e.target.value }))}
+                                  className="rounded border border-indigo-200 dark:border-indigo-700 dark:bg-gray-800 dark:text-white px-1 py-0.5 text-[10px] max-w-[150px]">
+                                  <option value={ph.default_model}>{ph.default_model} (default)</option>
+                                  {models.filter(m => m.model_id !== ph.default_model).map(m => (
+                                    <option key={m.id} value={m.model_id}>{m.display_name || m.model_id}</option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <span className="font-mono text-[10px] text-gray-400 truncate max-w-[120px]">
+                                  {modelOverrides[ph.name] || ph.default_model}
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

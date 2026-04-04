@@ -456,6 +456,32 @@ async def _advance_to_next(pipeline_id: str, current_index: int):
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
+@router.get("/methods/{method_id}/phases", dependencies=[Depends(verify_api_key)])
+async def preview_phases(method_id: str):
+    """Return the ordered list of phases for a method (without starting a pipeline)."""
+    from app.services.phase_templates import get_phases_for_method, list_supported_methods
+    try:
+        phases = get_phases_for_method(method_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Method '{method_id}' not supported. Available: {list_supported_methods()}"
+        )
+    # Strip the full system_prompt for preview (too long); keep a short hint
+    return {
+        "method_id": method_id,
+        "phases": [
+            {
+                "name": p["name"],
+                "role": p["role"],
+                "default_model": p["default_model"],
+                "artifact_type": p["artifact_type"],
+            }
+            for p in phases
+        ],
+    }
+
+
 @router.post("", dependencies=[Depends(verify_api_key)])
 async def create_pipeline(body: PipelineCreate, db: AsyncSession = Depends(get_db)):
     """Create and start a multi-agent pipeline attached to a workbench session."""
@@ -662,6 +688,26 @@ async def skip_phase(pipeline_id: str, body: PipelineSkip, db: AsyncSession = De
 
     await _advance_to_next(pipeline_id, p.current_phase_index)
     return {"ok": True, "skipped_phase": p.current_phase_index}
+
+
+@router.post("/{pipeline_id}/retry", dependencies=[Depends(verify_api_key)])
+async def retry_phase(pipeline_id: str, db: AsyncSession = Depends(get_db)):
+    """Retry a failed phase (or the current phase if pipeline failed mid-run)."""
+    from app.models.pipeline import Pipeline
+    p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
+    if not p:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+    if p.status not in ("failed", "cancelled"):
+        raise HTTPException(status_code=409,
+                            detail=f"Can only retry from failed/cancelled (status={p.status})")
+
+    # Reset pipeline status and re-run current phase
+    await _db_update_pipeline(pipeline_id, status="running", completed_at=None)
+    _push(pipeline_id, "pipeline_retry", phase_index=p.current_phase_index,
+          message=f"Retrying phase {p.current_phase_index}")
+
+    asyncio.create_task(_run_phase(pipeline_id, p.current_phase_index))
+    return {"ok": True, "retrying_phase": p.current_phase_index}
 
 
 @router.post("/{pipeline_id}/cancel", dependencies=[Depends(verify_api_key)])
