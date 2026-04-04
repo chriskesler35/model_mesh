@@ -1,6 +1,7 @@
 'use client'
 
 import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+import ProjectSetupWizard from '@/components/ProjectSetupWizard'
 
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
@@ -24,6 +25,7 @@ export default function ProjectsPage() {
   const [templates, setTemplates] = useState<Template[]>([])
   const [loading, setLoading] = useState(true)
   const [showNew, setShowNew] = useState(false)
+  const [showWizard, setShowWizard] = useState(false)
   const [form, setForm] = useState({ name: '', path: '', template: 'blank', description: '', sandbox_mode: 'restricted' })
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
@@ -75,11 +77,18 @@ export default function ProjectsPage() {
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Projects</h1>
           <p className="mt-1 text-sm text-gray-500">Manage your development projects — point agents at any folder on your machine</p>
         </div>
-        <button onClick={() => setShowNew(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium rounded-lg transition-colors">
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
-          New Project
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setShowWizard(true)}
+            className="flex items-center gap-2 px-4 py-2 border border-orange-300 text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-900/20 text-sm font-medium rounded-lg transition-colors">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" /></svg>
+            Guided Setup
+          </button>
+          <button onClick={() => setShowNew(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium rounded-lg transition-colors">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+            New Project
+          </button>
+        </div>
       </div>
 
       {projects.length === 0 ? (
@@ -87,10 +96,16 @@ export default function ProjectsPage() {
           <div className="text-5xl mb-4">🗂️</div>
           <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">No projects yet</h3>
           <p className="text-sm text-gray-500 mb-6">Create a project to start directing agents at specific directories.</p>
-          <button onClick={() => setShowNew(true)}
-            className="px-5 py-2.5 bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium rounded-lg">
-            Create First Project
-          </button>
+          <div className="flex items-center justify-center gap-3">
+            <button onClick={() => setShowWizard(true)}
+              className="px-5 py-2.5 bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium rounded-lg">
+              💡 Start Guided Setup
+            </button>
+            <button onClick={() => setShowNew(true)}
+              className="px-5 py-2.5 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 text-sm font-medium rounded-lg">
+              Quick Create
+            </button>
+          </div>
         </div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -213,6 +228,22 @@ export default function ProjectsPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Guided Setup Wizard */}
+      {showWizard && (
+        <ProjectSetupWizard
+          templates={templates}
+          onComplete={(project) => {
+            setShowWizard(false)
+            setProjects(prev => [project as Project, ...prev])
+            router.push(`/projects/${project.id}`)
+          }}
+          onDismiss={() => {
+            setShowWizard(false)
+            fetchData()  // refresh in case project was created
+          }}
+        />
       )}
     </div>
   )

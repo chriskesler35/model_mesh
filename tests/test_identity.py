@@ -120,13 +120,31 @@ class TestIdentityFile:
 
 
 class TestIdentitySetup:
+    @pytest.mark.destructive
     def test_setup_endpoint_returns_success_or_already_setup(self, client):
-        """POST /v1/identity/setup should return 200 or indicate already configured."""
-        r = client.post("/v1/identity/setup", json={
-            "soul": "Test AI identity from pytest",
-            "user": "Test user from pytest",
-            "identity": "Test identity from pytest"
-        })
-        assert r.status_code in (200, 201, 400, 409, 422), (
-            f"Unexpected: {r.status_code}: {r.text}"
-        )
+        """POST /v1/identity/setup — DESTRUCTIVE: overwrites soul.md/user.md/identity.md.
+
+        Backs up existing files first and restores them afterward.
+        """
+        import shutil
+        from pathlib import Path
+        data_dir = Path(__file__).parent.parent / "data"
+        files = ["soul.md", "user.md", "identity.md"]
+        backups = {}
+        for f in files:
+            p = data_dir / f
+            if p.exists():
+                backups[f] = p.read_text(encoding="utf-8")
+        try:
+            r = client.post("/v1/identity/setup", json={
+                "soul": "Test AI identity from pytest",
+                "user": "Test user from pytest",
+                "identity": "Test identity from pytest"
+            })
+            assert r.status_code in (200, 201, 400, 409, 422), (
+                f"Unexpected: {r.status_code}: {r.text}"
+            )
+        finally:
+            # Restore original files
+            for f, content in backups.items():
+                (data_dir / f).write_text(content, encoding="utf-8")

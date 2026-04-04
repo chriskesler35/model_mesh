@@ -24,6 +24,15 @@ interface KeyStatus {
   masked_value: string | null
 }
 
+interface ClearImpact {
+  provider: string
+  affected_models: Array<{ id: string; model_id: string; display_name: string }>
+  affected_personas: Array<{ id: string; name: string; slot: string; current_model_id: string }>
+  affected_agents: Array<{ id: string; name: string; current_model_id: string }>
+  replacement_candidates: Array<{ id: string; model_id: string; display_name: string; provider_name: string }>
+  has_references: boolean
+}
+
 function ApiKeysTab() {
   const [keys, setKeys] = useState<KeyStatus[]>([])
   const [loading, setLoading] = useState(true)
@@ -31,6 +40,9 @@ function ApiKeysTab() {
   const [saving, setSaving] = useState<Record<string, boolean>>({})
   const [saved, setSaved] = useState<Record<string, boolean>>({})
   const [errors, setErrors] = useState<Record<string, string>>({})
+  const [clearImpact, setClearImpact] = useState<ClearImpact | null>(null)
+  const [replacements, setReplacements] = useState<Record<string, string>>({})
+  const [clearing, setClearing] = useState(false)
 
   const fetchKeys = useCallback(async () => {
     try {
@@ -77,9 +89,89 @@ function ApiKeysTab() {
   }
 
   const clearKey = async (provider: string) => {
-    if (!confirm(`Clear the ${PROVIDER_META[provider]?.label || provider} API key?`)) return
-    await fetch(`${API_BASE}/v1/api-keys/${provider}`, { method: 'DELETE', headers: AUTH_HEADERS })
-    setKeys(prev => prev.map(k => k.provider === provider ? { ...k, is_set: false, masked_value: null } : k))
+    // Step 1: fetch impact report — what would happen if we cleared this key?
+    const impactRes = await fetch(
+      `${API_BASE}/v1/api-keys/${provider}/clear-impact`,
+      { headers: AUTH_HEADERS }
+    )
+    if (!impactRes.ok) {
+      alert('Could not check impact of clearing this key.')
+      return
+    }
+    const impact: ClearImpact = await impactRes.json()
+
+    // No references → simple confirm + clear
+    if (!impact.has_references) {
+      const modelCount = impact.affected_models.length
+      const msg = modelCount > 0
+        ? `Clear the ${PROVIDER_META[provider]?.label || provider} API key?\n\n${modelCount} model(s) will be deactivated.`
+        : `Clear the ${PROVIDER_META[provider]?.label || provider} API key?`
+      if (!confirm(msg)) return
+      const res = await fetch(`${API_BASE}/v1/api-keys/${provider}`, {
+        method: 'DELETE',
+        headers: AUTH_HEADERS,
+        body: JSON.stringify({}),
+      })
+      if (res.ok) {
+        setKeys(prev => prev.map(k => k.provider === provider ? { ...k, is_set: false, masked_value: null } : k))
+      }
+      return
+    }
+
+    // References exist → show dialog with replacement dropdowns
+    setClearImpact(impact)
+    setReplacements({})
+  }
+
+  const confirmClearWithReplacements = async (useForce: boolean) => {
+    if (!clearImpact) return
+    setClearing(true)
+    try {
+      const res = await fetch(`${API_BASE}/v1/api-keys/${clearImpact.provider}`, {
+        method: 'DELETE',
+        headers: AUTH_HEADERS,
+        body: JSON.stringify({
+          replacements: useForce ? undefined : replacements,
+          force: useForce,
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json()
+        alert(err.detail?.message || err.detail || 'Failed to clear key')
+        return
+      }
+      const result = await res.json()
+      setKeys(prev => prev.map(k => k.provider === clearImpact.provider ? { ...k, is_set: false, masked_value: null } : k))
+      alert(
+        `✓ ${PROVIDER_META[clearImpact.provider]?.label} key cleared.\n\n` +
+        `Deactivated ${result.deactivated_models} models.\n` +
+        `Reassigned ${result.reassigned_personas} personas, ${result.reassigned_agents} agents.`
+      )
+      setClearImpact(null)
+      setReplacements({})
+    } finally {
+      setClearing(false)
+    }
+  }
+
+  // OpenRouter OAuth (PKCE) — redirects to OpenRouter, exchanges code for key on return
+  const connectOpenRouter = async () => {
+    // Generate PKCE code verifier (random 64-char string) + challenge (SHA-256)
+    const randomBytes = new Uint8Array(48)
+    crypto.getRandomValues(randomBytes)
+    const codeVerifier = btoa(String.fromCharCode(...randomBytes))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+
+    const encoder = new TextEncoder()
+    const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(codeVerifier))
+    const codeChallenge = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+
+    sessionStorage.setItem('openrouter_pkce_verifier', codeVerifier)
+
+    const callbackUrl = `${window.location.origin}/auth/openrouter/callback`
+    const authUrl = `https://openrouter.ai/auth?callback_url=${encodeURIComponent(callbackUrl)}&code_challenge=${codeChallenge}&code_challenge_method=S256`
+    window.location.href = authUrl
   }
 
   if (loading) return <div className="text-sm text-gray-500 py-8 text-center">Loading keys…</div>
@@ -90,6 +182,10 @@ function ApiKeysTab() {
         <strong>🔑 API Keys</strong> are stored in <code className="font-mono bg-amber-100 px-1 rounded">.env</code> and
         loaded into the backend at runtime. Keys are never exposed in full — only the first/last 4 chars are shown.
         Changes take effect immediately (no restart needed).
+      </div>
+      <div className="bg-purple-50 border border-purple-200 rounded-lg p-4 text-sm text-purple-800">
+        <strong>🔗 OpenRouter OAuth</strong> — Click "Connect with OAuth" to authorize via your OpenRouter account
+        (no copy/paste needed). OpenRouter proxies GPT-4, Claude, Llama, and many more models through one connection.
       </div>
 
       {keys.map((key) => {
@@ -116,6 +212,13 @@ function ApiKeysTab() {
                       className="text-xs text-indigo-500 hover:text-indigo-700 underline">
                       Get key ↗
                     </a>
+                  )}
+                  {!isEditing && key.provider === 'openrouter' && (
+                    <button
+                      onClick={connectOpenRouter}
+                      className="text-xs px-2 py-1 rounded border border-purple-300 hover:bg-purple-50 text-purple-700 font-medium">
+                      {key.is_set ? 'Reconnect with OAuth' : '🔗 Connect with OAuth'}
+                    </button>
                   )}
                   {!isEditing && (
                     <button
@@ -170,6 +273,115 @@ function ApiKeysTab() {
           </div>
         )
       })}
+
+      {/* Clear-key impact dialog */}
+      {clearImpact && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-2xl bg-white dark:bg-gray-900 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="px-6 py-4 border-b border-gray-100 dark:border-gray-800">
+              <h2 className="text-base font-semibold text-gray-900 dark:text-white">
+                ⚠️ Clearing {PROVIDER_META[clearImpact.provider]?.label || clearImpact.provider} key will affect other records
+              </h2>
+              <p className="text-xs text-gray-500 mt-1">
+                {clearImpact.affected_models.length} model(s) will be deactivated. Pick replacements for {clearImpact.affected_personas.length + clearImpact.affected_agents.length} reference(s) below.
+              </p>
+            </div>
+            <div className="px-6 py-5 overflow-y-auto flex-1 space-y-5">
+              {/* Personas */}
+              {clearImpact.affected_personas.length > 0 && (
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">Affected Personas</h3>
+                  <div className="space-y-2">
+                    {clearImpact.affected_personas.map((p, i) => {
+                      const affectedModel = clearImpact.affected_models.find(m => m.id === p.current_model_id)
+                      return (
+                        <div key={`${p.id}-${p.slot}-${i}`} className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-sm font-medium text-gray-900 dark:text-white">
+                              {p.name} <span className="text-xs text-gray-500 font-normal">({p.slot} model)</span>
+                            </span>
+                            <span className="text-xs text-gray-500 line-through">{affectedModel?.display_name || affectedModel?.model_id}</span>
+                          </div>
+                          <select
+                            value={replacements[p.current_model_id] || ''}
+                            onChange={e => setReplacements(r => ({ ...r, [p.current_model_id]: e.target.value }))}
+                            className="w-full rounded-md border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white px-2 py-1.5 text-xs"
+                          >
+                            <option value="">— Leave empty (will be set to None) —</option>
+                            {clearImpact.replacement_candidates.map(c => (
+                              <option key={c.id} value={c.id}>{c.provider_name} / {c.display_name || c.model_id}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Agents */}
+              {clearImpact.affected_agents.length > 0 && (
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">Affected Agents</h3>
+                  <div className="space-y-2">
+                    {clearImpact.affected_agents.map(a => {
+                      const affectedModel = clearImpact.affected_models.find(m => m.id === a.current_model_id)
+                      return (
+                        <div key={a.id} className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-sm font-medium text-gray-900 dark:text-white">{a.name}</span>
+                            <span className="text-xs text-gray-500 line-through">{affectedModel?.display_name || affectedModel?.model_id}</span>
+                          </div>
+                          <select
+                            value={replacements[a.current_model_id] || ''}
+                            onChange={e => setReplacements(r => ({ ...r, [a.current_model_id]: e.target.value }))}
+                            className="w-full rounded-md border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white px-2 py-1.5 text-xs"
+                          >
+                            <option value="">— Leave empty (will be set to None) —</option>
+                            {clearImpact.replacement_candidates.map(c => (
+                              <option key={c.id} value={c.id}>{c.provider_name} / {c.display_name || c.model_id}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {clearImpact.replacement_candidates.length === 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">
+                  No replacement models available from other providers. You can still clear the key — references will be set to None and you'll need to reassign models manually later.
+                </div>
+              )}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-100 dark:border-gray-800 flex items-center justify-between gap-3">
+              <button
+                onClick={() => { setClearImpact(null); setReplacements({}) }}
+                className="px-4 py-2 text-sm font-medium rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => confirmClearWithReplacements(true)}
+                  disabled={clearing}
+                  className="px-3 py-2 text-xs font-medium rounded-lg border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-50"
+                >
+                  Clear anyway (set refs to None)
+                </button>
+                <button
+                  onClick={() => confirmClearWithReplacements(false)}
+                  disabled={clearing}
+                  className="px-4 py-2 text-sm font-medium rounded-lg bg-orange-500 hover:bg-orange-600 text-white disabled:bg-gray-300"
+                >
+                  {clearing ? 'Applying...' : 'Apply Replacements & Clear'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -69,12 +69,15 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[dict]] = {
     ],
 }
 
-# Map provider name → which settings key holds its API key
+# Map provider name → which env var holds its API key.
+# Read from os.environ (hot-reloaded when keys are updated via UI) with
+# fallback to settings (initial .env load at startup).
+import os as _os
 PROVIDER_KEY_MAP = {
-    "anthropic":  lambda: settings.anthropic_api_key,
-    "google":     lambda: settings.google_api_key or settings.gemini_api_key,
-    "openai":     lambda: settings.openai_api_key,
-    "openrouter": lambda: settings.openrouter_api_key,
+    "anthropic":  lambda: _os.environ.get("ANTHROPIC_API_KEY")  or settings.anthropic_api_key,
+    "google":     lambda: _os.environ.get("GOOGLE_API_KEY")     or _os.environ.get("GEMINI_API_KEY") or settings.google_api_key or settings.gemini_api_key,
+    "openai":     lambda: _os.environ.get("OPENAI_API_KEY")     or settings.openai_api_key,
+    "openrouter": lambda: _os.environ.get("OPENROUTER_API_KEY") or settings.openrouter_api_key,
 }
 
 

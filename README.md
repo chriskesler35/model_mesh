@@ -252,6 +252,9 @@ pm2 restart all
 ### Settings
 - **Identity** - Edit SOUL.md, USER.md, IDENTITY.md; reset onboarding
 - **API Keys** - Set/update/clear provider keys; hot-reloaded instantly (no restart needed)
+  - **Auto-sync**: Adding a provider key instantly syncs that provider's models into your Models list — no manual action needed
+  - **OpenRouter OAuth**: Click "Connect with OAuth" to authorize via PKCE flow (no copy/paste)
+  - **Safe key removal**: Clearing a key shows an impact report with all affected personas/agents and lets you reassign them to replacement models before the key is cleared
 - **Memory Files** - USER.md, CONTEXT.md, PREFERENCES.md injected into every chat
 - **Preferences** - View, toggle, add, delete learned preferences; detect from chat
 - **Image Generation** - Configure ComfyUI path, Python executable, URL, GPU devices, default provider/workflow
@@ -262,8 +265,19 @@ pm2 restart all
 ### Providers & Models
 - On first startup: auto-discovers all locally installed Ollama models
 - Only adds paid provider models (Anthropic, Google, OpenRouter, OpenAI) when API keys are set
-- Add/update keys anytime in Settings → API Keys - models sync automatically
+- Add/update keys anytime in Settings → API Keys — models sync automatically
+- **Remove a key**: affected personas and agents get a replacement picker before the key is cleared (no orphaned references)
 - Manual sync: `POST /v1/models/sync`
+
+### Projects
+- **Guided Setup Wizard**: 6-step hybrid wizard walks new users through project creation
+  - Naming + description → template picker → location → agent assignment → sandbox mode → review
+  - Visual pickers for templates/agents/sandbox, conversational prompts for free-text fields
+  - "I'll finish manually" escape hatch on every step
+- **Quick Create**: traditional one-screen modal for power users
+- 4 built-in templates: Blank, Python API (FastAPI), Next.js App, CLI Tool
+- Sandbox modes: Restricted (project-dir-only, blocks shell) or Full Access
+- Point agents at any directory on disk — projects can register existing folders or scaffold new ones
 
 ---
 
