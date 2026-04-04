@@ -686,6 +686,104 @@ async def generate_with_comfyui(
         )
 
 
+def _convert_txt2img_to_img2img(workflow: dict, uploaded_image_name: str, denoise: float = 0.65) -> dict:
+    """Auto-convert a txt2img workflow to img2img by injecting LoadImage + VAEEncode.
+
+    Looks for EmptyLatentImage in the workflow and reroutes the KSampler's
+    latent_image input through a new LoadImage → VAEEncode chain that uses
+    the uploaded source image. Also lowers the KSampler's denoise strength
+    so it's a variation, not a full regeneration.
+
+    If the workflow already has a LoadImage node (i.e., it's already img2img),
+    this function just updates the image filename and returns it unchanged
+    structurally.
+    """
+    # Case 1: workflow is already img2img — update existing LoadImage
+    load_image_nodes = [
+        nid for nid, node in workflow.items()
+        if isinstance(node, dict) and node.get("class_type") == "LoadImage"
+    ]
+    if load_image_nodes:
+        for nid in load_image_nodes:
+            workflow[nid].setdefault("inputs", {})["image"] = uploaded_image_name
+        logger.info(f"Workflow has LoadImage — using as-is with uploaded image")
+        return workflow
+
+    # Case 2: txt2img workflow — find EmptyLatentImage to replace
+    empty_latent_id = None
+    for nid, node in workflow.items():
+        if isinstance(node, dict) and node.get("class_type") in (
+            "EmptyLatentImage", "EmptySD3LatentImage", "EmptyHunyuanLatentVideo"
+        ):
+            empty_latent_id = nid
+            break
+
+    if not empty_latent_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot convert workflow to img2img — no EmptyLatentImage node found to replace"
+        )
+
+    # Find the VAE source (from CheckpointLoaderSimple's 3rd output, or dedicated VAELoader)
+    vae_source = None
+    for nid, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        ct = node.get("class_type")
+        if ct in ("CheckpointLoaderSimple", "CheckpointLoader", "unCLIPCheckpointLoader"):
+            vae_source = [nid, 2]  # index 2 = VAE
+            break
+        if ct == "VAELoader":
+            vae_source = [nid, 0]
+            break
+    if not vae_source:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot convert workflow to img2img — no CheckpointLoader or VAELoader found"
+        )
+
+    # Generate new node IDs (max existing + 1, +2)
+    numeric_ids = [int(k) for k in workflow.keys() if str(k).isdigit()]
+    base_id = max(numeric_ids) if numeric_ids else 100
+    load_image_id = str(base_id + 1)
+    vae_encode_id = str(base_id + 2)
+
+    # Inject LoadImage + VAEEncode
+    workflow[load_image_id] = {
+        "class_type": "LoadImage",
+        "inputs": {"image": uploaded_image_name}
+    }
+    workflow[vae_encode_id] = {
+        "class_type": "VAEEncode",
+        "inputs": {"pixels": [load_image_id, 0], "vae": vae_source}
+    }
+
+    # Rewire every KSampler's latent_image input from EmptyLatentImage → VAEEncode
+    # Also lower denoise for true variation behavior
+    rewired = 0
+    for nid, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        if node.get("class_type") in ("KSampler", "KSamplerAdvanced", "SamplerCustom", "SamplerCustomAdvanced"):
+            inputs = node.setdefault("inputs", {})
+            latent_ref = inputs.get("latent_image")
+            if isinstance(latent_ref, list) and len(latent_ref) == 2 and str(latent_ref[0]) == str(empty_latent_id):
+                inputs["latent_image"] = [vae_encode_id, 0]
+                # Only set denoise if the node accepts it (KSampler does, KSamplerAdvanced does not — it uses start_at_step)
+                if node.get("class_type") == "KSampler":
+                    inputs["denoise"] = denoise
+                rewired += 1
+
+    if rewired == 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot convert workflow — no KSampler referenced EmptyLatentImage node '{empty_latent_id}'"
+        )
+
+    logger.info(f"Auto-converted txt2img → img2img: injected LoadImage={load_image_id}, VAEEncode={vae_encode_id}, rewired {rewired} sampler(s), denoise={denoise}")
+    return workflow
+
+
 async def _upload_image_to_comfyui(source_bytes: bytes, comfyui_url: str, filename: str = "devforgeai_variation.png") -> str:
     """Upload raw image bytes to ComfyUI's /upload/image endpoint. Returns the name ComfyUI assigns."""
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -711,9 +809,14 @@ async def generate_img2img_with_comfyui(
 ) -> dict:
     """Run an img2img variation via ComfyUI.
 
-    Uploads the source image to ComfyUI's input folder, then loads the
-    img2img workflow (SDXL by default) and injects the uploaded filename
-    into the LoadImage node.
+    Uploads the source image to ComfyUI's input folder, loads the chosen
+    workflow template, and either:
+      - uses it as-is if it already has a LoadImage node (true img2img workflow)
+      - auto-converts it to img2img by injecting LoadImage + VAEEncode nodes
+        if it's a txt2img workflow
+
+    This means ANY workflow (including custom/uncensored ones) can be used
+    for variations.
     """
     logger.info(f"ComfyUI img2img: workflow={workflow_id}, source_bytes={len(source_bytes)}, prompt={prompt[:60]}…")
 
@@ -721,19 +824,19 @@ async def generate_img2img_with_comfyui(
     uploaded_name = await _upload_image_to_comfyui(source_bytes, comfyui_url)
     logger.info(f"Uploaded source image to ComfyUI as: {uploaded_name}")
 
-    # 2. Load the img2img workflow template
+    # 2. Load the workflow template
     template_path = find_workflow_path(workflow_id, comfyui_dir)
     if not template_path:
         raise HTTPException(
             status_code=404,
-            detail=f"Img2img workflow '{workflow_id}' not found. Expected at data/workflows/{workflow_id}.json"
+            detail=f"Workflow '{workflow_id}' not found. Expected at data/workflows/{workflow_id}.json"
         )
 
     try:
         raw_text = template_path.read_text(encoding="utf-8-sig")
         template_data = json.loads(raw_text)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to load img2img workflow: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to load workflow: {e}")
 
     workflow_json = template_data.get("workflow", template_data)
     is_api_format = workflow_json and isinstance(workflow_json, dict) and any(
@@ -742,7 +845,7 @@ async def generate_img2img_with_comfyui(
     if not is_api_format:
         raise HTTPException(status_code=500, detail=f"Workflow '{workflow_id}' is not in API format")
 
-    # 3. Hydrate placeholders: {{init_image}}, {{prompt}}, {{checkpoint}}, {{negative_prompt}}
+    # 3. Hydrate the workflow's template placeholders (prompt, checkpoint, etc.)
     default_checkpoint = template_data.get("default_checkpoint", "sdxl.safetensors")
     variables = {
         "init_image": uploaded_name,
@@ -754,12 +857,12 @@ async def generate_img2img_with_comfyui(
     }
     workflow = _hydrate_workflow(workflow_json, variables)
 
-    # Ensure LoadImage has the right filename (redundant safety — _hydrate_workflow
-    # uses regex, this just guarantees it landed correctly)
+    # 4. Ensure the workflow is img2img-capable. If it's txt2img, auto-convert
+    #    it by injecting LoadImage + VAEEncode and rewiring KSamplers.
+    workflow = _convert_txt2img_to_img2img(workflow, uploaded_name, denoise=0.65)
+
+    # Randomize any zero seeds
     for node in workflow.values():
-        if isinstance(node, dict) and node.get("class_type") == "LoadImage":
-            node.get("inputs", {})["image"] = uploaded_name
-        # Randomize KSampler seed if still 0
         if isinstance(node, dict) and node.get("class_type") in ("KSampler", "KSamplerAdvanced"):
             inputs = node.get("inputs", {})
             if inputs.get("seed") in (0, "0"):

@@ -96,7 +96,9 @@ export default function GalleryPage() {
       .catch(() => {})
   }, [])
 
-  // Fetch img2img workflows (used when user picks ComfyUI for variation)
+  // Fetch ALL workflows (used when user picks ComfyUI for variation).
+  // The backend auto-injects LoadImage/VAEEncode into txt2img workflows so
+  // ANY workflow can be used for variations — including uncensored ones.
   useEffect(() => {
     fetch(`${API_BASE}/v1/workflows`, {
       headers: { 'Authorization': `Bearer ${API_KEY}` }
@@ -104,16 +106,16 @@ export default function GalleryPage() {
       .then(r => r.ok ? r.json() : { data: [] })
       .then(d => {
         const all: Workflow[] = d.data || []
-        // Filter to img2img workflows. Accept either an explicit category or
-        // workflow id/name containing img2img — users may name custom ones differently.
-        const imgWorkflows = all.filter(w =>
-          w.category === 'img2img' ||
-          w.id.toLowerCase().includes('img2img') ||
-          (w.name || '').toLowerCase().includes('img2img')
-        )
-        setImg2imgWorkflows(imgWorkflows)
-        // Default to sdxl-img2img if present, else the first img2img workflow
-        const preferred = imgWorkflows.find(w => w.id === 'sdxl-img2img') || imgWorkflows[0]
+        // Sort: img2img workflows first, then the rest alphabetically
+        all.sort((a, b) => {
+          const aImg = a.category === 'img2img' ? 0 : 1
+          const bImg = b.category === 'img2img' ? 0 : 1
+          if (aImg !== bImg) return aImg - bImg
+          return (a.name || a.id).localeCompare(b.name || b.id)
+        })
+        setImg2imgWorkflows(all)
+        // Default to sdxl-img2img if present, else the first workflow
+        const preferred = all.find(w => w.id === 'sdxl-img2img') || all[0]
         if (preferred) setVariationWorkflow(preferred.id)
       })
       .catch(() => {})
@@ -296,15 +298,19 @@ export default function GalleryPage() {
                     value={variationWorkflow}
                     onChange={(e) => setVariationWorkflow(e.target.value)}
                     className="px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white rounded-md focus:outline-none focus:ring-1 focus:ring-orange-400"
-                    title="ComfyUI img2img workflow"
+                    title="ComfyUI workflow — non-img2img workflows will be auto-converted"
                   >
-                    {img2imgWorkflows.map(w => (
-                      <option key={w.id} value={w.id}>{w.name || w.id}</option>
-                    ))}
+                    {img2imgWorkflows.map(w => {
+                      const isImg = w.category === 'img2img'
+                      const suffix = isImg ? '' : ' (txt2img → auto-img2img)'
+                      return (
+                        <option key={w.id} value={w.id}>{w.name || w.id}{suffix}</option>
+                      )
+                    })}
                   </select>
                 ) : (
-                  <span className="text-[10px] text-amber-600 dark:text-amber-400" title="No img2img workflows found in data/workflows/">
-                    no img2img workflows
+                  <span className="text-[10px] text-amber-600 dark:text-amber-400" title="No workflows found in data/workflows/">
+                    no workflows
                   </span>
                 )
               )}
