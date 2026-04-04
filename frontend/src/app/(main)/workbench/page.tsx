@@ -13,11 +13,15 @@ const AGENT_ICONS: Record<string, string> = {
 
 interface Session { id: string; task: string; agent_type: string; model: string; status: string; created_at: string }
 interface Model { id: string; model_id: string; display_name?: string; provider_name?: string }
+interface PipelineSummary { id: string; method_id: string; initial_task: string; status: string; current_phase_index: number; phases: any[]; auto_approve: boolean; created_at: string }
+
+const METHOD_ICONS: Record<string, string> = { bmad: '🧠', gsd: '⚡', superpowers: '🦸' }
 
 export default function WorkbenchListPage() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const [sessions, setSessions] = useState<Session[]>([])
+  const [pipelines, setPipelines] = useState<PipelineSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [showNew, setShowNew] = useState(false)
   const [task, setTask] = useState('')
@@ -27,10 +31,18 @@ export default function WorkbenchListPage() {
   const [projectId, setProjectId] = useState<string | null>(null)
   const [models, setModels] = useState<Model[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
+  // Pipeline mode
+  const [asPipeline, setAsPipeline] = useState(false)
+  const [pipelineMethod, setPipelineMethod] = useState<'bmad' | 'gsd' | 'superpowers'>('bmad')
+  const [autoApprove, setAutoApprove] = useState(false)
 
   const fetchSessions = useCallback(async () => {
-    const res = await fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] }))
-    setSessions(res.data || [])
+    const [sessRes, pipeRes] = await Promise.all([
+      fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+      fetch(`${API_BASE}/v1/workbench/pipelines`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+    ])
+    setSessions(sessRes.data || [])
+    setPipelines(pipeRes.data || [])
     setLoading(false)
   }, [])
 
@@ -68,13 +80,35 @@ export default function WorkbenchListPage() {
   const createSession = async () => {
     if (!task.trim() || creating) return
     setCreating(true)
-    const body: any = { task: task.trim(), agent_type: agentType, model }
-    if (projectId) body.project_id = projectId
-    const res = await fetch(`${API_BASE}/v1/workbench/sessions`, {
-      method: 'POST', headers: AUTH_HEADERS,
-      body: JSON.stringify(body),
-    }).then(r => r.json())
-    router.push(`/workbench/${res.id}`)
+    try {
+      const body: any = { task: task.trim(), agent_type: agentType, model }
+      if (projectId) body.project_id = projectId
+      const session = await fetch(`${API_BASE}/v1/workbench/sessions`, {
+        method: 'POST', headers: AUTH_HEADERS,
+        body: JSON.stringify(body),
+      }).then(r => r.json())
+
+      if (asPipeline) {
+        // Create a multi-agent pipeline on top of this session
+        const pipeline = await fetch(`${API_BASE}/v1/workbench/pipelines`, {
+          method: 'POST', headers: AUTH_HEADERS,
+          body: JSON.stringify({
+            session_id: session.id,
+            method_id: pipelineMethod,
+            task: task.trim(),
+            auto_approve: autoApprove,
+          }),
+        }).then(r => r.json())
+        if (pipeline.id) {
+          router.push(`/workbench/pipelines/${pipeline.id}`)
+          return
+        }
+      }
+      router.push(`/workbench/${session.id}`)
+    } catch (e) {
+      console.error(e)
+      setCreating(false)
+    }
   }
 
   const STATUS_COLOR: Record<string, string> = {
@@ -103,7 +137,7 @@ export default function WorkbenchListPage() {
         <div className="flex justify-center py-16">
           <div className="flex gap-1.5">{[0,1,2].map(i => <div key={i} className="w-2 h-2 bg-orange-400 rounded-full animate-bounce" style={{ animationDelay: `${i*0.15}s` }} />)}</div>
         </div>
-      ) : sessions.length === 0 ? (
+      ) : sessions.length === 0 && pipelines.length === 0 ? (
         <div className="text-center py-20">
           <div className="text-5xl mb-4">🔨</div>
           <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">No sessions yet</h3>
@@ -114,18 +148,54 @@ export default function WorkbenchListPage() {
           </button>
         </div>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {sessions.map(s => (
-            <button key={s.id} onClick={() => router.push(`/workbench/${s.id}`)}
-              className="text-left bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 hover:border-orange-300 hover:shadow-md transition-all">
-              <div className="flex items-start justify-between mb-3">
-                <span className="text-2xl">{AGENT_ICONS[s.agent_type] || '🤖'}</span>
-                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLOR[s.status] || 'bg-gray-100 text-gray-600'}`}>{s.status}</span>
-              </div>
-              <p className="text-sm font-medium text-gray-900 dark:text-white line-clamp-2 mb-2">{s.task}</p>
-              <p className="text-xs text-gray-400">{s.agent_type} · {s.model}</p>
-            </button>
-          ))}
+        <div className="space-y-6">
+        {pipelines.length > 0 && (
+          <div>
+            <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-2">
+              🎭 Multi-Agent Pipelines
+              <span className="text-xs font-normal text-gray-400">({pipelines.length})</span>
+            </h2>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {pipelines.map(p => (
+                <button key={p.id} onClick={() => router.push(`/workbench/pipelines/${p.id}`)}
+                  className="text-left bg-white dark:bg-gray-800 rounded-xl border border-indigo-200 dark:border-indigo-800 p-4 hover:border-indigo-400 hover:shadow-md transition-all">
+                  <div className="flex items-start justify-between mb-3">
+                    <span className="text-2xl">{METHOD_ICONS[p.method_id] || '🎭'}</span>
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLOR[p.status] || 'bg-gray-100 text-gray-600'}`}>{p.status}</span>
+                  </div>
+                  <p className="text-sm font-medium text-gray-900 dark:text-white line-clamp-2 mb-2">{p.initial_task}</p>
+                  <p className="text-xs text-gray-400">
+                    {p.method_id.toUpperCase()} · phase {Math.min(p.current_phase_index + 1, p.phases?.length || 0)}/{p.phases?.length || 0}
+                    {p.auto_approve && ' · auto'}
+                  </p>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {sessions.length > 0 && (
+          <div>
+            {pipelines.length > 0 && (
+              <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-2">
+                🔨 Single-Agent Sessions
+                <span className="text-xs font-normal text-gray-400">({sessions.length})</span>
+              </h2>
+            )}
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {sessions.map(s => (
+                <button key={s.id} onClick={() => router.push(`/workbench/${s.id}`)}
+                  className="text-left bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 hover:border-orange-300 hover:shadow-md transition-all">
+                  <div className="flex items-start justify-between mb-3">
+                    <span className="text-2xl">{AGENT_ICONS[s.agent_type] || '🤖'}</span>
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLOR[s.status] || 'bg-gray-100 text-gray-600'}`}>{s.status}</span>
+                  </div>
+                  <p className="text-sm font-medium text-gray-900 dark:text-white line-clamp-2 mb-2">{s.task}</p>
+                  <p className="text-xs text-gray-400">{s.agent_type} · {s.model}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         </div>
       )}
 
@@ -152,6 +222,37 @@ export default function WorkbenchListPage() {
                   placeholder="Describe what you want to build or accomplish..."
                   className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 resize-none" />
               </div>
+              {/* Multi-agent pipeline toggle */}
+              <div className="rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-900/20 p-3 space-y-2">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" checked={asPipeline} onChange={e => setAsPipeline(e.target.checked)}
+                    className="rounded text-indigo-600 focus:ring-indigo-400" />
+                  <span className="text-sm font-medium text-indigo-900 dark:text-indigo-200">
+                    🎭 Run as multi-agent pipeline
+                  </span>
+                </label>
+                {asPipeline && (
+                  <div className="pl-6 space-y-2">
+                    <div className="text-xs text-indigo-700 dark:text-indigo-300">
+                      Specialist agents hand off to each other through approval gates.
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <select value={pipelineMethod} onChange={e => setPipelineMethod(e.target.value as any)}
+                        className="rounded-lg border border-indigo-300 dark:border-indigo-700 dark:bg-gray-800 dark:text-white px-2 py-1.5 text-xs">
+                        <option value="bmad">BMAD — 6 phases (full lifecycle)</option>
+                        <option value="gsd">GSD — 3 phases (ship fast)</option>
+                        <option value="superpowers">SuperPowers — 4 phases (deep work)</option>
+                      </select>
+                      <label className="flex items-center gap-2 text-xs text-indigo-900 dark:text-indigo-200">
+                        <input type="checkbox" checked={autoApprove} onChange={e => setAutoApprove(e.target.checked)}
+                          className="rounded text-indigo-600 focus:ring-indigo-400" />
+                        Auto-approve each phase
+                      </label>
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Agent</label>
