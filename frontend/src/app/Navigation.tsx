@@ -208,7 +208,10 @@ export default function Navigation() {
       {/* Nav items */}
       <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-4">
         {GROUPS.map(group => {
-          const groupItems = NAV_ITEMS.filter(item => group.items.includes(item.href))
+          // Use group.items order (NOT NAV_ITEMS order) so nesting renders
+          // immediately after the parent — e.g. /workbench right after /projects.
+          const byHref = new Map(NAV_ITEMS.map(item => [item.href, item]))
+          const groupItems = group.items.map(href => byHref.get(href)).filter((x): x is typeof NAV_ITEMS[number] => !!x)
           return (
             <div key={group.label}>
               {!collapsed && (
