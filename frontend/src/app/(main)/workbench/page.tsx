@@ -162,13 +162,37 @@ export default function WorkbenchListPage() {
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Workbench</h1>
           <p className="mt-1 text-sm text-gray-500">Watch agents build in real-time — and step in when needed</p>
         </div>
-        <button onClick={() => setShowNew(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium rounded-lg transition-colors">
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-          New Session
-        </button>
+        <div className="flex items-center gap-2">
+          {(sessions.length > 0 || pipelines.length > 0) && (
+            <button
+              onClick={async () => {
+                const total = sessions.length + pipelines.length
+                if (!confirm(`Delete ALL ${total} session(s) + pipeline(s)? Running items are kept. This cannot be undone.`)) return
+                try {
+                  const res = await fetch(`${API_BASE}/v1/workbench/sessions`, {
+                    method: 'DELETE', headers: AUTH_HEADERS,
+                  })
+                  const data = await res.json()
+                  if (!res.ok) throw new Error(data.detail || 'Delete failed')
+                  await fetchSessions()
+                } catch (e: any) {
+                  alert(`Cleanup failed: ${e.message}`)
+                }
+              }}
+              className="px-3 py-2 text-sm font-medium rounded-lg border border-red-300 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+              title="Delete all sessions + attached pipelines (keeps running items)"
+            >
+              Clear All
+            </button>
+          )}
+          <button onClick={() => setShowNew(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium rounded-lg transition-colors">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            New Session
+          </button>
+        </div>
       </div>
 
       {loading ? (

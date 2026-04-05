@@ -722,6 +722,24 @@ async def cancel_pipeline(pipeline_id: str, db: AsyncSession = Depends(get_db)):
     return {"ok": True}
 
 
+@router.delete("/{pipeline_id}", dependencies=[Depends(verify_api_key)])
+async def delete_pipeline(pipeline_id: str, db: AsyncSession = Depends(get_db)):
+    """Delete a single pipeline and all its phase runs. Session is NOT deleted."""
+    from app.models.pipeline import Pipeline, PhaseRun
+    p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
+    if not p:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+    # Delete phase runs
+    runs = (await db.execute(select(PhaseRun).where(PhaseRun.pipeline_id == pipeline_id))).scalars().all()
+    for r in runs:
+        await db.delete(r)
+    await db.delete(p)
+    await db.commit()
+    _queues.pop(pipeline_id, None)
+    _event_logs.pop(pipeline_id, None)
+    return {"ok": True, "deleted_phase_runs": len(runs)}
+
+
 @router.get("/{pipeline_id}/stream")
 async def stream_pipeline(pipeline_id: str, request: Request):
     """SSE stream — no auth (EventSource limitation)."""

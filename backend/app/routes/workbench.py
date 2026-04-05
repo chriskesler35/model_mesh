@@ -801,3 +801,62 @@ async def delete_session(session_id: str, db: AsyncSession = Depends(get_db)):
     _pending_messages.pop(session_id, None)
     _event_logs.pop(session_id, None)
     return {"ok": True}
+
+
+@router.delete("/sessions", dependencies=[Depends(verify_api_key)])
+async def delete_all_sessions(
+    status: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk-delete workbench sessions AND their attached pipelines.
+
+    Optional ?status=completed|failed|cancelled|waiting filter — if omitted,
+    deletes every non-running session. Running sessions are preserved unless
+    the status filter explicitly selects them.
+    """
+    from app.models.workbench import WorkbenchSession
+    from app.models.pipeline import Pipeline, PhaseRun
+
+    query = select(WorkbenchSession)
+    if status:
+        query = query.where(WorkbenchSession.status == status)
+    else:
+        # Default: everything except currently-running
+        query = query.where(WorkbenchSession.status != "running")
+
+    sessions = (await db.execute(query)).scalars().all()
+    session_ids = [s.id for s in sessions]
+
+    # Collect attached pipelines + phase runs so they cascade-clean too
+    deleted_pipelines = 0
+    deleted_phase_runs = 0
+    if session_ids:
+        # Delete phase_runs via their pipelines' session_ids
+        pipelines = (await db.execute(
+            select(Pipeline).where(Pipeline.session_id.in_(session_ids))
+        )).scalars().all()
+        for p in pipelines:
+            phase_runs = (await db.execute(
+                select(PhaseRun).where(PhaseRun.pipeline_id == p.id)
+            )).scalars().all()
+            for pr in phase_runs:
+                await db.delete(pr)
+                deleted_phase_runs += 1
+            await db.delete(p)
+            deleted_pipelines += 1
+
+        for s in sessions:
+            await db.delete(s)
+            # Clean up in-memory state
+            _queues.pop(s.id, None)
+            _pending_messages.pop(s.id, None)
+            _event_logs.pop(s.id, None)
+
+        await db.commit()
+
+    return {
+        "ok": True,
+        "deleted_sessions": len(session_ids),
+        "deleted_pipelines": deleted_pipelines,
+        "deleted_phase_runs": deleted_phase_runs,
+    }
