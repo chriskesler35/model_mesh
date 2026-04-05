@@ -35,7 +35,7 @@ export default function WorkbenchListPage() {
   const [asPipeline, setAsPipeline] = useState(false)
   const [pipelineMethod, setPipelineMethod] = useState<'bmad' | 'gsd' | 'superpowers'>('bmad')
   const [autoApprove, setAutoApprove] = useState(false)
-  const [phasePreview, setPhasePreview] = useState<Array<{name: string; role: string; default_model: string; artifact_type: string; has_persona?: boolean; persona_name?: string | null; persona_model?: string | null}>>([])
+  const [phasePreview, setPhasePreview] = useState<Array<{name: string; role: string; default_model: string; artifact_type: string; has_agent?: boolean; agent_name?: string | null; has_persona?: boolean; persona_name?: string | null; resolved_model?: string | null; resolved_via?: string | null}>>([])
   const [modelOverrides, setModelOverrides] = useState<Record<string, string>>({})
   const [customizeModels, setCustomizeModels] = useState(false)
 
@@ -326,7 +326,7 @@ export default function WorkbenchListPage() {
                       </label>
                     </div>
                     {phasePreview.length > 0 && (() => {
-                      const missingPersonas = phasePreview.filter(ph => !ph.has_persona)
+                      const unresolved = phasePreview.filter(ph => !ph.resolved_model)
                       return (
                       <div className="mt-2 pt-2 border-t border-indigo-200 dark:border-indigo-800">
                         <div className="flex items-center justify-between mb-1.5">
@@ -338,47 +338,51 @@ export default function WorkbenchListPage() {
                             {customizeModels ? '← default models' : 'customize models →'}
                           </button>
                         </div>
-                        {missingPersonas.length > 0 && !model && (
+                        {unresolved.length > 0 && !model && (
                           <div className="mb-2 p-2 rounded bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 text-[10px] text-amber-800 dark:text-amber-200">
-                            <div className="font-semibold mb-0.5">⚠ Missing personas: {missingPersonas.map(p => p.name).join(', ')}</div>
+                            <div className="font-semibold mb-0.5">⚠ {unresolved.length} phase(s) using template defaults</div>
                             <div>
-                              Create personas with these exact names in the Personas page to control which model + system prompt each phase uses.
-                              Those phases will fall back to the template default until you do.
+                              Go to the <strong>Agents page</strong> and bind an agent (with a persona) to these phases:{' '}
+                              <span className="font-mono">{unresolved.map(p => p.name).join(', ')}</span>
                             </div>
                           </div>
                         )}
                         <div className="space-y-1">
                           {phasePreview.map((ph, i) => {
-                            const effectiveModel = modelOverrides[ph.name] || model || ph.persona_model || ph.default_model
+                            const effectiveModel = modelOverrides[ph.name] || model || ph.resolved_model || ph.default_model
                             const source = modelOverrides[ph.name] ? 'override' :
                               model ? 'session' :
-                              ph.persona_model ? 'persona' : 'default'
+                              ph.resolved_model ? 'persona' : 'default'
                             return (
-                            <div key={i} className="flex items-center gap-2 text-[11px]">
+                            <div key={i} className="flex items-center gap-1.5 text-[11px]">
                               <span className="text-gray-400 w-4 text-right">{i + 1}.</span>
-                              <span className="font-medium text-indigo-900 dark:text-indigo-200 w-20 truncate">{ph.name}</span>
-                              {ph.has_persona ? (
-                                <span className="text-[9px] px-1 py-0.5 rounded bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300 font-medium" title={`Persona: ${ph.persona_name}`}>✓ {ph.persona_name}</span>
+                              <span className="font-medium text-indigo-900 dark:text-indigo-200 w-16 truncate">{ph.name}</span>
+                              {ph.has_agent ? (
+                                <span className="text-[9px] px-1 py-0.5 rounded bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300 font-medium" title={`Agent: ${ph.agent_name}`}>👤 {ph.agent_name}</span>
                               ) : (
-                                <span className="text-[9px] px-1 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300 font-medium" title="No persona — falls back to template default">no persona</span>
+                                <span className="text-[9px] px-1 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300 font-medium" title="No agent bound">no agent</span>
                               )}
-                              <span className="text-gray-500 truncate flex-1">{ph.role}</span>
+                              {ph.has_persona && (
+                                <span className="text-[9px] px-1 py-0.5 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 font-medium" title={`Persona: ${ph.persona_name}`}>🎭 {ph.persona_name}</span>
+                              )}
+                              <span className="text-gray-400 truncate flex-1"></span>
                               {customizeModels ? (
                                 <select
-                                  value={modelOverrides[ph.name] || model || ph.persona_model || ph.default_model}
+                                  value={modelOverrides[ph.name] || model || ph.resolved_model || ph.default_model}
                                   onChange={e => setModelOverrides(prev => ({ ...prev, [ph.name]: e.target.value }))}
                                   className="rounded border border-indigo-200 dark:border-indigo-700 dark:bg-gray-800 dark:text-white px-1 py-0.5 text-[10px] max-w-[150px]">
                                   {model && <option value={model}>{model} (session)</option>}
-                                  {ph.persona_model && ph.persona_model !== model && <option value={ph.persona_model}>{ph.persona_model} ({ph.persona_name})</option>}
+                                  {ph.resolved_model && ph.resolved_model !== model && <option value={ph.resolved_model}>{ph.resolved_model} ({ph.resolved_via || 'agent'})</option>}
                                   <option value={ph.default_model}>{ph.default_model} (template)</option>
-                                  {models.filter(m => m.model_id !== model && m.model_id !== ph.persona_model && m.model_id !== ph.default_model).map(m => (
+                                  {models.filter(m => m.model_id !== model && m.model_id !== ph.resolved_model && m.model_id !== ph.default_model).map(m => (
                                     <option key={m.id} value={m.model_id}>{m.display_name || m.model_id}</option>
                                   ))}
                                 </select>
                               ) : (
-                                <span className={`font-mono text-[10px] truncate max-w-[120px] ${
+                                <span className={`font-mono text-[10px] truncate max-w-[110px] ${
                                   source === 'persona' ? 'text-green-600 dark:text-green-400' :
                                   source === 'override' ? 'text-indigo-600 dark:text-indigo-400' :
+                                  source === 'session' ? 'text-indigo-600 dark:text-indigo-400' :
                                   'text-gray-400'
                                 }`} title={`from ${source}`}>
                                   {effectiveModel}

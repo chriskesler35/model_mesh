@@ -17,6 +17,7 @@ class Agent(Base, BaseMixin):
     system_prompt = Column(Text, nullable=False)
     model_id = Column(UUID(as_uuid=True))  # Direct model override (optional if persona_id set)
     persona_id = Column(UUID(as_uuid=True))  # Persona to use (model resolved through persona)
+    method_phase = Column(String(50), nullable=True, index=True)  # Method phase this agent serves (e.g. "Coder", "Analyst"). Case-insensitive match to phase_templates.
     tools = Column(JSON, default=list)  # ["read_file", "write_file", "shell_execute", etc.]
     memory_enabled = Column(Boolean, default=True)
     max_iterations = Column(Integer, default=10)

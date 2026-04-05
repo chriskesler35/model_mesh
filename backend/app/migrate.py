@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 MIGRATIONS = [
     # agents table - persona support
     "ALTER TABLE agents ADD COLUMN persona_id VARCHAR(36)",
+    "ALTER TABLE agents ADD COLUMN method_phase VARCHAR(50)",
     # conversations table - new session management columns
     "ALTER TABLE conversations ADD COLUMN title VARCHAR(200)",
     "ALTER TABLE conversations ADD COLUMN pinned BOOLEAN NOT NULL DEFAULT 0",

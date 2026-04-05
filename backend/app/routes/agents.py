@@ -87,7 +87,7 @@ def _agent_to_dict(agent: Agent) -> dict:
     from datetime import datetime
     d = {}
     for f in ['id', 'name', 'agent_type', 'description', 'system_prompt',
-              'model_id', 'persona_id', 'tools', 'memory_enabled',
+              'model_id', 'persona_id', 'method_phase', 'tools', 'memory_enabled',
               'max_iterations', 'timeout_seconds', 'is_active', 'created_at', 'updated_at']:
         val = getattr(agent, f, None)
         if isinstance(val, _uuid.UUID):
@@ -107,6 +107,7 @@ class AgentCreate(BaseModel):
     system_prompt: str
     model_id: Optional[str] = None
     persona_id: Optional[str] = None
+    method_phase: Optional[str] = None
     tools: List[str] = []
     memory_enabled: bool = True
     max_iterations: int = 10
@@ -120,6 +121,7 @@ class AgentUpdate(BaseModel):
     system_prompt: Optional[str] = None
     model_id: Optional[str] = None
     persona_id: Optional[str] = None
+    method_phase: Optional[str] = None
     tools: Optional[List[str]] = None
     memory_enabled: Optional[bool] = None
     max_iterations: Optional[int] = None
@@ -141,6 +143,7 @@ class AgentResponse(BaseModel):
     resolved_model_id: Optional[str] = None
     resolved_model_name: Optional[str] = None
     resolved_via: Optional[str] = None  # "persona" | "direct" | None
+    method_phase: Optional[str] = None
     tools: List[str] = []
     memory_enabled: bool = True
     max_iterations: int = 10
@@ -159,6 +162,31 @@ class AgentListResponse(BaseModel):
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
+
+@router.get("/method-phases")
+async def list_method_phases():
+    """List all unique phase names across every development method.
+
+    Returns one entry per phase name with the role, methods it appears in,
+    and the bound agent (if any). The frontend uses this to show which phase
+    slots exist and which don't have an agent assigned yet.
+    """
+    from app.services.phase_templates import METHOD_PHASE_TEMPLATES
+    # Collect unique phase names + which methods use them + role
+    phase_info: Dict[str, dict] = {}
+    for method_id, phases in METHOD_PHASE_TEMPLATES.items():
+        for ph in phases:
+            name = ph["name"]
+            if name not in phase_info:
+                phase_info[name] = {
+                    "name": name,
+                    "role": ph["role"],
+                    "methods": [],
+                    "default_model": ph.get("default_model"),
+                }
+            phase_info[name]["methods"].append(method_id)
+    return {"data": list(phase_info.values())}
+
 
 @router.get("", response_model=AgentListResponse)
 async def list_agents(

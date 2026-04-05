@@ -89,6 +89,11 @@ export interface Agent {
   description?: string;
   system_prompt: string;
   model_id?: string;
+  persona_id?: string;
+  persona_name?: string;
+  resolved_model_name?: string;
+  resolved_via?: string;
+  method_phase?: string;
   tools: string[];
   memory_enabled: boolean;
   max_iterations: number;
@@ -96,6 +101,13 @@ export interface Agent {
   is_active: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface MethodPhase {
+  name: string;
+  role: string;
+  methods: string[];
+  default_model?: string;
 }
 
 export const AGENT_TYPES = [

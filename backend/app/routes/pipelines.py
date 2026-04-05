@@ -210,34 +210,80 @@ async def _run_phase(pipeline_id: str, phase_index: int):
     phase_name = phase_def["name"]
     agent_role = phase_def["role"]
 
-    # Model resolution priority:
-    #   1. User override per-phase (phase_def["model"] when set from model_overrides)
-    #   2. Persona matching the phase name (case-insensitive) — user-defined
-    #      "Coder" persona picks the Coder phase's model
-    #   3. Template default_model (fallback)
-    persona_model = None
-    persona_system_prompt = None
+    # Model resolution chain (highest priority wins):
+    #   1. Per-phase user override (phase_def["model"] from model_overrides)
+    #   2. Agent bound to this method_phase → its persona → persona.primary_model
+    #   3. Agent bound to this method_phase → its own model_id (if no persona)
+    #   4. Persona matching phase name (legacy, direct persona match)
+    #   5. Template default_model (fallback)
+    resolved_model = None
+    resolved_system_prompt = None  # persona + agent prompts prepended to phase prompt
+    resolved_via = None             # for logging
+
     if not phase_def.get("model"):
-        # No explicit override — see if user has a persona matching this phase name
         try:
+            from app.models.agent import Agent
             from app.models.persona import Persona
             from app.models.model import Model as ModelORM
-            async with AsyncSessionLocal() as db:
-                # Case-insensitive name match against phase name (e.g. "Coder")
-                from sqlalchemy import func as sqlfunc
-                persona = (await db.execute(
-                    select(Persona).where(sqlfunc.lower(Persona.name) == phase_name.lower())
-                )).scalar_one_or_none()
-                if persona and persona.primary_model_id:
-                    m = (await db.execute(select(ModelORM).where(ModelORM.id == persona.primary_model_id))).scalar_one_or_none()
-                    if m:
-                        persona_model = m.model_id
-                        persona_system_prompt = persona.system_prompt
-                        logger.info(f"Phase '{phase_name}' → persona '{persona.name}' → model '{persona_model}'")
-        except Exception as e:
-            logger.debug(f"Persona lookup for phase {phase_name} failed: {e}")
+            from sqlalchemy import func as sqlfunc
 
-    model_id = phase_def.get("model") or persona_model or phase_def.get("default_model") or "claude-sonnet-4-6"
+            async with AsyncSessionLocal() as db:
+                # Look up the agent bound to this phase (case-insensitive)
+                agent = (await db.execute(
+                    select(Agent)
+                    .where(sqlfunc.lower(Agent.method_phase) == phase_name.lower())
+                    .where(Agent.is_active == True)
+                    .order_by(Agent.created_at)
+                    .limit(1)
+                )).scalar_one_or_none()
+
+                if agent:
+                    extra_prompts = []
+                    # If the agent has its own system_prompt, prepend it
+                    if agent.system_prompt:
+                        extra_prompts.append(f"# Agent: {agent.name}\n{agent.system_prompt}")
+                    # Resolve model via persona if attached
+                    if agent.persona_id:
+                        persona = (await db.execute(
+                            select(Persona).where(Persona.id == agent.persona_id)
+                        )).scalar_one_or_none()
+                        if persona:
+                            if persona.system_prompt:
+                                extra_prompts.append(f"# Persona: {persona.name}\n{persona.system_prompt}")
+                            if persona.primary_model_id:
+                                m = (await db.execute(select(ModelORM).where(ModelORM.id == persona.primary_model_id))).scalar_one_or_none()
+                                if m:
+                                    resolved_model = m.model_id
+                                    resolved_via = f"agent '{agent.name}' → persona '{persona.name}'"
+                    # Fallback: agent's own model_id if no persona
+                    if not resolved_model and agent.model_id:
+                        m = (await db.execute(select(ModelORM).where(ModelORM.id == agent.model_id))).scalar_one_or_none()
+                        if m:
+                            resolved_model = m.model_id
+                            resolved_via = f"agent '{agent.name}' (direct model)"
+                    if extra_prompts:
+                        resolved_system_prompt = "\n\n".join(extra_prompts)
+
+                # Legacy fallback: persona with a matching name, even if no agent
+                if not resolved_model:
+                    persona = (await db.execute(
+                        select(Persona).where(sqlfunc.lower(Persona.name) == phase_name.lower())
+                    )).scalar_one_or_none()
+                    if persona and persona.primary_model_id:
+                        m = (await db.execute(select(ModelORM).where(ModelORM.id == persona.primary_model_id))).scalar_one_or_none()
+                        if m:
+                            resolved_model = m.model_id
+                            resolved_via = f"persona '{persona.name}' (name match, no agent)"
+                            if persona.system_prompt:
+                                resolved_system_prompt = f"# Persona: {persona.name}\n{persona.system_prompt}"
+        except Exception as e:
+            logger.warning(f"Phase '{phase_name}' resolution lookup failed: {e}")
+
+    if resolved_via:
+        logger.info(f"Phase '{phase_name}' → {resolved_via} → model '{resolved_model}'")
+
+    model_id = phase_def.get("model") or resolved_model or phase_def.get("default_model") or "claude-sonnet-4-6"
+    persona_system_prompt = resolved_system_prompt  # used below when composing the phase system prompt
 
     # Create PhaseRun row
     phase_run_id = str(uuid.uuid4())
@@ -509,10 +555,11 @@ async def _advance_to_next(pipeline_id: str, current_index: int):
 async def preview_phases(method_id: str):
     """Return the ordered list of phases for a method (without starting a pipeline).
 
-    Also looks up which phases have a matching persona (case-insensitive name match)
-    so the frontend can warn the user about missing personas.
+    For each phase, reports the full Phase → Agent → Persona → Model chain
+    so the frontend can show the user what will actually run.
     """
     from app.services.phase_templates import get_phases_for_method, list_supported_methods
+    from app.models.agent import Agent
     from app.models.persona import Persona
     from app.models.model import Model as ModelORM
     try:
@@ -523,25 +570,69 @@ async def preview_phases(method_id: str):
             detail=f"Method '{method_id}' not supported. Available: {list_supported_methods()}"
         )
 
-    # Load all personas once for matching
     from sqlalchemy import func as sqlfunc
     async with AsyncSessionLocal() as db:
+        # All active agents keyed by method_phase
+        agent_rows = (await db.execute(
+            select(Agent).where(Agent.is_active == True).where(Agent.method_phase.isnot(None))
+        )).scalars().all()
+        agent_by_phase = {}
+        for a in agent_rows:
+            key = (a.method_phase or "").lower()
+            if key and key not in agent_by_phase:  # first wins (ordered by created_at already? no — keep consistent)
+                agent_by_phase[key] = a
+
         persona_rows = (await db.execute(select(Persona))).scalars().all()
+        persona_by_id = {str(p.id): p for p in persona_rows}
         persona_by_name = {p.name.lower(): p for p in persona_rows}
-        # Preload models for primary_model_id resolution
+
         model_rows = (await db.execute(select(ModelORM))).scalars().all()
         model_by_id = {str(m.id): m for m in model_rows}
 
-    def persona_info(phase_name: str) -> dict:
-        persona = persona_by_name.get(phase_name.lower())
-        if not persona:
-            return {"has_persona": False, "persona_name": None, "persona_model": None}
-        m = model_by_id.get(str(persona.primary_model_id)) if persona.primary_model_id else None
-        return {
-            "has_persona": True,
-            "persona_name": persona.name,
-            "persona_model": m.model_id if m else None,
+    def chain_info(phase_name: str) -> dict:
+        """Resolve the agent → persona → model chain for this phase."""
+        result = {
+            "has_agent": False, "agent_name": None,
+            "has_persona": False, "persona_name": None,
+            "resolved_model": None, "resolved_via": None,
         }
+        # 1. Agent bound via method_phase
+        agent = agent_by_phase.get(phase_name.lower())
+        if agent:
+            result["has_agent"] = True
+            result["agent_name"] = agent.name
+            # 1a. Agent -> Persona -> Model
+            if agent.persona_id:
+                persona = persona_by_id.get(str(agent.persona_id))
+                if persona:
+                    result["has_persona"] = True
+                    result["persona_name"] = persona.name
+                    if persona.primary_model_id:
+                        m = model_by_id.get(str(persona.primary_model_id))
+                        if m:
+                            result["resolved_model"] = m.model_id
+                            result["resolved_via"] = "agent→persona"
+                            return result
+            # 1b. Agent -> direct model
+            if agent.model_id:
+                m = model_by_id.get(str(agent.model_id))
+                if m:
+                    result["resolved_model"] = m.model_id
+                    result["resolved_via"] = "agent→model"
+                    return result
+        # 2. Legacy fallback — persona matching the phase name directly
+        persona = persona_by_name.get(phase_name.lower())
+        if persona:
+            result["has_persona"] = True
+            result["persona_name"] = persona.name
+            if persona.primary_model_id:
+                m = model_by_id.get(str(persona.primary_model_id))
+                if m:
+                    result["resolved_model"] = m.model_id
+                    result["resolved_via"] = "persona name-match"
+                    return result
+        # 3. Nothing resolved — frontend will show template default
+        return result
 
     return {
         "method_id": method_id,
@@ -551,7 +642,9 @@ async def preview_phases(method_id: str):
                 "role": p["role"],
                 "default_model": p["default_model"],
                 "artifact_type": p["artifact_type"],
-                **persona_info(p["name"]),
+                **chain_info(p["name"]),
+                # Back-compat for existing frontend code
+                "persona_model": None,  # replaced by resolved_model
             }
             for p in phases
         ],

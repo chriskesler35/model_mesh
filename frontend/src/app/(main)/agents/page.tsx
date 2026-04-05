@@ -5,7 +5,7 @@ import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { api } from '@/lib/api'
-import { Agent, AGENT_TYPES } from '@/lib/types'
+import { Agent, AGENT_TYPES, MethodPhase } from '@/lib/types'
 
 const AGENT_TYPE_ICONS: Record<string, string> = {
   coder: '💻',
@@ -29,11 +29,13 @@ const AGENT_TYPE_COLORS: Record<string, string> = {
 
 export default function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([])
+  const [phases, setPhases] = useState<MethodPhase[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     loadAgents()
+    loadPhases()
   }, [])
 
   const loadAgents = async () => {
@@ -47,6 +49,28 @@ export default function AgentsPage() {
       console.error(err)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadPhases = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/v1/agents/method-phases`, { headers: AUTH_HEADERS })
+      if (res.ok) {
+        const data = await res.json()
+        setPhases(data.data || [])
+      }
+    } catch (err) {
+      console.error('Failed to load method phases', err)
+    }
+  }
+
+  const bindAgentToPhase = async (agentId: string, phaseName: string | null) => {
+    try {
+      await api.updateAgent(agentId, { method_phase: phaseName } as any)
+      setAgents(agents.map(a => a.id === agentId ? { ...a, method_phase: phaseName || undefined } : a))
+    } catch (err) {
+      console.error('Failed to bind phase:', err)
+      alert('Failed to bind agent to phase')
     }
   }
 
@@ -100,6 +124,65 @@ export default function AgentsPage() {
         </Link>
       </div>
 
+      {/* Method Phase Bindings */}
+      {phases.length > 0 && (
+        <div className="bg-indigo-50 dark:bg-indigo-900/10 border border-indigo-200 dark:border-indigo-800 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h2 className="text-sm font-semibold text-indigo-900 dark:text-indigo-200">🎭 Method Phase Bindings</h2>
+              <p className="text-xs text-indigo-700 dark:text-indigo-300 mt-0.5">
+                Each development method (BMAD/GSD/SuperPowers) has phases. Bind one agent to each phase so pipelines use the right model + persona.
+              </p>
+            </div>
+          </div>
+          <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
+            {phases.map(phase => {
+              const bound = agents.find(a => a.method_phase?.toLowerCase() === phase.name.toLowerCase())
+              return (
+                <div key={phase.name}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-lg border ${
+                    bound
+                      ? 'bg-white dark:bg-gray-800 border-green-300 dark:border-green-700'
+                      : 'bg-amber-50 dark:bg-amber-900/20 border-amber-300 dark:border-amber-700'
+                  }`}>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs font-semibold text-gray-900 dark:text-white">{phase.name}</span>
+                      <span className="text-[10px] text-gray-500 dark:text-gray-400">({phase.role})</span>
+                    </div>
+                    <div className="text-[10px] text-gray-500 dark:text-gray-400 flex items-center gap-1">
+                      {phase.methods.map(m => (
+                        <span key={m} className="px-1 py-0.5 rounded bg-gray-100 dark:bg-gray-700 uppercase">{m}</span>
+                      ))}
+                    </div>
+                  </div>
+                  <select
+                    value={bound?.id || ''}
+                    onChange={(e) => {
+                      const agentId = e.target.value
+                      if (!agentId) {
+                        // Unbind all agents currently bound to this phase
+                        if (bound) bindAgentToPhase(bound.id, null)
+                        return
+                      }
+                      // If a different agent is currently bound, unbind it first
+                      if (bound && bound.id !== agentId) bindAgentToPhase(bound.id, null)
+                      bindAgentToPhase(agentId, phase.name)
+                    }}
+                    className="text-[11px] px-1.5 py-1 rounded border border-gray-300 dark:border-gray-600 dark:bg-gray-900 dark:text-white max-w-[140px]"
+                  >
+                    <option value="">— no agent —</option>
+                    {agents.filter(a => a.is_active).map(a => (
+                      <option key={a.id} value={a.id}>{a.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
         {agents.map(agent => (
           <div
@@ -111,9 +194,16 @@ export default function AgentsPage() {
                 <span className="text-2xl">{AGENT_TYPE_ICONS[agent.agent_type] || '🤖'}</span>
                 <div>
                   <h3 className="font-semibold text-gray-900 dark:text-white">{agent.name}</h3>
-                  <span className={`text-xs px-2 py-0.5 rounded-full ${AGENT_TYPE_COLORS[agent.agent_type] || 'bg-gray-100 dark:bg-gray-700'}`}>
-                    {agent.agent_type}
-                  </span>
+                  <div className="flex items-center gap-1 flex-wrap">
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${AGENT_TYPE_COLORS[agent.agent_type] || 'bg-gray-100 dark:bg-gray-700'}`}>
+                      {agent.agent_type}
+                    </span>
+                    {agent.method_phase && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300 font-medium" title="Bound to this method phase">
+                        🎭 {agent.method_phase}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
               <button
@@ -128,9 +218,24 @@ export default function AgentsPage() {
               </button>
             </div>
 
-            <p className="text-sm text-gray-600 dark:text-gray-400 mb-3 line-clamp-2">
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-2 line-clamp-2">
               {agent.description || 'No description'}
             </p>
+
+            {(agent.persona_name || agent.resolved_model_name) && (
+              <div className="text-[11px] text-gray-500 dark:text-gray-400 mb-2 flex items-center gap-1 flex-wrap">
+                {agent.persona_name && (
+                  <span className="px-1.5 py-0.5 rounded bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300">
+                    🎭 {agent.persona_name}
+                  </span>
+                )}
+                {agent.resolved_model_name && (
+                  <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 font-mono">
+                    {agent.resolved_model_name}
+                  </span>
+                )}
+              </div>
+            )}
 
             <div className="flex flex-wrap gap-1 mb-3">
               {agent.tools.slice(0, 4).map(tool => (
