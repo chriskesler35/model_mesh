@@ -877,13 +877,17 @@ async def generate_img2img_with_comfyui(
                 headers={"Content-Type": "application/json"}
             )
             if queue_resp.status_code != 200:
+                # Log the full workflow so we can diagnose
+                logger.error(f"ComfyUI rejected workflow {workflow_id}. Response: {queue_resp.text[:800]}")
+                logger.error(f"Workflow sent: {json.dumps(workflow)[:2000]}")
                 raise HTTPException(
                     status_code=500,
-                    detail=f"ComfyUI rejected img2img workflow: {queue_resp.text[:300]}"
+                    detail=f"ComfyUI rejected '{workflow_id}' workflow: {queue_resp.text[:300]}"
                 )
             prompt_id = queue_resp.json().get("prompt_id")
             if not prompt_id:
                 raise HTTPException(status_code=500, detail="ComfyUI did not return a prompt ID")
+            logger.info(f"ComfyUI queued img2img prompt {prompt_id} (workflow={workflow_id})")
 
             # Poll history — up to 10 minutes
             for attempt in range(600):
@@ -898,9 +902,20 @@ async def generate_img2img_with_comfyui(
                 status_info = entry.get("status", {})
                 if status_info.get("status_str") == "error":
                     msgs = status_info.get("messages", [])
+                    # ComfyUI messages often wrap the real error deep in structured data
+                    # Try to extract the most useful part
+                    err_summary = ""
+                    for m in msgs:
+                        if isinstance(m, list) and len(m) >= 2:
+                            event, data = m[0], m[1]
+                            if event in ("execution_error", "execution_interrupted"):
+                                err_summary = f"{data.get('node_type', '?')}/{data.get('node_id', '?')}: {data.get('exception_message', '?')}"
+                                break
+                    err_detail = err_summary or str(msgs)[:300]
+                    logger.error(f"ComfyUI execution failed for prompt {prompt_id}: {err_detail}")
                     raise HTTPException(
                         status_code=500,
-                        detail=f"ComfyUI img2img execution error: {str(msgs)[:300]}"
+                        detail=f"ComfyUI workflow '{workflow_id}' failed: {err_detail}"
                     )
                 outputs = entry.get("outputs", {})
                 for node_id, node_output in outputs.items():
@@ -1260,32 +1275,26 @@ async def generate_variation(
             result = await _gemini_image_edit(source_b64, source_mime, variation_prompt, api_key)
 
         elif model == "comfyui-local":
-            # ComfyUI img2img — uploads source image and runs the chosen img2img workflow
+            # ComfyUI img2img — uploads source image and runs the chosen workflow.
+            # NO silent fallback: if user picks ComfyUI and it fails, they see the real error.
+            # (Fallback used to hide ComfyUI problems behind confusing Gemini errors.)
             comfyui_url = await get_setting("comfyui_url", db)
             comfyui_dir = await get_setting("comfyui_dir", db)
             chosen_workflow = (request.workflow_id if request and request.workflow_id else None) or "sdxl-img2img"
-            try:
-                comfyui_available = await ensure_comfyui(comfyui_url)
-                if not comfyui_available:
-                    raise Exception("ComfyUI not reachable")
-                result = await generate_img2img_with_comfyui(
-                    source_bytes=source_bytes,
-                    prompt=prompt or "high quality variation",
-                    comfyui_url=comfyui_url,
-                    comfyui_dir=comfyui_dir,
-                    workflow_id=chosen_workflow,
+
+            comfyui_available = await ensure_comfyui(comfyui_url)
+            if not comfyui_available:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"ComfyUI not reachable at {comfyui_url}. Start ComfyUI, check the URL in Settings, or pick Gemini as the variation model."
                 )
-            except Exception as comfy_err:
-                logger.warning(f"ComfyUI img2img failed, falling back to Gemini: {comfy_err}")
-                api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY') or getattr(settings, 'gemini_api_key', None)
-                if not api_key:
-                    raise HTTPException(
-                        status_code=503,
-                        detail=f"ComfyUI img2img failed ({comfy_err}) and no Gemini API key configured for fallback"
-                    )
-                source_b64 = base64.b64encode(source_bytes).decode()
-                result = await _gemini_image_edit(source_b64, source_mime, variation_prompt, api_key)
-                model = "gemini-imagen"
+            result = await generate_img2img_with_comfyui(
+                source_bytes=source_bytes,
+                prompt=prompt or "high quality variation",
+                comfyui_url=comfyui_url,
+                comfyui_dir=comfyui_dir,
+                workflow_id=chosen_workflow,
+            )
         else:
             raise HTTPException(
                 status_code=400,
