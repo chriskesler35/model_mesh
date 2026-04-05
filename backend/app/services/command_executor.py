@@ -13,7 +13,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 
 from app.database import AsyncSessionLocal
 from app.services.command_classifier import (
@@ -24,6 +24,51 @@ logger = logging.getLogger(__name__)
 
 MAX_OUTPUT_BYTES = 100 * 1024  # 100KB per command
 DEFAULT_TIMEOUT_SEC = 300
+
+
+def _is_git_command(command: str) -> bool:
+    """Rough check: does this command shell out to git?"""
+    cmd = (command or "").strip().lower()
+    return cmd.startswith("git ") or cmd == "git" or " git " in cmd
+
+
+def _github_git_env(github_token: str) -> Dict[str, str]:
+    """Env vars that configure git to use a GitHub token for HTTPS auth.
+
+    We use GIT_ASKPASS trick: set an env var and a small inline script that
+    echoes the token when git asks for a password. Also sets
+    GIT_CONFIG_COUNT/KEY/VALUE to rewrite github.com URLs to use the token
+    (works for both https:// and git@github.com: if they're rewritten to https).
+    """
+    import tempfile
+    # Create an askpass helper once per process, cached at module level
+    global _ASKPASS_SCRIPT
+    if _ASKPASS_SCRIPT is None or not Path(_ASKPASS_SCRIPT).exists():
+        fd, path = tempfile.mkstemp(suffix=".bat" if os.name == "nt" else ".sh", prefix="devforge_askpass_")
+        os.close(fd)
+        if os.name == "nt":
+            # Windows batch: echo the env var content
+            Path(path).write_text(
+                "@echo off\r\n"
+                "echo %DEVFORGE_GIT_TOKEN%\r\n",
+                encoding="utf-8"
+            )
+        else:
+            Path(path).write_text(
+                '#!/bin/sh\necho "$DEVFORGE_GIT_TOKEN"\n',
+                encoding="utf-8"
+            )
+            os.chmod(path, 0o755)
+        _ASKPASS_SCRIPT = path
+    return {
+        "GIT_ASKPASS": _ASKPASS_SCRIPT,
+        "DEVFORGE_GIT_TOKEN": github_token,
+        # Also set as username header for GITHUB API calls if needed
+        "GITHUB_TOKEN": github_token,
+    }
+
+
+_ASKPASS_SCRIPT: Optional[str] = None
 
 
 # ─── CMD: block parser ────────────────────────────────────────────────────────
@@ -109,20 +154,29 @@ async def run_command(
     cwd: Path,
     *,
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
+    github_token: Optional[str] = None,
 ) -> Tuple[int, str, str, int]:
     """Run one shell command. Returns (exit_code, stdout, stderr, duration_ms).
 
     Outputs are truncated to MAX_OUTPUT_BYTES with a "…truncated" tail.
     On timeout, returns (-1, partial_stdout, "Timed out after Xs", duration).
+
+    If github_token is provided AND the command uses git against github.com,
+    we inject GitHub credentials via GIT_ASKPASS so `git push` works without
+    a personal access token configured.
     """
     started = datetime.utcnow()
+    env = {**os.environ}
+    # Inject GitHub creds for git operations when we have a token
+    if github_token and _is_git_command(command):
+        env.update(_github_git_env(github_token))
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(cwd),
-            env={**os.environ},
+            env=env,
         )
         try:
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
@@ -156,6 +210,7 @@ async def execute_and_record(
     *,
     bypass_used: bool = False,
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
+    github_token: Optional[str] = None,
 ) -> dict:
     """Run a command and persist stdout/stderr/exit_code to its record.
 
@@ -167,7 +222,9 @@ async def execute_and_record(
         started_at=datetime.utcnow(),
         bypass_used=bypass_used,
     )
-    exit_code, stdout, stderr, duration_ms = await run_command(command, cwd, timeout_sec=timeout_sec)
+    exit_code, stdout, stderr, duration_ms = await run_command(
+        command, cwd, timeout_sec=timeout_sec, github_token=github_token
+    )
     status = "completed" if exit_code == 0 else "failed"
     await update_command_record(
         record_id,
@@ -194,6 +251,28 @@ def classify_with_project_trust(command: str, sandbox_mode: str, project_path: O
     """Convenience: classify honoring project-level trusted patterns."""
     trusted = load_project_trusted_patterns(project_path) if project_path else []
     return classify_command(command, sandbox_mode=sandbox_mode, extra_trusted_patterns=trusted)
+
+
+def get_first_github_token() -> Optional[str]:
+    """Fallback: return the first non-empty github_token from collab_users.json.
+
+    Used when we need a token but don't have a specific user context (e.g.
+    pipeline runs are tied to sessions, not users yet). Good enough for
+    single-user self-hosted setups.
+    """
+    import json as _json
+    users_file = Path(__file__).parent.parent.parent.parent / "data" / "collab_users.json"
+    if not users_file.exists():
+        return None
+    try:
+        users = _json.loads(users_file.read_text(encoding="utf-8"))
+        for u in users.values():
+            tok = u.get("github_token")
+            if tok:
+                return tok
+    except Exception:
+        return None
+    return None
 
 
 def format_command_for_context(result: dict) -> str:

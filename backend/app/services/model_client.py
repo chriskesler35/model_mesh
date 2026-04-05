@@ -6,6 +6,13 @@ from typing import Optional, AsyncGenerator
 import litellm
 from litellm import acompletion
 from app.models import Model, Provider
+from app.services.codex_oauth import (
+    codex_proxy_rejects_temperature,
+    get_codex_proxy_api_key,
+    get_codex_proxy_base_url,
+    should_use_codex_oauth_proxy,
+)
+from app.services.provider_credentials import get_provider_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -21,21 +28,7 @@ class ModelClient:
 
     def get_api_key(self, provider_name: str) -> Optional[str]:
         """Get API key from environment (never from database)."""
-        p = provider_name.lower()
-        if p == "google":
-            # litellm Gemini handler requires explicit api_key; prefer GEMINI_API_KEY
-            return (os.environ.get("GEMINI_API_KEY")
-                    or os.environ.get("GOOGLE_API_KEY"))
-        key_map = {
-            "anthropic": "ANTHROPIC_API_KEY",
-            "openai": "OPENAI_API_KEY",
-            "openai-codex": "OPENAI_API_KEY",  # Codex endpoint, same key as regular OpenAI
-            "openrouter": "OPENROUTER_API_KEY",
-        }
-        env_key = key_map.get(p)
-        if env_key:
-            return os.environ.get(env_key)
-        return None
+        return get_provider_api_key(provider_name)
 
     async def call_model(
         self,
@@ -46,9 +39,9 @@ class ModelClient:
         **params
     ):
         """Call model via LiteLLM with unified interface."""
-        import os
-
         provider_name = provider.name.lower()
+        api_key = self.get_api_key(provider.name)
+        use_codex_proxy = should_use_codex_oauth_proxy(provider_name, api_key=api_key)
 
         # LiteLLM format varies by provider:
         # - Anthropic: "claude-sonnet-4-6" (uses ANTHROPIC_API_KEY)
@@ -63,9 +56,14 @@ class ModelClient:
         elif provider_name == "openrouter":
             litellm_model = f"openrouter/{model.model_id}"
         elif provider_name == "openai-codex":
-            # openai-codex isn't a LiteLLM prefix — route through the regular
-            # OpenAI provider. The model_id (e.g. gpt-5.3-codex) goes through
-            # OpenAI's chat completions endpoint like any other OpenAI model.
+            # The dedicated Codex provider uses OpenAI-compatible model names,
+            # but the actual transport can be the local OAuth proxy.
+            litellm_model = f"openai/{model.model_id}"
+        elif provider_name == "github-copilot":
+            # GitHub Copilot has an OpenAI-compatible endpoint but requires
+            # a special Copilot token exchanged from a GitHub OAuth token.
+            # Route through LiteLLM's openai/ prefix and override api_base
+            # + api_key below.
             litellm_model = f"openai/{model.model_id}"
         else:
             litellm_model = f"{provider_name}/{model.model_id}"
@@ -88,12 +86,38 @@ class ModelClient:
             # automatically when api_key is provided. Setting api_base causes
             # litellm to route to Vertex AI instead of Google AI Studio.
             pass
+        elif use_codex_proxy:
+            kwargs["api_base"] = get_codex_proxy_base_url()
+            if codex_proxy_rejects_temperature(model.model_id):
+                kwargs.pop("temperature", None)
+        elif provider_name == "github-copilot":
+            # Exchange the stored GitHub OAuth token for a short-lived
+            # Copilot session token, then point LiteLLM at the Copilot API.
+            from app.services.command_executor import get_first_github_token
+            from app.services.github_copilot import (
+                exchange_for_copilot_token, get_copilot_headers, COPILOT_API_BASE,
+            )
+            gh_token = get_first_github_token()
+            copilot_token = await exchange_for_copilot_token(gh_token) if gh_token else None
+            if not copilot_token:
+                raise ValueError(
+                    "GitHub Copilot is not available. Sign in with GitHub first "
+                    "(and ensure your account has a Copilot subscription)."
+                )
+            kwargs["api_base"] = COPILOT_API_BASE
+            kwargs["api_key"] = copilot_token
+            # Add Copilot-specific headers
+            kwargs["extra_headers"] = get_copilot_headers()
         elif provider.api_base_url and provider_name not in ("anthropic",):
             kwargs["api_base"] = provider.api_base_url
 
-        # Get API key from environment (provider-specific)
-        api_key = self.get_api_key(provider.name)
-        if api_key:
+        # Get API key from environment (provider-specific). When we are routing
+        # through the local OAuth proxy, the proxy injects the bearer token.
+        if use_codex_proxy:
+            kwargs["api_key"] = get_codex_proxy_api_key()
+        elif provider_name == "github-copilot":
+            pass  # api_key already set above
+        elif api_key:
             kwargs["api_key"] = api_key
 
         # Debug logging

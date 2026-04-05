@@ -536,8 +536,10 @@ async def _run_phase(pipeline_id: str, phase_index: int):
         from app.services.command_executor import (
             parse_cmd_blocks, create_command_record, execute_and_record,
             classify_with_project_trust, format_command_for_context,
+            get_first_github_token,
         )
         from app.services.command_classifier import CommandTier
+        gh_token = get_first_github_token()
 
         cmds = parse_cmd_blocks(full_response)
         if cmds and session_project_path:
@@ -603,7 +605,7 @@ async def _run_phase(pipeline_id: str, phase_index: int):
                           command_id=rec_id, command=raw_cmd, tier=tier.value,
                           phase_index=phase_index)
                     result = await execute_and_record(
-                        rec_id, raw_cmd, session_project_path, bypass_used=bypass_mode
+                        rec_id, raw_cmd, session_project_path, bypass_used=bypass_mode, github_token=gh_token
                     )
                     _push(pipeline_id, "command_completed", phase_index=phase_index, **result)
                     cmd_results_for_context.append(format_command_for_context(result))

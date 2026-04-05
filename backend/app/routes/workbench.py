@@ -100,7 +100,7 @@ def _provider_has_credentials(provider_name: str) -> bool:
     p = (provider_name or "").lower()
     if p in ("ollama", "local", "lm-studio", "lmstudio", "llamacpp"):
         return True
-    if p in ("anthropic", "google", "openai", "openai-codex", "openrouter"):
+    if p in ("anthropic", "google", "openai", "openai-codex", "openrouter", "github-copilot"):
         return has_provider_api_key(p)
     # Unknown providers — assume yes and let the call fail loudly
     return True
@@ -598,8 +598,11 @@ async def _run_turn(
     from app.services.command_executor import (
         parse_cmd_blocks, create_command_record, execute_and_record,
         classify_with_project_trust, format_command_for_context,
+        get_first_github_token,
     )
     from app.services.command_classifier import CommandTier, describe_tier
+    # Look up GitHub token once for this turn so git push works seamlessly
+    gh_token = get_first_github_token()
 
     cmd_results_for_context: list[str] = []
     commands_requiring_approval: list[dict] = []
@@ -662,7 +665,7 @@ async def _run_turn(
                 _push(session_id, "command_running", command_id=rec_id, command=raw_cmd,
                       tier=tier.value, bypass=True)
                 result = await execute_and_record(
-                    rec_id, raw_cmd, project_path, bypass_used=True
+                    rec_id, raw_cmd, project_path, bypass_used=True, github_token=gh_token
                 )
                 _push(session_id, "command_completed", **result)
                 cmd_results_for_context.append(format_command_for_context(result))
@@ -691,7 +694,7 @@ async def _run_turn(
                 turn_number=turn_num, initial_status="running",
             )
             _push(session_id, "command_running", command_id=rec_id, command=raw_cmd, tier=tier.value)
-            result = await execute_and_record(rec_id, raw_cmd, project_path)
+            result = await execute_and_record(rec_id, raw_cmd, project_path, github_token=gh_token)
             _push(session_id, "command_completed", **result)
             cmd_results_for_context.append(format_command_for_context(result))
 
@@ -1058,7 +1061,9 @@ async def approve_command(session_id: str, command_id: str):
 
     _push(session_id, "command_approved", command_id=command_id, command=command)
     _push(session_id, "command_running", command_id=command_id, command=command, tier="approval")
-    result = await execute_and_record(command_id, command, project_path)
+    from app.services.command_executor import get_first_github_token
+    gh_token = get_first_github_token()
+    result = await execute_and_record(command_id, command, project_path, github_token=gh_token)
     _push(session_id, "command_completed", **result)
     # Persist events_log so the approval survives restart
     await _db_update(session_id, events_log=_event_logs.get(session_id, []))

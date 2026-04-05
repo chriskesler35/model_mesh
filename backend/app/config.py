@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     gemini_api_key: Optional[str] = None
     openrouter_api_key: Optional[str] = None
     openai_api_key: Optional[str] = None
+
+    # GitHub OAuth (register an app at https://github.com/settings/developers)
+    github_client_id: Optional[str] = None
+    github_client_secret: Optional[str] = None
+    github_oauth_redirect_url: str = "http://localhost:3000/auth/github/callback"
     
     # Telegram bot
     telegram_bot_token: Optional[str] = None
