@@ -843,13 +843,23 @@ async def complete_session(session_id: str):
             raise HTTPException(status_code=404, detail="Session not found")
         if session.status == "running":
             raise HTTPException(status_code=409, detail="Cannot complete a running session — cancel it first")
+        existing_log = list(session.events_log or [])
+
+    # Seed _event_logs with the existing DB log BEFORE pushing new events,
+    # so we don't overwrite turn history when saving back.
+    if session_id not in _event_logs:
+        _event_logs[session_id] = existing_log
+    elif len(_event_logs[session_id]) < len(existing_log):
+        # In-memory log is shorter than DB (backend restarted mid-session) — trust DB
+        _event_logs[session_id] = existing_log
+
     _push(session_id, "info", message="Session marked complete.")
     _push(session_id, "done", message="Session marked complete by user.", status="completed")
     await _db_update(
         session_id,
         status="completed",
         completed_at=datetime.utcnow(),
-        events_log=_event_logs.get(session_id, []),
+        events_log=_event_logs.get(session_id, existing_log),
     )
     _queues.pop(session_id, None)
     _pending_messages.pop(session_id, None)

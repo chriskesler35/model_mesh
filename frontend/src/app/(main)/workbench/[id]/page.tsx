@@ -489,8 +489,16 @@ export default function WorkbenchSessionPage() {
     setStatus('cancelled')
   }
   const completeSession = async () => {
-    await fetch(`${API_BASE}/v1/workbench/sessions/${id}/complete`, { method: 'POST', headers: AUTH_HEADERS })
-    setStatus('completed')
+    try {
+      const res = await fetch(`${API_BASE}/v1/workbench/sessions/${id}/complete`, { method: 'POST', headers: AUTH_HEADERS })
+      if (!res.ok) {
+        const body = await res.text()
+        throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`)
+      }
+      setStatus('completed')
+    } catch (e: any) {
+      alert(`Failed to mark session complete: ${e.message}\n\nIf this says "Not Found", restart the backend so it picks up the new endpoint.`)
+    }
   }
 
   // Click file in the tree → fetch full content from disk (SSE payload is truncated)
