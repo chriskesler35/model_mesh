@@ -209,7 +209,35 @@ async def _run_phase(pipeline_id: str, phase_index: int):
     phase_def = phases[phase_index]
     phase_name = phase_def["name"]
     agent_role = phase_def["role"]
-    model_id = phase_def.get("model") or phase_def.get("default_model") or "claude-sonnet-4-6"
+
+    # Model resolution priority:
+    #   1. User override per-phase (phase_def["model"] when set from model_overrides)
+    #   2. Persona matching the phase name (case-insensitive) — user-defined
+    #      "Coder" persona picks the Coder phase's model
+    #   3. Template default_model (fallback)
+    persona_model = None
+    persona_system_prompt = None
+    if not phase_def.get("model"):
+        # No explicit override — see if user has a persona matching this phase name
+        try:
+            from app.models.persona import Persona
+            from app.models.model import Model as ModelORM
+            async with AsyncSessionLocal() as db:
+                # Case-insensitive name match against phase name (e.g. "Coder")
+                from sqlalchemy import func as sqlfunc
+                persona = (await db.execute(
+                    select(Persona).where(sqlfunc.lower(Persona.name) == phase_name.lower())
+                )).scalar_one_or_none()
+                if persona and persona.primary_model_id:
+                    m = (await db.execute(select(ModelORM).where(ModelORM.id == persona.primary_model_id))).scalar_one_or_none()
+                    if m:
+                        persona_model = m.model_id
+                        persona_system_prompt = persona.system_prompt
+                        logger.info(f"Phase '{phase_name}' → persona '{persona.name}' → model '{persona_model}'")
+        except Exception as e:
+            logger.debug(f"Persona lookup for phase {phase_name} failed: {e}")
+
+    model_id = phase_def.get("model") or persona_model or phase_def.get("default_model") or "claude-sonnet-4-6"
 
     # Create PhaseRun row
     phase_run_id = str(uuid.uuid4())
@@ -252,13 +280,16 @@ async def _run_phase(pipeline_id: str, phase_index: int):
         _push(pipeline_id, "pipeline_done", message="Pipeline failed.", status="failed")
         return
 
-    # Build messages: identity + phase system prompt + initial task + prior artifacts
+    # Build messages: identity + persona prompt + phase system prompt + initial task + prior artifacts
     identity_block = build_identity_context(include_method=False)
     phase_prompt = phase_def.get("system_prompt", "")
 
     system_parts = []
     if identity_block:
         system_parts.append(identity_block)
+    if persona_system_prompt:
+        # User-defined persona voice/instructions take effect before the phase-specific role
+        system_parts.append(f"# Persona\n{persona_system_prompt}")
     system_parts.append(f"# Your role: {agent_role}\n\n{phase_prompt}")
     system_prompt = "\n\n---\n\n".join(system_parts)
 
@@ -476,8 +507,14 @@ async def _advance_to_next(pipeline_id: str, current_index: int):
 # ─── Routes ───────────────────────────────────────────────────────────────────
 @router.get("/methods/{method_id}/phases", dependencies=[Depends(verify_api_key)])
 async def preview_phases(method_id: str):
-    """Return the ordered list of phases for a method (without starting a pipeline)."""
+    """Return the ordered list of phases for a method (without starting a pipeline).
+
+    Also looks up which phases have a matching persona (case-insensitive name match)
+    so the frontend can warn the user about missing personas.
+    """
     from app.services.phase_templates import get_phases_for_method, list_supported_methods
+    from app.models.persona import Persona
+    from app.models.model import Model as ModelORM
     try:
         phases = get_phases_for_method(method_id)
     except KeyError:
@@ -485,7 +522,27 @@ async def preview_phases(method_id: str):
             status_code=404,
             detail=f"Method '{method_id}' not supported. Available: {list_supported_methods()}"
         )
-    # Strip the full system_prompt for preview (too long); keep a short hint
+
+    # Load all personas once for matching
+    from sqlalchemy import func as sqlfunc
+    async with AsyncSessionLocal() as db:
+        persona_rows = (await db.execute(select(Persona))).scalars().all()
+        persona_by_name = {p.name.lower(): p for p in persona_rows}
+        # Preload models for primary_model_id resolution
+        model_rows = (await db.execute(select(ModelORM))).scalars().all()
+        model_by_id = {str(m.id): m for m in model_rows}
+
+    def persona_info(phase_name: str) -> dict:
+        persona = persona_by_name.get(phase_name.lower())
+        if not persona:
+            return {"has_persona": False, "persona_name": None, "persona_model": None}
+        m = model_by_id.get(str(persona.primary_model_id)) if persona.primary_model_id else None
+        return {
+            "has_persona": True,
+            "persona_name": persona.name,
+            "persona_model": m.model_id if m else None,
+        }
+
     return {
         "method_id": method_id,
         "phases": [
@@ -494,6 +551,7 @@ async def preview_phases(method_id: str):
                 "role": p["role"],
                 "default_model": p["default_model"],
                 "artifact_type": p["artifact_type"],
+                **persona_info(p["name"]),
             }
             for p in phases
         ],

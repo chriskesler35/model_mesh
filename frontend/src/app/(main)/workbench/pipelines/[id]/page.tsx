@@ -155,14 +155,14 @@ function ArtifactViewer({ artifact }: { artifact: PhaseRun['output_artifact'] })
 
 // ─── Phase Card ───────────────────────────────────────────────────────────────
 function PhaseCard({
-  phase, run, isCurrent, onOpenApproval,
+  phase, run, isCurrent, onOpenApproval, onViewArtifact,
 }: {
   phase: PhaseDef
   run: PhaseRun | null
   isCurrent: boolean
   onOpenApproval: (run: PhaseRun) => void
+  onViewArtifact: (run: PhaseRun) => void
 }) {
-  const [expanded, setExpanded] = useState(false)
   const avatar = ROLE_AVATARS[phase.role] || { icon: '🤖', color: 'from-gray-400 to-gray-600' }
   const status = run?.status || 'pending'
   const style = STATUS_STYLE[status] || STATUS_STYLE.pending
@@ -225,15 +225,14 @@ function PhaseCard({
             <div className="text-[11px] uppercase tracking-wider text-gray-400 font-semibold mb-1.5">
               Artifact ({run.output_artifact.type})
             </div>
-            <button onClick={() => setExpanded(e => !e)}
-              className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline mb-2">
-              {expanded ? '▲ Hide preview' : '▼ Show preview'}
+            <button onClick={() => onViewArtifact(run)}
+              className="w-full px-3 py-2 text-xs font-semibold rounded-lg bg-indigo-50 dark:bg-indigo-900/20 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 transition-colors flex items-center justify-center gap-2">
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+              </svg>
+              View full artifact
             </button>
-            {expanded && (
-              <div className="max-h-60 overflow-hidden">
-                <ArtifactViewer artifact={run.output_artifact} />
-              </div>
-            )}
           </div>
         )}
 
@@ -349,6 +348,15 @@ export default function PipelinePage() {
   const [phaseRuns, setPhaseRuns] = useState<PhaseRun[]>([])
   const [loading, setLoading] = useState(true)
   const [approvalRun, setApprovalRun] = useState<PhaseRun | null>(null)
+  const [viewArtifactRun, setViewArtifactRun] = useState<PhaseRun | null>(null)
+
+  // Escape closes the read-only artifact modal
+  useEffect(() => {
+    if (!viewArtifactRun) return
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') setViewArtifactRun(null) }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [viewArtifactRun])
   const [error, setError] = useState<string | null>(null)
   const esRef = useRef<EventSource | null>(null)
 
@@ -540,6 +548,7 @@ export default function PipelinePage() {
             run={runsByIndex[idx] || null}
             isCurrent={idx === pipeline.current_phase_index && pipeline.status !== 'completed'}
             onOpenApproval={setApprovalRun}
+            onViewArtifact={setViewArtifactRun}
           />
         ))}
       </div>
@@ -554,6 +563,34 @@ export default function PipelinePage() {
           onReject={reject}
           onSkip={skip}
         />
+      )}
+
+      {/* View artifact modal (read-only, full-screen) */}
+      {viewArtifactRun && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+             onClick={() => setViewArtifactRun(null)}>
+          <div className="w-full max-w-5xl max-h-[92vh] bg-white dark:bg-gray-900 rounded-2xl shadow-2xl overflow-hidden flex flex-col"
+               onClick={e => e.stopPropagation()}>
+            <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between flex-shrink-0">
+              <div>
+                <h2 className="text-base font-semibold text-gray-900 dark:text-white">
+                  {viewArtifactRun.phase_name} <span className="text-gray-400">— {viewArtifactRun.agent_role}</span>
+                </h2>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {viewArtifactRun.input_tokens?.toLocaleString() || 0} in + {viewArtifactRun.output_tokens?.toLocaleString() || 0} out tokens · {viewArtifactRun.model_id} · {viewArtifactRun.output_artifact?.type || 'unknown'}
+                </p>
+              </div>
+              <button onClick={() => setViewArtifactRun(null)} className="text-gray-400 hover:text-gray-600">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto p-6">
+              <ArtifactViewer artifact={viewArtifactRun.output_artifact} />
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

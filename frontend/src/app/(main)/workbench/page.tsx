@@ -35,7 +35,7 @@ export default function WorkbenchListPage() {
   const [asPipeline, setAsPipeline] = useState(false)
   const [pipelineMethod, setPipelineMethod] = useState<'bmad' | 'gsd' | 'superpowers'>('bmad')
   const [autoApprove, setAutoApprove] = useState(false)
-  const [phasePreview, setPhasePreview] = useState<Array<{name: string; role: string; default_model: string; artifact_type: string}>>([])
+  const [phasePreview, setPhasePreview] = useState<Array<{name: string; role: string; default_model: string; artifact_type: string; has_persona?: boolean; persona_name?: string | null; persona_model?: string | null}>>([])
   const [modelOverrides, setModelOverrides] = useState<Record<string, string>>({})
   const [customizeModels, setCustomizeModels] = useState(false)
 
@@ -108,18 +108,24 @@ export default function WorkbenchListPage() {
       }
 
       if (asPipeline) {
-        // Build model_overrides: apply the main Model selection to every phase
-        // unless the user has set a per-phase override via "customize models".
-        // This makes "pick GLM-5 as my Coder" actually work: the main Model
-        // dropdown overrides all phases, then per-phase overrides win over that.
+        // Build model_overrides with priority:
+        //   1. Per-phase explicit override (customize models)
+        //   2. Session-level Model dropdown (applies to all phases)
+        //   3. Persona model (backend resolves this automatically when nothing is sent)
+        //   4. Template default (backend fallback)
+        // We only send overrides when the user has set something explicitly —
+        // absence of a key lets the backend do persona lookup per-phase.
         const effectiveOverrides: Record<string, string> = {}
-        if (model) {
-          for (const ph of phasePreview) {
-            effectiveOverrides[ph.name] = modelOverrides[ph.name] || model
+        for (const ph of phasePreview) {
+          if (modelOverrides[ph.name]) {
+            effectiveOverrides[ph.name] = modelOverrides[ph.name]
+          } else if (model) {
+            // Session-level model applies when no per-phase override
+            effectiveOverrides[ph.name] = model
           }
+          // Otherwise: let backend use persona or template default
         }
-        // Also preserve any explicit per-phase overrides for phases that
-        // weren't in phasePreview (shouldn't happen, but defensive)
+        // Preserve any per-phase overrides for phases not in phasePreview (defensive)
         for (const [k, v] of Object.entries(modelOverrides)) {
           effectiveOverrides[k] = v
         }
@@ -319,7 +325,9 @@ export default function WorkbenchListPage() {
                         Auto-approve each phase
                       </label>
                     </div>
-                    {phasePreview.length > 0 && (
+                    {phasePreview.length > 0 && (() => {
+                      const missingPersonas = phasePreview.filter(ph => !ph.has_persona)
+                      return (
                       <div className="mt-2 pt-2 border-t border-indigo-200 dark:border-indigo-800">
                         <div className="flex items-center justify-between mb-1.5">
                           <span className="text-[10px] uppercase tracking-wider font-semibold text-indigo-700 dark:text-indigo-300">
@@ -330,33 +338,59 @@ export default function WorkbenchListPage() {
                             {customizeModels ? '← default models' : 'customize models →'}
                           </button>
                         </div>
+                        {missingPersonas.length > 0 && !model && (
+                          <div className="mb-2 p-2 rounded bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 text-[10px] text-amber-800 dark:text-amber-200">
+                            <div className="font-semibold mb-0.5">⚠ Missing personas: {missingPersonas.map(p => p.name).join(', ')}</div>
+                            <div>
+                              Create personas with these exact names in the Personas page to control which model + system prompt each phase uses.
+                              Those phases will fall back to the template default until you do.
+                            </div>
+                          </div>
+                        )}
                         <div className="space-y-1">
-                          {phasePreview.map((ph, i) => (
+                          {phasePreview.map((ph, i) => {
+                            const effectiveModel = modelOverrides[ph.name] || model || ph.persona_model || ph.default_model
+                            const source = modelOverrides[ph.name] ? 'override' :
+                              model ? 'session' :
+                              ph.persona_model ? 'persona' : 'default'
+                            return (
                             <div key={i} className="flex items-center gap-2 text-[11px]">
                               <span className="text-gray-400 w-4 text-right">{i + 1}.</span>
                               <span className="font-medium text-indigo-900 dark:text-indigo-200 w-20 truncate">{ph.name}</span>
+                              {ph.has_persona ? (
+                                <span className="text-[9px] px-1 py-0.5 rounded bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300 font-medium" title={`Persona: ${ph.persona_name}`}>✓ {ph.persona_name}</span>
+                              ) : (
+                                <span className="text-[9px] px-1 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300 font-medium" title="No persona — falls back to template default">no persona</span>
+                              )}
                               <span className="text-gray-500 truncate flex-1">{ph.role}</span>
                               {customizeModels ? (
                                 <select
-                                  value={modelOverrides[ph.name] || model || ph.default_model}
+                                  value={modelOverrides[ph.name] || model || ph.persona_model || ph.default_model}
                                   onChange={e => setModelOverrides(prev => ({ ...prev, [ph.name]: e.target.value }))}
                                   className="rounded border border-indigo-200 dark:border-indigo-700 dark:bg-gray-800 dark:text-white px-1 py-0.5 text-[10px] max-w-[150px]">
-                                  {model && <option value={model}>{model} (session default)</option>}
-                                  <option value={ph.default_model}>{ph.default_model} (phase default)</option>
-                                  {models.filter(m => m.model_id !== model && m.model_id !== ph.default_model).map(m => (
+                                  {model && <option value={model}>{model} (session)</option>}
+                                  {ph.persona_model && ph.persona_model !== model && <option value={ph.persona_model}>{ph.persona_model} ({ph.persona_name})</option>}
+                                  <option value={ph.default_model}>{ph.default_model} (template)</option>
+                                  {models.filter(m => m.model_id !== model && m.model_id !== ph.persona_model && m.model_id !== ph.default_model).map(m => (
                                     <option key={m.id} value={m.model_id}>{m.display_name || m.model_id}</option>
                                   ))}
                                 </select>
                               ) : (
-                                <span className="font-mono text-[10px] text-gray-400 truncate max-w-[120px]">
-                                  {modelOverrides[ph.name] || model || ph.default_model}
+                                <span className={`font-mono text-[10px] truncate max-w-[120px] ${
+                                  source === 'persona' ? 'text-green-600 dark:text-green-400' :
+                                  source === 'override' ? 'text-indigo-600 dark:text-indigo-400' :
+                                  'text-gray-400'
+                                }`} title={`from ${source}`}>
+                                  {effectiveModel}
                                 </span>
                               )}
                             </div>
-                          ))}
+                            )
+                          })}
                         </div>
                       </div>
-                    )}
+                      )
+                    })()}
                   </div>
                 )}
               </div>
