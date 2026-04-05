@@ -111,7 +111,7 @@ function AgentCard({
   fileCount: number
 }) {
   const meta = AGENT_AVATARS[agentType] || AGENT_AVATARS.coder
-  const statusLabel = status === 'running' ? 'Working' : status === 'waiting' ? 'Ready for you' : status === 'completed' ? 'Done' : status === 'failed' ? 'Failed' : status === 'cancelled' ? 'Cancelled' : 'Connecting'
+  const statusLabel = status === 'running' ? 'Working…' : status === 'waiting' ? 'Idle — send another message or close' : status === 'completed' ? 'Done' : status === 'failed' ? 'Failed' : status === 'cancelled' ? 'Cancelled' : 'Connecting'
   const isWorking = status === 'running' || status === 'pending'
 
   return (
@@ -488,6 +488,10 @@ export default function WorkbenchSessionPage() {
     await fetch(`${API_BASE}/v1/workbench/sessions/${id}/cancel`, { method: 'POST', headers: AUTH_HEADERS })
     setStatus('cancelled')
   }
+  const completeSession = async () => {
+    await fetch(`${API_BASE}/v1/workbench/sessions/${id}/complete`, { method: 'POST', headers: AUTH_HEADERS })
+    setStatus('completed')
+  }
 
   // Click file in the tree → fetch full content from disk (SSE payload is truncated)
   const selectFile = useCallback(async (f: FileEntry) => {
@@ -544,6 +548,13 @@ export default function WorkbenchSessionPage() {
             <button onClick={cancelSession}
               className="px-3 py-1.5 text-xs font-medium rounded-lg border border-red-200 text-red-600 hover:bg-red-50 transition-colors">
               Cancel
+            </button>
+          )}
+          {status === 'waiting' && (
+            <button onClick={completeSession}
+              className="px-3 py-1.5 text-xs font-medium rounded-lg bg-green-600 hover:bg-green-700 text-white transition-colors"
+              title="Mark session as complete — closes it out, no more follow-ups">
+              ✓ Mark complete
             </button>
           )}
         </div>

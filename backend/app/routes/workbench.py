@@ -830,6 +830,32 @@ async def cancel_session(session_id: str):
     return {"ok": True}
 
 
+@router.post("/sessions/{session_id}/complete", dependencies=[Depends(verify_api_key)])
+async def complete_session(session_id: str):
+    """Mark an idle (waiting) session as completed — the user is done with it
+    and no more follow-ups are expected. Cleans up in-memory SSE queue."""
+    from app.models.workbench import WorkbenchSession
+    async with AsyncSessionLocal() as db:
+        session = (await db.execute(
+            select(WorkbenchSession).where(WorkbenchSession.id == session_id)
+        )).scalar_one_or_none()
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if session.status == "running":
+            raise HTTPException(status_code=409, detail="Cannot complete a running session — cancel it first")
+    _push(session_id, "info", message="Session marked complete.")
+    _push(session_id, "done", message="Session marked complete by user.", status="completed")
+    await _db_update(
+        session_id,
+        status="completed",
+        completed_at=datetime.utcnow(),
+        events_log=_event_logs.get(session_id, []),
+    )
+    _queues.pop(session_id, None)
+    _pending_messages.pop(session_id, None)
+    return {"ok": True}
+
+
 @router.delete("/sessions/{session_id}", dependencies=[Depends(verify_api_key)])
 async def delete_session(session_id: str, db: AsyncSession = Depends(get_db)):
     from app.models.workbench import WorkbenchSession

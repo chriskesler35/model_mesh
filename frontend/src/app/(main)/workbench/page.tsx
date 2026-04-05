@@ -159,8 +159,8 @@ export default function WorkbenchListPage() {
     awaiting_approval: 'text-amber-700 bg-amber-100',  // pipelines
   }
   const STATUS_LABEL: Record<string, string> = {
-    waiting: 'waiting for you',
-    awaiting_approval: 'awaiting approval',
+    waiting: 'idle',             // turn done, session open for follow-ups
+    awaiting_approval: 'needs approval',
   }
 
   return (
