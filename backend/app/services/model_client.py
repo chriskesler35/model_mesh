@@ -62,6 +62,11 @@ class ModelClient:
             litellm_model = f"gemini/{model.model_id}"
         elif provider_name == "openrouter":
             litellm_model = f"openrouter/{model.model_id}"
+        elif provider_name == "openai-codex":
+            # openai-codex isn't a LiteLLM prefix — route through the regular
+            # OpenAI provider. The model_id (e.g. gpt-5.3-codex) goes through
+            # OpenAI's chat completions endpoint like any other OpenAI model.
+            litellm_model = f"openai/{model.model_id}"
         else:
             litellm_model = f"{provider_name}/{model.model_id}"
 
