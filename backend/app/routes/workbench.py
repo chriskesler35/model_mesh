@@ -605,6 +605,14 @@ async def _run_turn(
     commands_requiring_approval: list[dict] = []
 
     cmds = parse_cmd_blocks(full_response)
+    if cmds and not project_path:
+        # Safety: without a project_path, commands would run in the backend's cwd
+        # (potentially damaging the DevForgeAI install itself). Skip all commands.
+        logger.warning(f"Workbench session {session_id} emitted {len(cmds)} CMD: blocks but has no project_path — commands skipped for safety")
+        _push(session_id, "warning",
+              message=f"Agent emitted {len(cmds)} commands but session has no project attached — commands skipped. Attach a project to enable command execution.")
+        cmds = []  # clear so the loop below doesn't run
+
     if cmds:
         # Load session-level bypass flag + project sandbox mode
         bypass_mode = False
@@ -654,7 +662,7 @@ async def _run_turn(
                 _push(session_id, "command_running", command_id=rec_id, command=raw_cmd,
                       tier=tier.value, bypass=True)
                 result = await execute_and_record(
-                    rec_id, raw_cmd, project_path or Path.cwd(), bypass_used=True
+                    rec_id, raw_cmd, project_path, bypass_used=True
                 )
                 _push(session_id, "command_completed", **result)
                 cmd_results_for_context.append(format_command_for_context(result))
@@ -683,7 +691,7 @@ async def _run_turn(
                 turn_number=turn_num, initial_status="running",
             )
             _push(session_id, "command_running", command_id=rec_id, command=raw_cmd, tier=tier.value)
-            result = await execute_and_record(rec_id, raw_cmd, project_path or Path.cwd())
+            result = await execute_and_record(rec_id, raw_cmd, project_path)
             _push(session_id, "command_completed", **result)
             cmd_results_for_context.append(format_command_for_context(result))
 
@@ -710,14 +718,14 @@ async def _run_turn(
     # errors, etc.)
     if cmd_results_for_context:
         new_history.append({
-            "role": "system",
-            "content": "Results of CMD: blocks from your last turn:\n\n" + "\n\n".join(cmd_results_for_context),
+            "role": "user",
+            "content": "[system-note] Results of CMD: blocks from your last turn:\n\n" + "\n\n".join(cmd_results_for_context),
         })
     if commands_requiring_approval:
         pending_list = "\n".join(f"  - {c['command']}" for c in commands_requiring_approval)
         new_history.append({
-            "role": "system",
-            "content": f"These commands are pending user approval and have NOT run yet:\n{pending_list}\n\nDon't re-emit them. When the user approves or rejects, you'll be told the result.",
+            "role": "user",
+            "content": f"[system-note] These commands are pending user approval and have NOT run yet:\n{pending_list}\n\nDon't re-emit them. When the user approves or rejects, you'll be told the result.",
         })
 
     # Accumulate all files ever written across turns (union)
@@ -1039,9 +1047,13 @@ async def approve_command(session_id: str, command_id: str):
             raise HTTPException(status_code=403, detail="Command does not belong to this session")
         if cmd_rec.status != "pending":
             raise HTTPException(status_code=409, detail=f"Command is not pending (status={cmd_rec.status})")
-        # Look up the session's project path for cwd
+        # Look up the session's project path for cwd. Refuse to run commands
+        # in the backend's own cwd — require a project_path for safety.
         sess = (await db.execute(select(WorkbenchSession).where(WorkbenchSession.id == session_id))).scalar_one_or_none()
-        project_path = Path(sess.project_path) if sess and sess.project_path else Path.cwd()
+        if not sess or not sess.project_path:
+            raise HTTPException(status_code=400,
+                detail="Session has no project attached — cannot run commands. Attach a project first.")
+        project_path = Path(sess.project_path)
         command = cmd_rec.command
 
     _push(session_id, "command_approved", command_id=command_id, command=command)

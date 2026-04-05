@@ -36,6 +36,7 @@ class WorkbenchSession(Base):
     model        = Column(String(200))
     project_id   = Column(CHAR(36), nullable=True)
     project_path = Column(Text, nullable=True)
+    pipeline_id  = Column(CHAR(36), nullable=True, index=True)  # link to active pipeline (Option A)
     status       = Column(String(20), default="pending")   # pending|running|completed|failed|cancelled
     files        = Column(JSON, default=list)              # list of relative paths written
     events_log   = Column(JSON, default=list)              # all events for replay
@@ -56,6 +57,7 @@ class WorkbenchSession(Base):
             "model":          self.model,
             "project_id":     self.project_id,
             "project_path":   self.project_path,
+            "pipeline_id":    self.pipeline_id,
             "status":         self.status,
             "files":          self.files or [],
             "events_log":     self.events_log or [],

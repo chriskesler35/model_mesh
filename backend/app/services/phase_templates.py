@@ -113,12 +113,19 @@ FILE: <relative/path/to/file.ext>
 <complete file content>
 ```
 
+You can also run shell commands to install deps / set up env:
+
+CMD: <single shell command>
+
 Rules:
 - Every file is complete and runnable — no placeholders, no TODOs
 - Include package manifests (requirements.txt, package.json) if dependencies change
 - Include a README.md with install + run instructions
 - Match the architecture's file_structure exactly where practical
-- After all FILE: blocks, add a 2-4 line summary of what you built."""
+- IMPORTANT: A project snapshot is in your context. READ the existing files and EDIT them, don't start from scratch.
+- Use CMD: blocks to install new deps (CMD: npm install, CMD: pip install -r requirements.txt)
+- Don't run git push or anything destructive — those pause for user approval.
+- After all FILE: + CMD: blocks, add a 2-4 line summary of what you built."""
     },
     {
         "name": "Reviewer",
@@ -178,19 +185,24 @@ GSD_PHASES: List[Dict[str, Any]] = [
 
 Priorities: (1) working > perfect, (2) bias to action, (3) no over-engineering, (4) skip preamble.
 
-Write complete runnable code in FILE: blocks:
+Write complete runnable code in FILE: blocks + run setup commands with CMD: blocks:
 
 FILE: <relative/path/to/file.ext>
 ```<language>
 <complete file content>
 ```
 
+CMD: <single shell command to install deps, run tests, etc.>
+
 Rules:
+- A project snapshot is in your context. READ existing files and EDIT them — don't regenerate from scratch.
 - Use the simplest tech that solves the problem
 - Make reasonable assumptions and note them briefly
 - Inline TODOs are fine for complex bits — keep moving
 - Include README.md with install + run
-- After FILE: blocks, one-paragraph summary of what ships + any TODOs left."""
+- Use CMD: to install new deps (npm install, pip install) — they run automatically.
+- Don't emit git push or rm commands — those pause for user approval.
+- After FILE: + CMD: blocks, one-paragraph summary of what ships + any TODOs left."""
     },
     {
         "name": "Tester",
@@ -300,18 +312,23 @@ Maximize parallelism where dependencies allow. Keep tasks small and verifiable."
 
 Read the Research + Plan artifacts. Implement the plan completely. Flag any deviations from the plan explicitly.
 
-Write complete runnable code in FILE: blocks:
+Write complete runnable code in FILE: blocks + setup commands in CMD: blocks:
 
 FILE: <relative/path/to/file.ext>
 ```<language>
 <complete file content>
 ```
 
+CMD: <single shell command>
+
 Rules:
+- A project snapshot is in your context. READ existing files — don't regenerate from scratch.
 - Follow the planner's workstream structure
 - Every file is complete and runnable
 - Include README.md and dependency manifests if needed
-- After FILE: blocks, write:
+- Use CMD: to install deps + run tests (npm install, pytest, cargo test)
+- Don't emit git push or destructive commands — those pause for approval.
+- After FILE: + CMD: blocks, write:
   ## Execution summary
   ### What was built (per workstream)
   ### Deviations from plan (if any)

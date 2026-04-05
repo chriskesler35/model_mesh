@@ -339,8 +339,32 @@ async def _run_phase(pipeline_id: str, phase_index: int):
     system_parts.append(f"# Your role: {agent_role}\n\n{phase_prompt}")
     system_prompt = "\n\n---\n\n".join(system_parts)
 
-    # Build user message: task + all prior phase artifacts
+    # Load the session's project path so we can inject the current file snapshot.
+    # Without this, code phases hallucinate new files instead of editing existing ones.
+    session_project_path: Optional[Path] = None
+    try:
+        from app.models.workbench import WorkbenchSession
+        async with AsyncSessionLocal() as db:
+            sess = (await db.execute(
+                select(WorkbenchSession).where(WorkbenchSession.pipeline_id == pipeline_id)
+            )).scalar_one_or_none()
+            if sess and sess.project_path:
+                session_project_path = Path(sess.project_path)
+    except Exception as e:
+        logger.debug(f"Could not resolve session project_path: {e}")
+
+    project_snapshot = ""
+    if session_project_path and session_project_path.exists():
+        try:
+            from app.routes.workbench import _read_project_snapshot
+            project_snapshot = _read_project_snapshot(session_project_path)
+        except Exception as e:
+            logger.debug(f"Snapshot read failed: {e}")
+
+    # Build user message: task + project snapshot + all prior phase artifacts
     user_parts = [f"# Original task\n{initial_task}"]
+    if project_snapshot:
+        user_parts.append(project_snapshot)
     for prd in prior_run_dicts:
         user_parts.append(_format_prior_artifact_for_context(prd))
     user_parts.append(f"# Your turn: {phase_name}\nProduce your artifact per the instructions in your system prompt.")
@@ -483,11 +507,11 @@ async def _run_phase(pipeline_id: str, phase_index: int):
                     select(WorkbenchSession).where(WorkbenchSession.pipeline_id == pipeline_id)
                 )).scalar_one_or_none()
                 if sess and sess.project_path:
-                    project_path = Path(sess.project_path)
+                    project_path_for_write = Path(sess.project_path)
                     written = []
                     for f in artifact["files"]:
                         rel = f["path"].lstrip("/\\")
-                        abs_path = project_path / rel
+                        abs_path = project_path_for_write / rel
                         try:
                             abs_path.parent.mkdir(parents=True, exist_ok=True)
                             abs_path.write_text(f["content"], encoding="utf-8")
@@ -496,8 +520,105 @@ async def _run_phase(pipeline_id: str, phase_index: int):
                             logger.warning(f"Failed to write {rel}: {e}")
                     artifact["files_written_to_disk"] = written
                     _push(pipeline_id, "files_written", phase_index=phase_index, files=written)
+                elif sess and not sess.project_path:
+                    # Warn the user — without a project path, code phases produce
+                    # artifacts but nothing lands on disk.
+                    logger.warning(f"Pipeline {pipeline_id} code phase has no project_path — files NOT saved")
+                    _push(pipeline_id, "warning",
+                          phase_index=phase_index,
+                          message=f"Code phase '{phase_name}' produced {len(artifact['files'])} files but session has no project_path — files won't be saved to disk. Attach a project when creating the session.")
         except Exception as e:
             logger.warning(f"File writing for phase failed: {e}")
+
+    # Execute any CMD: blocks the agent emitted (same 3-tier classifier as workbench)
+    cmd_results_for_context: list[str] = []
+    try:
+        from app.services.command_executor import (
+            parse_cmd_blocks, create_command_record, execute_and_record,
+            classify_with_project_trust, format_command_for_context,
+        )
+        from app.services.command_classifier import CommandTier
+
+        cmds = parse_cmd_blocks(full_response)
+        if cmds and session_project_path:
+            # Load session bypass + project sandbox mode
+            bypass_mode = False
+            sandbox_mode = "full"
+            proj_path_str = str(session_project_path)
+            sess_row = None
+            try:
+                from app.models.workbench import WorkbenchSession
+                async with AsyncSessionLocal() as db:
+                    sess_row = (await db.execute(
+                        select(WorkbenchSession).where(WorkbenchSession.pipeline_id == pipeline_id)
+                    )).scalar_one_or_none()
+                    if sess_row:
+                        bypass_mode = bool(sess_row.bypass_approvals)
+                        proj_id = sess_row.project_id
+                        if proj_id:
+                            try:
+                                import json as _json
+                                from pathlib import Path as _P
+                                data_dir = _P(__file__).parent.parent.parent.parent / "data"
+                                pf = data_dir / "projects.json"
+                                if pf.exists():
+                                    projects = _json.loads(pf.read_text(encoding="utf-8"))
+                                    proj = projects.get(str(proj_id)) or {}
+                                    sandbox_mode = proj.get("sandbox_mode") or "full"
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+            session_id_for_cmds = sess_row.id if sess_row else None
+            if session_id_for_cmds:
+                _push(pipeline_id, "info", phase_index=phase_index,
+                      message=f"Phase emitted {len(cmds)} command(s) to execute")
+                for raw_cmd in cmds:
+                    tier = classify_with_project_trust(raw_cmd, sandbox_mode, proj_path_str)
+                    if tier == CommandTier.BLOCKED:
+                        continue
+                    # In pipelines we respect the same tiering BUT we can't
+                    # pause for approval mid-phase easily. Policy: auto-approve
+                    # auto+notice tiers, skip approval tier (record it so user
+                    # can approve via workbench UI if they click through).
+                    if tier == CommandTier.APPROVAL and not bypass_mode:
+                        # Record as pending so it shows up in the workbench log
+                        rec_id = await create_command_record(
+                            session_id_for_cmds, raw_cmd, tier,
+                            pipeline_id=pipeline_id, phase_run_id=phase_run_id,
+                            initial_status="pending",
+                        )
+                        _push(pipeline_id, "command_awaiting_approval",
+                              command_id=rec_id, command=raw_cmd, tier=tier.value,
+                              phase_index=phase_index)
+                        continue
+                    # Run inline (auto, notice, or bypass)
+                    rec_id = await create_command_record(
+                        session_id_for_cmds, raw_cmd, tier,
+                        pipeline_id=pipeline_id, phase_run_id=phase_run_id,
+                        initial_status="running",
+                    )
+                    _push(pipeline_id, "command_running",
+                          command_id=rec_id, command=raw_cmd, tier=tier.value,
+                          phase_index=phase_index)
+                    result = await execute_and_record(
+                        rec_id, raw_cmd, session_project_path, bypass_used=bypass_mode
+                    )
+                    _push(pipeline_id, "command_completed", phase_index=phase_index, **result)
+                    cmd_results_for_context.append(format_command_for_context(result))
+
+        elif cmds and not session_project_path:
+            logger.warning(f"Pipeline {pipeline_id} phase emitted {len(cmds)} CMD: blocks but no project_path — commands skipped")
+            _push(pipeline_id, "warning", phase_index=phase_index,
+                  message=f"Phase emitted {len(cmds)} commands but session has no project — commands skipped")
+    except Exception as e:
+        logger.warning(f"Command execution in phase failed: {e}")
+
+    # Append command results to the artifact for downstream phases to see
+    if cmd_results_for_context:
+        existing_raw = artifact.get("raw", "")
+        artifact["raw"] = existing_raw + "\n\n## Commands executed:\n" + "\n\n".join(cmd_results_for_context)
 
     # Persist phase run (awaiting_approval or approved-if-auto)
     final_status = "approved" if auto_approve else "awaiting_approval"
@@ -674,6 +795,16 @@ async def create_pipeline(body: PipelineCreate, db: AsyncSession = Depends(get_d
     )).scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail=f"Workbench session {body.session_id} not found")
+
+    # Warn if no project is attached — code phases will produce artifacts but
+    # files won't land on disk. Not a hard failure because pure analysis
+    # pipelines can still be useful without a project.
+    if not session.project_path:
+        logger.warning(
+            f"Pipeline created for session {body.session_id} WITHOUT a project_path. "
+            f"Code phases will produce artifacts but files won't be written to disk. "
+            f"Attach the session to a project for the full workflow."
+        )
 
     # Apply per-phase model overrides if provided
     overrides = body.model_overrides or {}

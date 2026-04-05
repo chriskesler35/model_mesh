@@ -312,6 +312,12 @@ export default function WorkbenchListPage() {
                     <div className="text-xs text-indigo-700 dark:text-indigo-300">
                       Specialist agents hand off to each other through approval gates. <b>All phases use the Model you selected below</b> — customize per-phase if needed.
                     </div>
+                    {!projectId && (
+                      <div className="p-2 rounded bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 text-[11px] text-amber-800 dark:text-amber-200">
+                        <div className="font-semibold">⚠ No project attached</div>
+                        <div>Code phases will generate files but they won't be saved to disk. Go back and launch this session from a project to enable file writes + command execution.</div>
+                      </div>
+                    )}
                     <div className="grid grid-cols-2 gap-2">
                       <select value={pipelineMethod} onChange={e => setPipelineMethod(e.target.value as any)}
                         className="rounded-lg border border-indigo-300 dark:border-indigo-700 dark:bg-gray-800 dark:text-white px-2 py-1.5 text-xs">
