@@ -23,13 +23,14 @@ const NAV_ITEMS = [
 
 const GROUPS = [
   { label: 'MAIN',   items: ['/', '/chat'] },
-  { label: 'BUILD',  items: ['/agents', '/projects', '/workbench', '/agents/sessions'] },
+  { label: 'BUILD',  items: ['/agents', '/personas', '/projects', '/workbench', '/agents/sessions'] },
   { label: 'CREATE', items: ['/gallery', '/methods'] },
-  { label: 'MANAGE', items: ['/collaborate', '/personas', '/models', '/stats', '/settings', '/help'] },
+  { label: 'MANAGE', items: ['/collaborate', '/models', '/stats', '/settings', '/help'] },
 ]
 
 // Routes that should render indented under their parent
 const NESTED_UNDER: Record<string, string> = {
+  '/personas': '/agents',
   '/workbench': '/projects',
   '/agents/sessions': '/projects',
 }
