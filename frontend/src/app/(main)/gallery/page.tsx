@@ -2,7 +2,7 @@
 
 import { API_BASE, API_KEY, AUTH_HEADERS } from '@/lib/config'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import Link from 'next/link'
 
 
@@ -122,6 +122,79 @@ export default function GalleryPage() {
   }, [])
 
   const totalPages = Math.ceil(totalImages / PAGE_SIZE)
+
+  // Lightbox navigation — go to prev/next image (crosses page boundaries)
+  const navigateLightbox = useCallback((direction: 'prev' | 'next') => {
+    if (!selectedImage || images.length === 0) return
+    const idx = images.findIndex(img => img.id === selectedImage.id)
+    if (idx < 0) return
+    if (direction === 'next') {
+      if (idx < images.length - 1) {
+        setSelectedImage(images[idx + 1])
+      } else if (page < totalPages - 1) {
+        // Load next page, then select first image of that page
+        setPage(p => p + 1)
+        // selectedImage stays the same until new images load; the effect below re-syncs
+      }
+    } else {
+      if (idx > 0) {
+        setSelectedImage(images[idx - 1])
+      } else if (page > 0) {
+        // Load previous page, then select last image of that page
+        setPage(p => p - 1)
+      }
+    }
+  }, [selectedImage, images, page, totalPages])
+
+  // After loading a new page from lightbox navigation, jump to the appropriate edge image
+  const pendingLightboxEdgeRef = useRef<'first' | 'last' | null>(null)
+  useEffect(() => {
+    if (!selectedImage || images.length === 0) return
+    const stillExists = images.some(img => img.id === selectedImage.id)
+    if (stillExists) {
+      pendingLightboxEdgeRef.current = null
+      return
+    }
+    // Selected image not on current page — pick edge based on pending intent
+    if (pendingLightboxEdgeRef.current === 'first') {
+      setSelectedImage(images[0])
+    } else if (pendingLightboxEdgeRef.current === 'last') {
+      setSelectedImage(images[images.length - 1])
+    }
+    pendingLightboxEdgeRef.current = null
+  }, [images, selectedImage])
+
+  // Mark the expected edge before page change when navigating across pages
+  const navigateLightboxWrapped = useCallback((direction: 'prev' | 'next') => {
+    if (!selectedImage || images.length === 0) return
+    const idx = images.findIndex(img => img.id === selectedImage.id)
+    if (direction === 'next' && idx === images.length - 1 && page < totalPages - 1) {
+      pendingLightboxEdgeRef.current = 'first'
+    } else if (direction === 'prev' && idx === 0 && page > 0) {
+      pendingLightboxEdgeRef.current = 'last'
+    }
+    navigateLightbox(direction)
+  }, [selectedImage, images, page, totalPages, navigateLightbox])
+
+  // Keyboard navigation — arrow keys + Escape
+  useEffect(() => {
+    if (!selectedImage) return
+    const handler = (e: KeyboardEvent) => {
+      // Don't hijack keys when user is typing in the edit prompt input
+      const target = e.target as HTMLElement
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
+      if (e.key === 'ArrowRight') { e.preventDefault(); navigateLightboxWrapped('next') }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); navigateLightboxWrapped('prev') }
+      else if (e.key === 'Escape') { setSelectedImage(null) }
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [selectedImage, navigateLightboxWrapped])
+
+  // Current lightbox index for UI display
+  const lightboxIdx = selectedImage ? images.findIndex(img => img.id === selectedImage.id) : -1
+  const canGoPrev = selectedImage && (lightboxIdx > 0 || page > 0)
+  const canGoNext = selectedImage && (lightboxIdx >= 0 && (lightboxIdx < images.length - 1 || page < totalPages - 1))
 
   const downloadImage = async (image: Image) => {
     try {
@@ -452,6 +525,34 @@ export default function GalleryPage() {
           className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4"
           onClick={() => setSelectedImage(null)}
         >
+          {/* Prev arrow — outside the modal so clicking it doesn't bubble to close */}
+          {canGoPrev && (
+            <button
+              onClick={(e) => { e.stopPropagation(); navigateLightboxWrapped('prev') }}
+              className="fixed left-4 top-1/2 -translate-y-1/2 z-10 p-3 bg-black/50 hover:bg-black/70 text-white rounded-full transition-colors"
+              title="Previous image (←)"
+            >
+              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 19l-7-7 7-7" />
+              </svg>
+            </button>
+          )}
+          {canGoNext && (
+            <button
+              onClick={(e) => { e.stopPropagation(); navigateLightboxWrapped('next') }}
+              className="fixed right-4 top-1/2 -translate-y-1/2 z-10 p-3 bg-black/50 hover:bg-black/70 text-white rounded-full transition-colors"
+              title="Next image (→)"
+            >
+              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
+          )}
+          {/* Position indicator */}
+          <div className="fixed top-4 left-1/2 -translate-x-1/2 z-10 px-3 py-1 bg-black/50 text-white text-xs rounded-full">
+            {lightboxIdx >= 0 ? `${page * PAGE_SIZE + lightboxIdx + 1} / ${totalImages}` : ''}
+          </div>
+
           <div className="max-w-4xl max-h-full bg-white dark:bg-gray-800 rounded-lg overflow-hidden" onClick={e => e.stopPropagation()}>
             <img
               src={`${API_BASE}/v1/img/${selectedImage.id}`}
