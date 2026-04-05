@@ -8,7 +8,7 @@ const NAV_ITEMS = [
   { href: '/',                label: 'Dashboard',  icon: '◈' },
   { href: '/chat',            label: 'Chat',        icon: '💬' },
   { href: '/agents',          label: 'Agents',      icon: '🤖' },
-  { href: '/agents/sessions', label: 'Sessions',    icon: '▶' },
+  { href: '/agents/sessions', label: 'Agent Sessions', icon: '▶' },
   { href: '/workbench',       label: 'Workbench',   icon: '🔨' },
   { href: '/projects',        label: 'Projects',    icon: '🗂️' },
   { href: '/gallery',         label: 'Gallery',     icon: '🖼️' },
@@ -23,7 +23,7 @@ const NAV_ITEMS = [
 
 const GROUPS = [
   { label: 'MAIN',   items: ['/', '/chat'] },
-  { label: 'BUILD',  items: ['/agents', '/agents/sessions', '/projects', '/workbench'] },
+  { label: 'BUILD',  items: ['/agents', '/projects', '/workbench', '/agents/sessions'] },
   { label: 'CREATE', items: ['/gallery', '/methods'] },
   { label: 'MANAGE', items: ['/collaborate', '/personas', '/models', '/stats', '/settings', '/help'] },
 ]
@@ -31,7 +31,7 @@ const GROUPS = [
 // Routes that should render indented under their parent
 const NESTED_UNDER: Record<string, string> = {
   '/workbench': '/projects',
-  '/agents/sessions': '/agents',
+  '/agents/sessions': '/projects',
 }
 
 function ThemeToggle({ collapsed }: { collapsed: boolean }) {
