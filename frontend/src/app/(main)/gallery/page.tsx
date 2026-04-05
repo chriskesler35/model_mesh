@@ -54,6 +54,8 @@ export default function GalleryPage() {
   // ComfyUI img2img workflow selection (only relevant when variationModel === "comfyui-local")
   const [img2imgWorkflows, setImg2imgWorkflows] = useState<Workflow[]>([])
   const [variationWorkflow, setVariationWorkflow] = useState<string>('sdxl-img2img')
+  // Progress toast for long-running ComfyUI variations
+  const [progressToast, setProgressToast] = useState<{ activeStep: number; elapsed: number } | null>(null)
 
   // Moved to component scope so all handlers can call it
   const fetchImages = useCallback(async (pageNum: number = 0) => {
@@ -287,11 +289,35 @@ export default function GalleryPage() {
 
   const generateVariation = async (imageId: string, modelId?: string) => {
     setGenerating(imageId)
+    const chosenModel = modelId || variationModel
+    const isLocal = chosenModel === 'comfyui-local'
+
+    // Spin up a progress toast for local (slow) variations so user knows
+    // the app is alive. Steps advance on a timer based on typical SDXL
+    // img2img timings (startup → sampling → decode).
+    let startTs = Date.now()
+    let progressTimer: ReturnType<typeof setInterval> | null = null
+    if (isLocal) {
+      setProgressToast({ activeStep: 0, elapsed: 0 })
+      progressTimer = setInterval(() => {
+        setProgressToast(prev => {
+          if (!prev) return prev
+          const elapsed = Math.floor((Date.now() - startTs) / 1000)
+          // Step thresholds (seconds): 0-3 upload, 3-15 workflow/model load,
+          // 15-45 sampling, 45+ decoding/saving. After 60s we just stay on "finishing".
+          let step = 0
+          if (elapsed >= 3) step = 1
+          if (elapsed >= 15) step = 2
+          if (elapsed >= 45) step = 3
+          return { activeStep: step, elapsed }
+        })
+      }, 500)
+    }
+
     try {
-      const chosenModel = modelId || variationModel
       const body: any = { model: chosenModel }
       // Include workflow_id only when using ComfyUI (Gemini ignores it)
-      if (chosenModel === 'comfyui-local' && variationWorkflow) {
+      if (isLocal && variationWorkflow) {
         body.workflow_id = variationWorkflow
       }
       const response = await fetch(`${API_BASE}/v1/images/${imageId}/variations`, {
@@ -311,6 +337,8 @@ export default function GalleryPage() {
       console.error('Failed to generate variation:', e)
       alert('Variation failed: ' + e.message)
     } finally {
+      if (progressTimer) clearInterval(progressTimer)
+      setProgressToast(null)
       setGenerating(null)
     }
   }
@@ -420,6 +448,67 @@ export default function GalleryPage() {
           </button>
         </div>
       </div>
+
+      {/* Progress toast for long-running ComfyUI variations */}
+      {progressToast && (() => {
+        const steps = [
+          { label: 'Uploading source image to ComfyUI', hint: 'Sending your image to the local ComfyUI instance' },
+          { label: 'Loading workflow & model', hint: 'Loading the checkpoint, LoRA, and VAE (slowest on first run — model has to load into VRAM)' },
+          { label: 'Generating variation', hint: 'Running KSampler at denoise=0.65 — this is where the GPU does the real work' },
+          { label: 'Decoding & saving image', hint: 'VAE decode → PNG → saved to data/images/' },
+        ]
+        return (
+          <div className="mb-4 rounded-xl border-2 border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-900/20 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <div className="flex gap-1">
+                  {[0,1,2].map(i => (
+                    <span key={i} className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce" style={{ animationDelay: `${i*0.15}s` }} />
+                  ))}
+                </div>
+                <span className="text-sm font-semibold text-indigo-900 dark:text-indigo-100">
+                  Generating variation via local ComfyUI
+                </span>
+              </div>
+              <span className="text-xs text-indigo-700 dark:text-indigo-300 font-mono">
+                {progressToast.elapsed}s elapsed
+              </span>
+            </div>
+            <p className="text-xs text-indigo-700 dark:text-indigo-300 mb-3">
+              Local image generation can take 30-120 seconds depending on your GPU and workflow. Please be patient — don't close this tab.
+            </p>
+            <div className="space-y-1.5">
+              {steps.map((s, i) => {
+                const done = i < progressToast.activeStep
+                const active = i === progressToast.activeStep
+                return (
+                  <div key={i} className="flex items-start gap-2 text-xs">
+                    <span className={`flex-shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold mt-0.5 ${
+                      done ? 'bg-green-500 text-white' :
+                      active ? 'bg-indigo-500 text-white animate-pulse' :
+                      'bg-gray-200 dark:bg-gray-700 text-gray-400'
+                    }`}>
+                      {done ? '✓' : i + 1}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <div className={`font-medium ${
+                        done ? 'text-green-700 dark:text-green-400 line-through opacity-70' :
+                        active ? 'text-indigo-900 dark:text-indigo-100' :
+                        'text-gray-400 dark:text-gray-500'
+                      }`}>
+                        {s.label}
+                      </div>
+                      {active && (
+                        <div className="text-[11px] text-indigo-600 dark:text-indigo-400 mt-0.5 italic">{s.hint}</div>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })()}
 
       {/* Upload Zone */}
       <div
