@@ -25,6 +25,32 @@ MIGRATIONS = [
     "ALTER TABLE workbench_sessions ADD COLUMN messages JSON",
     # workbench_sessions - link to pipeline (Option A multi-agent)
     "ALTER TABLE workbench_sessions ADD COLUMN pipeline_id VARCHAR(36)",
+    # workbench_sessions - command execution bypass toggle
+    "ALTER TABLE workbench_sessions ADD COLUMN bypass_approvals BOOLEAN NOT NULL DEFAULT 0",
+    # workbench_commands audit table (created via create_all below)
+    """CREATE TABLE IF NOT EXISTS workbench_commands (
+        id VARCHAR(36) PRIMARY KEY,
+        session_id VARCHAR(36) NOT NULL,
+        pipeline_id VARCHAR(36),
+        phase_run_id VARCHAR(36),
+        turn_number INTEGER,
+        command TEXT NOT NULL,
+        tier VARCHAR(20) NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        exit_code INTEGER,
+        stdout TEXT,
+        stderr TEXT,
+        user_feedback TEXT,
+        bypass_used BOOLEAN NOT NULL DEFAULT 0,
+        duration_ms INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        started_at DATETIME,
+        completed_at DATETIME,
+        FOREIGN KEY (session_id) REFERENCES workbench_sessions(id) ON DELETE CASCADE
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_workbench_commands_session ON workbench_commands(session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_workbench_commands_pipeline ON workbench_commands(pipeline_id)",
+    "CREATE INDEX IF NOT EXISTS idx_workbench_commands_status ON workbench_commands(status)",
     # messages - inline image URL
     "ALTER TABLE messages ADD COLUMN image_url TEXT",
 ]

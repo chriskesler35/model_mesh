@@ -16,6 +16,7 @@ from sqlalchemy import select, desc
 from pydantic import BaseModel
 from app.middleware.auth import verify_api_key
 from app.database import get_db, AsyncSessionLocal
+from app.services.provider_credentials import has_provider_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -99,14 +100,8 @@ def _provider_has_credentials(provider_name: str) -> bool:
     p = (provider_name or "").lower()
     if p in ("ollama", "local", "lm-studio", "lmstudio", "llamacpp"):
         return True
-    if p == "anthropic":
-        return bool(os.environ.get("ANTHROPIC_API_KEY"))
-    if p == "google":
-        return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
-    if p == "openai" or p == "openai-codex":
-        return bool(os.environ.get("OPENAI_API_KEY"))
-    if p == "openrouter":
-        return bool(os.environ.get("OPENROUTER_API_KEY"))
+    if p in ("anthropic", "google", "openai", "openai-codex", "openrouter"):
+        return has_provider_api_key(p)
     # Unknown providers — assume yes and let the call fail loudly
     return True
 
@@ -233,7 +228,8 @@ _BASE_SYSTEM_PROMPT = """You are an expert software engineer working iteratively
 
 You work one turn at a time. Each turn the user gives you a task or refinement, and you either:
   (a) write/modify files to accomplish it, OR
-  (b) ask a clarifying question if the request is ambiguous.
+  (b) execute shell commands (install deps, run tests, commit, push), OR
+  (c) ask a clarifying question if the request is ambiguous.
 
 IMPORTANT: Start EVERY response with a single line declaring your current role for this turn:
 ROLE: <one of: Analyst, Planner, Architect, Coder, Reviewer, Tester, Researcher>
@@ -241,23 +237,43 @@ ROLE: <one of: Analyst, Planner, Architect, Coder, Reviewer, Tester, Researcher>
 Pick the role that best fits what this turn needs. For a fresh implementation task you're usually "Coder".
 For a fuzzy request that needs clarification, you're "Analyst". When designing structure before coding, "Architect".
 
-After the ROLE line, write file blocks in this EXACT format:
+After the ROLE line, write FILE blocks + CMD blocks in this EXACT format:
 
 FILE: <relative/path/to/file.ext>
 ```<language>
 <complete file content>
 ```
 
-Rules for file output:
+CMD: <single shell command>
+
+Rules for FILE output:
 - Every file must be complete and immediately runnable — no placeholders, no TODOs
 - Use only standard library + dependencies that are already in the project OR explicitly requested
 - If the user's request implies new dependencies, include an updated requirements.txt / package.json
 - Include or update README.md so it always reflects current install + usage instructions
 - Only write files you're actually changing; don't rewrite untouched files
-- After the file blocks, add a brief summary (2-4 lines) of WHAT you changed and WHY
+
+Rules for CMD output (shell execution):
+- Each CMD: line is ONE shell command that will be run in the project directory
+- Commands are classified into tiers:
+  * AUTO (safe): ls, cat, grep, git status/log/diff, pytest, npm test, python main.py — run silently
+  * NOTICE (modifies env): npm install, pip install, git add/commit, mkdir — run with a banner
+  * APPROVAL (destructive/external): git push, rm -rf, sudo, docker rm, curl POST — pause for user approval
+- Use CMD: liberally for install, test, commit, and push workflows. The user wants you to DO things, not just write code.
+- Example workflow after writing code:
+    CMD: pip install -r requirements.txt
+    CMD: pytest tests/ -v
+    CMD: git add .
+    CMD: git commit -m "add feature X"
+    CMD: git push
+- You'll see the stdout/stderr/exit_code of every command you ran on the next turn.
+- If a command was pending approval and the user rejects or approves, you'll be told.
+- DO NOT wrap commands in code fences. Just: CMD: <command>
+- DO NOT emit the same command twice in one turn.
+- After FILE + CMD blocks, add a brief summary (2-4 lines) of WHAT you changed and WHY.
 
 If the user's request is genuinely unclear and you cannot make a sensible assumption,
-respond with a short clarifying question INSTEAD of file blocks. Do not do both.
+respond with a short clarifying question INSTEAD of file/cmd blocks. Do not do both.
 
 CONTEXT: You will see the current state of the project (existing files) in the conversation.
 Read them carefully before deciding what to change. Prefer minimal, focused edits over rewrites.
@@ -578,20 +594,131 @@ async def _run_turn(
 
         await asyncio.sleep(0.1)  # brief yield so SSE stream flushes
 
+    # ── Execute CMD: blocks the agent emitted ─────────────────────────────
+    from app.services.command_executor import (
+        parse_cmd_blocks, create_command_record, execute_and_record,
+        classify_with_project_trust, format_command_for_context,
+    )
+    from app.services.command_classifier import CommandTier, describe_tier
+
+    cmd_results_for_context: list[str] = []
+    commands_requiring_approval: list[dict] = []
+
+    cmds = parse_cmd_blocks(full_response)
+    if cmds:
+        # Load session-level bypass flag + project sandbox mode
+        bypass_mode = False
+        sandbox_mode = "full"
+        proj_path_str = str(project_path) if project_path else None
+        try:
+            from app.models.workbench import WorkbenchSession
+            async with AsyncSessionLocal() as db:
+                sess_row = (await db.execute(
+                    select(WorkbenchSession).where(WorkbenchSession.id == session_id)
+                )).scalar_one_or_none()
+                if sess_row:
+                    bypass_mode = bool(sess_row.bypass_approvals)
+                    proj_id = sess_row.project_id
+                    if proj_id:
+                        try:
+                            from pathlib import Path as _P
+                            data_dir = _P(__file__).parent.parent.parent.parent / "data"
+                            pf = data_dir / "projects.json"
+                            if pf.exists():
+                                import json as _json
+                                projects = _json.loads(pf.read_text(encoding="utf-8"))
+                                proj = projects.get(str(proj_id)) or {}
+                                sandbox_mode = proj.get("sandbox_mode") or "full"
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.warning(f"Could not load session bypass/sandbox for commands: {e}")
+
+        _push(session_id, "info", message=f"Agent emitted {len(cmds)} command(s) to execute")
+
+        for raw_cmd in cmds:
+            tier = classify_with_project_trust(raw_cmd, sandbox_mode, proj_path_str)
+
+            if tier == CommandTier.BLOCKED:
+                rec_id = await create_command_record(session_id, raw_cmd, tier, turn_number=turn_num, initial_status="skipped")
+                _push(session_id, "command_blocked", command_id=rec_id, command=raw_cmd,
+                      message="Blocked by sandbox policy (project is in restricted mode)")
+                continue
+
+            # Bypass mode: run everything as if it were Tier 1
+            if bypass_mode:
+                rec_id = await create_command_record(
+                    session_id, raw_cmd, tier,
+                    turn_number=turn_num, initial_status="running",
+                )
+                _push(session_id, "command_running", command_id=rec_id, command=raw_cmd,
+                      tier=tier.value, bypass=True)
+                result = await execute_and_record(
+                    rec_id, raw_cmd, project_path or Path.cwd(), bypass_used=True
+                )
+                _push(session_id, "command_completed", **result)
+                cmd_results_for_context.append(format_command_for_context(result))
+                continue
+
+            # Tier 3 — always pause for approval
+            if tier == CommandTier.APPROVAL:
+                rec_id = await create_command_record(
+                    session_id, raw_cmd, tier,
+                    turn_number=turn_num, initial_status="pending",
+                )
+                _push(session_id, "command_awaiting_approval",
+                      command_id=rec_id, command=raw_cmd,
+                      tier=tier.value, tier_label=describe_tier(tier))
+                commands_requiring_approval.append({
+                    "command_id": rec_id, "command": raw_cmd, "tier": tier.value,
+                })
+                continue
+
+            # Tier 1 / Tier 2 — run directly (Tier 2 pushes a notice first)
+            if tier == CommandTier.NOTICE:
+                _push(session_id, "command_notice",
+                      command=raw_cmd, message=f"Modifying your environment: {raw_cmd}")
+            rec_id = await create_command_record(
+                session_id, raw_cmd, tier,
+                turn_number=turn_num, initial_status="running",
+            )
+            _push(session_id, "command_running", command_id=rec_id, command=raw_cmd, tier=tier.value)
+            result = await execute_and_record(rec_id, raw_cmd, project_path or Path.cwd())
+            _push(session_id, "command_completed", **result)
+            cmd_results_for_context.append(format_command_for_context(result))
+
     # Extract the text that followed the file blocks as agent commentary
-    # Strip FILE: blocks AND the ROLE: line out of full_response
+    # Strip FILE: blocks, ROLE: line, AND CMD: lines out of full_response
     commentary = re.sub(r'FILE:[^\n]*\n```[^\n]*\n.*?```', '', full_response, flags=re.DOTALL)
     commentary = re.sub(r'^\s*ROLE:\s*[A-Za-z][A-Za-z ]*\n', '', commentary).strip()
+    commentary = re.sub(r'^\s*CMD:\s*.+?$', '', commentary, flags=re.MULTILINE).strip()
     if not commentary and written:
         commentary = f"Wrote {len(written)} file(s): {', '.join(written)}"
     elif not commentary:
         commentary = full_response[:500]
+    # Append command results to commentary so they show in the turn bubble
+    if cmd_results_for_context:
+        commentary += "\n\n**Command output:**\n```\n" + "\n\n".join(cmd_results_for_context) + "\n```"
 
     # Build new conversation history for this turn
     new_history = list(history) + [
         {"role": "user", "content": user_message},
         {"role": "assistant", "content": full_response},
     ]
+    # If commands ran, feed their results back as a synthetic system turn so
+    # the agent can see what happened on the next turn (test failures, install
+    # errors, etc.)
+    if cmd_results_for_context:
+        new_history.append({
+            "role": "system",
+            "content": "Results of CMD: blocks from your last turn:\n\n" + "\n\n".join(cmd_results_for_context),
+        })
+    if commands_requiring_approval:
+        pending_list = "\n".join(f"  - {c['command']}" for c in commands_requiring_approval)
+        new_history.append({
+            "role": "system",
+            "content": f"These commands are pending user approval and have NOT run yet:\n{pending_list}\n\nDon't re-emit them. When the user approves or rejects, you'll be told the result.",
+        })
 
     # Accumulate all files ever written across turns (union)
     prior_files = []
@@ -880,6 +1007,92 @@ async def complete_session(session_id: str):
     _queues.pop(session_id, None)
     _pending_messages.pop(session_id, None)
     return {"ok": True}
+
+
+@router.get("/sessions/{session_id}/commands", dependencies=[Depends(verify_api_key)])
+async def list_session_commands(session_id: str, limit: int = 100):
+    """List all commands emitted by the agent for this session (audit log)."""
+    from app.models.command_execution import CommandExecution
+    from sqlalchemy import desc as _desc
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(
+            select(CommandExecution)
+            .where(CommandExecution.session_id == session_id)
+            .order_by(_desc(CommandExecution.created_at))
+            .limit(limit)
+        )).scalars().all()
+    return {"data": [r.to_dict() for r in rows]}
+
+
+@router.post("/sessions/{session_id}/commands/{command_id}/approve", dependencies=[Depends(verify_api_key)])
+async def approve_command(session_id: str, command_id: str):
+    """Approve a pending command and execute it."""
+    from app.models.command_execution import CommandExecution
+    from app.models.workbench import WorkbenchSession
+    from app.services.command_executor import execute_and_record, format_command_for_context
+
+    async with AsyncSessionLocal() as db:
+        cmd_rec = (await db.execute(select(CommandExecution).where(CommandExecution.id == command_id))).scalar_one_or_none()
+        if not cmd_rec:
+            raise HTTPException(status_code=404, detail="Command not found")
+        if cmd_rec.session_id != session_id:
+            raise HTTPException(status_code=403, detail="Command does not belong to this session")
+        if cmd_rec.status != "pending":
+            raise HTTPException(status_code=409, detail=f"Command is not pending (status={cmd_rec.status})")
+        # Look up the session's project path for cwd
+        sess = (await db.execute(select(WorkbenchSession).where(WorkbenchSession.id == session_id))).scalar_one_or_none()
+        project_path = Path(sess.project_path) if sess and sess.project_path else Path.cwd()
+        command = cmd_rec.command
+
+    _push(session_id, "command_approved", command_id=command_id, command=command)
+    _push(session_id, "command_running", command_id=command_id, command=command, tier="approval")
+    result = await execute_and_record(command_id, command, project_path)
+    _push(session_id, "command_completed", **result)
+    # Persist events_log so the approval survives restart
+    await _db_update(session_id, events_log=_event_logs.get(session_id, []))
+    return {"ok": True, **result}
+
+
+class RejectCommandBody(BaseModel):
+    feedback: Optional[str] = None
+
+
+@router.post("/sessions/{session_id}/commands/{command_id}/reject", dependencies=[Depends(verify_api_key)])
+async def reject_command(session_id: str, command_id: str, body: Optional[RejectCommandBody] = None):
+    """Reject a pending command without running it."""
+    from app.models.command_execution import CommandExecution
+    feedback = body.feedback if body else None
+    async with AsyncSessionLocal() as db:
+        cmd_rec = (await db.execute(select(CommandExecution).where(CommandExecution.id == command_id))).scalar_one_or_none()
+        if not cmd_rec or cmd_rec.session_id != session_id:
+            raise HTTPException(status_code=404, detail="Command not found")
+        if cmd_rec.status != "pending":
+            raise HTTPException(status_code=409, detail=f"Command is not pending (status={cmd_rec.status})")
+        cmd_rec.status = "rejected"
+        cmd_rec.user_feedback = feedback
+        cmd_rec.completed_at = datetime.utcnow()
+        await db.commit()
+    _push(session_id, "command_rejected", command_id=command_id, command=cmd_rec.command, feedback=feedback)
+    await _db_update(session_id, events_log=_event_logs.get(session_id, []))
+    return {"ok": True}
+
+
+class BypassToggleBody(BaseModel):
+    bypass_approvals: bool
+
+
+@router.post("/sessions/{session_id}/bypass", dependencies=[Depends(verify_api_key)])
+async def set_bypass_mode(session_id: str, body: BypassToggleBody):
+    """Enable or disable approval bypass for this session."""
+    from app.models.workbench import WorkbenchSession
+    async with AsyncSessionLocal() as db:
+        sess = (await db.execute(select(WorkbenchSession).where(WorkbenchSession.id == session_id))).scalar_one_or_none()
+        if not sess:
+            raise HTTPException(status_code=404, detail="Session not found")
+        sess.bypass_approvals = bool(body.bypass_approvals)
+        await db.commit()
+    _push(session_id, "bypass_mode_changed", bypass_approvals=body.bypass_approvals)
+    return {"ok": True, "bypass_approvals": body.bypass_approvals}
 
 
 @router.delete("/sessions/{session_id}", dependencies=[Depends(verify_api_key)])

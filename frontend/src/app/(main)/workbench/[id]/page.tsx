@@ -377,6 +377,12 @@ export default function WorkbenchSessionPage() {
   const [waitingForHuman, setWaitingForHuman] = useState(false)
   const [autoScroll, setAutoScroll] = useState(true)
   const [showRunPanel, setShowRunPanel] = useState(false)
+  // Command approval queue (pending Tier 3 commands)
+  const [pendingCommands, setPendingCommands] = useState<Array<{id: string; command: string; tier: string; tier_label?: string}>>([])
+  const [completedCommands, setCompletedCommands] = useState<Array<{id: string; command: string; exit_code: number; status: string; stdout?: string; stderr?: string; tier?: string}>>([])
+  const [bypassMode, setBypassMode] = useState<boolean>(false)
+  const [showBypassWarning, setShowBypassWarning] = useState(false)
+  const [showCommandLog, setShowCommandLog] = useState(false)
 
   const streamRef = useRef<EventSource | null>(null)
   const streamEndRef = useRef<HTMLDivElement>(null)
@@ -399,6 +405,7 @@ export default function WorkbenchSessionPage() {
         if (evt.type === 'init') {
           setSession(evt.payload)
           setStatus(evt.payload.status || 'running')
+          setBypassMode(!!evt.payload.bypass_approvals)
           return
         }
 
@@ -453,6 +460,26 @@ export default function WorkbenchSessionPage() {
         if (evt.type === 'error') {
           setStatus('error')
         }
+
+        // Command execution events
+        if (evt.type === 'command_awaiting_approval') {
+          const p = evt.payload
+          setPendingCommands(prev => [...prev, { id: p.command_id, command: p.command, tier: p.tier, tier_label: p.tier_label }])
+        }
+        if (evt.type === 'command_approved' || evt.type === 'command_rejected') {
+          setPendingCommands(prev => prev.filter(c => c.id !== evt.payload.command_id))
+        }
+        if (evt.type === 'command_completed') {
+          const p = evt.payload
+          setPendingCommands(prev => prev.filter(c => c.id !== p.command_id))
+          setCompletedCommands(prev => [...prev, {
+            id: p.command_id, command: p.command, exit_code: p.exit_code,
+            status: p.status, stdout: p.stdout, stderr: p.stderr, tier: p.tier,
+          }])
+        }
+        if (evt.type === 'bypass_mode_changed') {
+          setBypassMode(!!evt.payload.bypass_approvals)
+        }
       } catch { /* ignore malformed */ }
     }
 
@@ -496,6 +523,40 @@ export default function WorkbenchSessionPage() {
       setStatus('completed')
     } catch (e: any) {
       alert(`Failed to mark session complete: ${e.message}\n\nIf this says "Not Found", restart the backend so it picks up the new endpoint.`)
+    }
+  }
+
+  const approveCommand = async (commandId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/v1/workbench/sessions/${id}/commands/${commandId}/approve`, { method: 'POST', headers: AUTH_HEADERS })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      setPendingCommands(prev => prev.filter(c => c.id !== commandId))
+    } catch (e: any) {
+      alert(`Failed to approve: ${e.message}`)
+    }
+  }
+  const rejectCommand = async (commandId: string, feedback?: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/v1/workbench/sessions/${id}/commands/${commandId}/reject`, {
+        method: 'POST', headers: AUTH_HEADERS,
+        body: JSON.stringify({ feedback: feedback || null }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      setPendingCommands(prev => prev.filter(c => c.id !== commandId))
+    } catch (e: any) {
+      alert(`Failed to reject: ${e.message}`)
+    }
+  }
+  const setBypassModeRemote = async (enable: boolean) => {
+    try {
+      const res = await fetch(`${API_BASE}/v1/workbench/sessions/${id}/bypass`, {
+        method: 'POST', headers: AUTH_HEADERS,
+        body: JSON.stringify({ bypass_approvals: enable }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      setBypassMode(enable)
+    } catch (e: any) {
+      alert(`Failed to toggle bypass: ${e.message}`)
     }
   }
 
@@ -635,6 +696,85 @@ export default function WorkbenchSessionPage() {
             <div ref={streamEndRef} />
           </div>
 
+          {/* Pending command approval queue (Tier 3) */}
+          {pendingCommands.length > 0 && (
+            <div className="flex-shrink-0 border-t-2 border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 px-4 py-3 space-y-2">
+              <div className="flex items-center gap-2 text-xs font-semibold text-amber-900 dark:text-amber-200">
+                <span className="text-base">⚠️</span>
+                <span>{pendingCommands.length} command{pendingCommands.length > 1 ? 's' : ''} waiting for your approval</span>
+              </div>
+              {pendingCommands.map(cmd => (
+                <div key={cmd.id} className="bg-white dark:bg-gray-900 rounded-lg border border-amber-200 dark:border-amber-800 p-2">
+                  <div className="flex items-start justify-between gap-2 mb-1">
+                    <code className="text-xs font-mono text-gray-900 dark:text-white break-all">$ {cmd.command}</code>
+                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300 font-semibold uppercase flex-shrink-0">{cmd.tier}</span>
+                  </div>
+                  {cmd.tier_label && (
+                    <div className="text-[10px] text-amber-700 dark:text-amber-400 mb-2">{cmd.tier_label}</div>
+                  )}
+                  <div className="flex gap-1.5">
+                    <button onClick={() => approveCommand(cmd.id)}
+                      className="px-2.5 py-1 text-xs font-semibold rounded bg-green-600 hover:bg-green-700 text-white">
+                      ✓ Approve & run
+                    </button>
+                    <button onClick={() => {
+                      const reason = prompt('Why reject this command? (optional)') || ''
+                      rejectCommand(cmd.id, reason)
+                    }}
+                      className="px-2.5 py-1 text-xs font-semibold rounded bg-red-500 hover:bg-red-600 text-white">
+                      ✗ Reject
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Bypass mode + command log toggles */}
+          <div className="flex-shrink-0 border-t border-gray-200 dark:border-gray-700 px-4 py-1.5 bg-gray-50 dark:bg-gray-800/30 flex items-center justify-between text-[11px] gap-3 flex-wrap">
+            <div className="flex items-center gap-2">
+              <button onClick={() => setShowCommandLog(s => !s)}
+                className="text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200">
+                {showCommandLog ? '▼' : '▶'} Command log ({completedCommands.length})
+              </button>
+              {bypassMode && (
+                <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300 font-semibold uppercase text-[9px]">
+                  🚨 Bypass mode
+                </span>
+              )}
+            </div>
+            <button
+              onClick={() => {
+                if (bypassMode) {
+                  setBypassModeRemote(false)
+                } else {
+                  setShowBypassWarning(true)
+                }
+              }}
+              className={`text-[11px] font-medium ${bypassMode ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'}`}
+            >
+              {bypassMode ? 'Disable bypass' : 'Enable bypass (skip approvals)'}
+            </button>
+          </div>
+
+          {/* Command log panel */}
+          {showCommandLog && completedCommands.length > 0 && (
+            <div className="flex-shrink-0 border-t border-gray-200 dark:border-gray-700 max-h-48 overflow-y-auto bg-gray-900 text-gray-200 font-mono text-[10px] p-2 space-y-1">
+              {completedCommands.map(c => (
+                <details key={c.id} className="border-l-2 pl-2" style={{borderColor: c.exit_code === 0 ? '#22c55e' : '#ef4444'}}>
+                  <summary className="cursor-pointer flex items-center gap-2">
+                    <span className={c.exit_code === 0 ? 'text-green-400' : 'text-red-400'}>
+                      [{c.exit_code === 0 ? '✓' : '✗'} {c.exit_code}]
+                    </span>
+                    <span className="text-gray-100 truncate">{c.command}</span>
+                  </summary>
+                  {c.stdout && <pre className="mt-1 text-gray-300 whitespace-pre-wrap max-h-40 overflow-auto">{c.stdout}</pre>}
+                  {c.stderr && <pre className="mt-1 text-red-300 whitespace-pre-wrap max-h-40 overflow-auto">{c.stderr}</pre>}
+                </details>
+              ))}
+            </div>
+          )}
+
           {/* Run panel (collapsible) */}
           {session?.project_id && (
             <div className="flex-shrink-0 border-t border-gray-200 dark:border-gray-700">
@@ -732,6 +872,46 @@ export default function WorkbenchSessionPage() {
           </div>
         </div>
       </div>
+
+      {/* Bypass warning modal */}
+      {showBypassWarning && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+             onClick={() => setShowBypassWarning(false)}>
+          <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-2xl overflow-hidden border-2 border-red-500"
+               onClick={e => e.stopPropagation()}>
+            <div className="px-6 py-4 border-b border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20">
+              <h2 className="text-base font-bold text-red-900 dark:text-red-100 flex items-center gap-2">
+                🚨 Enable Bypass Mode?
+              </h2>
+            </div>
+            <div className="px-6 py-4 space-y-3 text-sm">
+              <p className="text-gray-900 dark:text-white font-semibold">You are about to disable all command approval gates for this session.</p>
+              <p className="text-gray-700 dark:text-gray-300">
+                With bypass ON, the agent can execute <b>any</b> command without asking you — including:
+              </p>
+              <ul className="list-disc list-inside text-xs text-gray-700 dark:text-gray-300 space-y-0.5 ml-2">
+                <li><code className="text-red-600 dark:text-red-400">git push</code>, <code className="text-red-600 dark:text-red-400">git push --force</code></li>
+                <li><code className="text-red-600 dark:text-red-400">rm -rf</code>, <code className="text-red-600 dark:text-red-400">sudo</code></li>
+                <li><code className="text-red-600 dark:text-red-400">docker rm</code>, <code className="text-red-600 dark:text-red-400">curl -X POST</code> to external APIs</li>
+                <li>Anything else it decides to run</li>
+              </ul>
+              <p className="text-red-700 dark:text-red-400 font-semibold text-xs">
+                ⚠ Use at your own risk. This can destroy files, push broken code, or leak data. Only enable if you fully trust the agent and model you're using.
+              </p>
+            </div>
+            <div className="px-6 py-3 border-t border-gray-200 dark:border-gray-800 flex gap-2 justify-end">
+              <button onClick={() => setShowBypassWarning(false)}
+                className="px-4 py-2 text-sm font-medium rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800">
+                Cancel
+              </button>
+              <button onClick={async () => { await setBypassModeRemote(true); setShowBypassWarning(false) }}
+                className="px-4 py-2 text-sm font-bold rounded-lg bg-red-600 hover:bg-red-700 text-white">
+                I understand — enable bypass
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
