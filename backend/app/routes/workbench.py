@@ -1133,6 +1133,9 @@ async def delete_all_sessions(
     Optional ?status=completed|failed|cancelled|waiting filter — if omitted,
     deletes every non-running session. Running sessions are preserved unless
     the status filter explicitly selects them.
+
+    Also cleans up ORPHAN pipelines (pipelines whose session was deleted
+    separately) and orphan phase_runs (phase_runs whose pipeline is gone).
     """
     from app.models.workbench import WorkbenchSession
     from app.models.pipeline import Pipeline, PhaseRun
@@ -1164,6 +1167,38 @@ async def delete_all_sessions(
                 deleted_phase_runs += 1
             await db.delete(p)
             deleted_pipelines += 1
+
+    # Clean up ORPHAN pipelines (their session no longer exists)
+    # and orphan phase_runs (their pipeline no longer exists). These
+    # accumulate when sessions were deleted piecemeal in earlier code
+    # or the schema didn't cascade properly.
+    all_session_ids_now = set(
+        str(sid) for (sid,) in
+        (await db.execute(select(WorkbenchSession.id))).all()
+    )
+    orphan_pipelines = (await db.execute(select(Pipeline))).scalars().all()
+    for p in orphan_pipelines:
+        if str(p.session_id) not in all_session_ids_now:
+            # Delete phase runs for this orphan pipeline first
+            orphan_runs = (await db.execute(
+                select(PhaseRun).where(PhaseRun.pipeline_id == p.id)
+            )).scalars().all()
+            for pr in orphan_runs:
+                await db.delete(pr)
+                deleted_phase_runs += 1
+            await db.delete(p)
+            deleted_pipelines += 1
+
+    # Clean up orphan phase_runs (pipeline deleted separately somehow)
+    all_pipeline_ids_now = set(
+        str(pid) for (pid,) in
+        (await db.execute(select(Pipeline.id))).all()
+    )
+    orphan_runs = (await db.execute(select(PhaseRun))).scalars().all()
+    for pr in orphan_runs:
+        if str(pr.pipeline_id) not in all_pipeline_ids_now:
+            await db.delete(pr)
+            deleted_phase_runs += 1
 
         for s in sessions:
             await db.delete(s)
