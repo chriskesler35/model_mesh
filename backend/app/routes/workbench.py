@@ -495,13 +495,15 @@ async def _run_turn(
     except Exception as e:
         logger.warning(f"Failed to write request_log for workbench session {session_id}: {e}")
 
-    # Persist token/cost + event log to workbench session record
+    # Persist token/cost to workbench session record.
+    # NOTE: We deliberately DON'T save events_log here — it's saved only at
+    # terminal points (done/failed/cancelled) so a crash mid-turn won't leave
+    # a partial events_log that makes reload think the turn is still running.
     await _db_update(
         session_id,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         estimated_cost=estimated_cost,
-        events_log=_event_logs.get(session_id, []),
     )
 
     if not llm_success:
@@ -720,23 +722,39 @@ async def stream_session(session_id: str, request: Request):
         queue = _queues.get(session_id)
         if not queue:
             # Session exists in DB but not actively running - replay stored events.
-            # If events_log is missing terminal events (backend crash / restart mid-turn),
-            # synthesize them so the UI doesn't stay stuck on "Working on it…" forever.
+            # If the LAST turn is incomplete (backend crash / restart mid-turn),
+            # synthesize terminal events so the UI doesn't stay stuck on
+            # "Working on it…" forever.
             session_dict = session.to_dict()
             yield f"data: {json.dumps({'type':'init','payload':session_dict})}\n\n"
             log = session_dict.get('events_log') or []
             for evt in log:
                 yield f"data: {json.dumps(evt)}\n\n"
                 import asyncio as _asyncio; await _asyncio.sleep(0.02)
-            log_types = [e.get('type') for e in log]
-            if 'done' not in log_types:
-                # Use a safe terminal status. 'waiting' means "done with this turn,
-                # ready for next input". If session is actually failed/cancelled, say so.
+
+            # Detect if the LAST turn in the log is incomplete. A complete
+            # turn always ends with a 'done' event — so we walk backwards
+            # from the final event and look for either (a) a 'done' event
+            # before any 'user_message', or (b) a 'user_message' before any
+            # 'done', which means that turn never finished.
+            last_turn_incomplete = False
+            for evt in reversed(log):
+                t = evt.get('type')
+                if t == 'done':
+                    break  # last terminal event is a done → last turn completed
+                if t == 'user_message':
+                    # A user_message without a done after it → turn stuck
+                    last_turn_incomplete = True
+                    break
+
+            if not log:
+                # Empty log (session created but turn 1 never pushed anything)
+                last_turn_incomplete = True
+
+            if last_turn_incomplete:
                 terminal_status = session.status if session.status in ('failed', 'cancelled', 'completed', 'waiting') else 'waiting'
-                if 'agent_reply' not in log_types:
-                    # Also inject a synthetic agent_reply so the turn bubble has content
-                    yield f"data: {json.dumps({'type':'agent_reply','payload':{'message':'(Turn ended before completing — backend may have restarted.)','files_changed':[]}})}\n\n"
-                yield f"data: {json.dumps({'type':'done','payload':{'message':f'Session {terminal_status}','status':terminal_status}})}\n\n"
+                yield f"data: {json.dumps({'type':'agent_reply','payload':{'message':'(Turn ended before completing — backend may have restarted. Send a new message to continue.)','files_changed':[]}})}\n\n"
+                yield f"data: {json.dumps({'type':'done','payload':{'message':f'Turn recovered ({terminal_status})','status':terminal_status}})}\n\n"
             return
 
         yield f"data: {json.dumps({'type':'init','payload':session.to_dict()})}\n\n"
