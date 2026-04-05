@@ -448,10 +448,23 @@ async def _run_turn(
                           thought=f"Writing. ({len(full_response)} chars so far)")
 
     except Exception as e:
+        err_str = str(e)
         logger.error(f"LLM call failed in workbench session {session_id}: {e}")
+        # Enrich common provider errors so the user knows what's wrong
+        friendly = err_str
+        low = err_str.lower()
+        if "notfounderror" in low or "model_not_found" in low or "does not exist" in low or ("404" in err_str and "openai" in low):
+            friendly = (f"Model '{model_id}' doesn't exist on the provider's API. "
+                        f"It may have been renamed or removed. Pick a different model.")
+        elif "authenticationerror" in low or "x-api-key" in low or "401" in err_str:
+            friendly = f"Provider rejected the API key for model '{model_id}'. Check the key in your .env file."
+        elif "ratelimiterror" in low or "429" in err_str:
+            friendly = f"Rate-limited by provider for model '{model_id}'. Wait and retry, or switch models."
+        elif "timeout" in low or "timed out" in low:
+            friendly = f"Provider call for model '{model_id}' timed out."
         llm_success = False
-        llm_error = str(e)
-        _push(session_id, "error", message=f"LLM error: {str(e)}")
+        llm_error = friendly
+        _push(session_id, "error", message=friendly)
         _push(session_id, "done", message="Session failed.", status="failed")
         # Persist events_log AFTER the terminal events so reload sees the failure
         await _db_update(
