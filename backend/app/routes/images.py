@@ -842,8 +842,26 @@ async def generate_img2img_with_comfyui(
     is_api_format = workflow_json and isinstance(workflow_json, dict) and any(
         isinstance(v, dict) and "class_type" in v for v in workflow_json.values()
     )
+
+    # Convert ComfyUI editor format (nodes/links arrays) to API format if needed
+    if not is_api_format and isinstance(template_data, dict) and "nodes" in template_data:
+        logger.info(f"Converting editor-format workflow to API format: {workflow_id}")
+        node_schema = await _fetch_object_info_schema(comfyui_url)
+        workflow_json = _convert_editor_to_api(template_data, node_schema=node_schema)
+        if not workflow_json:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Workflow '{workflow_id}' has no output nodes. "
+                       f"Add a SaveImage/PreviewImage node in ComfyUI and save the workflow."
+            )
+        is_api_format = True
+
     if not is_api_format:
-        raise HTTPException(status_code=500, detail=f"Workflow '{workflow_id}' is not in API format")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Workflow '{workflow_id}' is not in API format and could not be auto-converted. "
+                   f"In ComfyUI: open the workflow, click Workflow → Export (API Format), and save the resulting JSON to data/workflows/"
+        )
 
     # 3. Hydrate the workflow's template placeholders (prompt, checkpoint, etc.)
     default_checkpoint = template_data.get("default_checkpoint", "sdxl.safetensors")
