@@ -3,10 +3,17 @@
 import os
 import logging
 from typing import Optional, AsyncGenerator
+import litellm
 from litellm import acompletion
 from app.models import Model, Provider
 
 logger = logging.getLogger(__name__)
+
+# Drop params unsupported by specific providers (e.g. GPT-5 only accepts
+# temperature=1, Anthropic ignores some OpenAI-specific fields, etc).
+# Without this, calls fail with UnsupportedParamsError for any provider
+# quirk. LiteLLM logs what it dropped if needed.
+litellm.drop_params = True
 
 
 class ModelClient:
@@ -22,6 +29,7 @@ class ModelClient:
         key_map = {
             "anthropic": "ANTHROPIC_API_KEY",
             "openai": "OPENAI_API_KEY",
+            "openai-codex": "OPENAI_API_KEY",  # Codex endpoint, same key as regular OpenAI
             "openrouter": "OPENROUTER_API_KEY",
         }
         env_key = key_map.get(p)

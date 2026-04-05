@@ -103,7 +103,7 @@ def _provider_has_credentials(provider_name: str) -> bool:
         return bool(os.environ.get("ANTHROPIC_API_KEY"))
     if p == "google":
         return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
-    if p == "openai":
+    if p == "openai" or p == "openai-codex":
         return bool(os.environ.get("OPENAI_API_KEY"))
     if p == "openrouter":
         return bool(os.environ.get("OPENROUTER_API_KEY"))
