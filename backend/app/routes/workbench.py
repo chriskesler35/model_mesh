@@ -94,8 +94,29 @@ def _resolve_project_path(project_id: Optional[str], project_path: Optional[str]
 
 
 # ─── LLM model resolver ───────────────────────────────────────────────────────
+def _provider_has_credentials(provider_name: str) -> bool:
+    """Check if a provider has API credentials available (Ollama/local always true)."""
+    p = (provider_name or "").lower()
+    if p in ("ollama", "local", "lm-studio", "lmstudio", "llamacpp"):
+        return True
+    if p == "anthropic":
+        return bool(os.environ.get("ANTHROPIC_API_KEY"))
+    if p == "google":
+        return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+    if p == "openai":
+        return bool(os.environ.get("OPENAI_API_KEY"))
+    if p == "openrouter":
+        return bool(os.environ.get("OPENROUTER_API_KEY"))
+    # Unknown providers — assume yes and let the call fail loudly
+    return True
+
+
 async def _resolve_model(model_id: str):
-    """Return (Model, Provider) objects from DB for a given model_id string."""
+    """Return (Model, Provider) objects from DB for a given model_id string.
+
+    Never silently falls back to a model whose provider has no credentials —
+    surfaces the failure so the caller can report the real problem.
+    """
     try:
         from app.database import AsyncSessionLocal
         from app.models.model import Model as ModelORM
@@ -103,6 +124,7 @@ async def _resolve_model(model_id: str):
         from sqlalchemy import select
 
         async with AsyncSessionLocal() as db:
+            # 1. Exact match on model_id
             result = await db.execute(
                 select(ModelORM, ProviderORM)
                 .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
@@ -111,30 +133,26 @@ async def _resolve_model(model_id: str):
             )
             row = result.first()
             if row:
+                if not _provider_has_credentials(row[1].name):
+                    logger.error(f"Model '{model_id}' matched but provider '{row[1].name}' has no API credentials set")
+                    return None, None
                 return row[0], row[1]
 
-            # Fuzzy fallback — partial match
+            # 2. Fuzzy partial match — ONLY keep candidates whose provider has credentials
+            last_part = model_id.split("/")[-1]
             result = await db.execute(
                 select(ModelORM, ProviderORM)
                 .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
-                .where(ModelORM.model_id.contains(model_id.split("/")[-1]))
+                .where(ModelORM.model_id.contains(last_part))
                 .where(ModelORM.is_active == True)
-                .limit(1)
             )
-            row = result.first()
-            if row:
-                return row[0], row[1]
+            for m, p in result:
+                if _provider_has_credentials(p.name):
+                    logger.info(f"Model '{model_id}' fuzzy-matched to '{m.model_id}' via {p.name}")
+                    return m, p
 
-            # Last resort — first active chat model
-            result = await db.execute(
-                select(ModelORM, ProviderORM)
-                .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
-                .where(ModelORM.is_active == True)
-                .limit(1)
-            )
-            row = result.first()
-            if row:
-                return row[0], row[1]
+            # No fallback to arbitrary models — return None so the caller surfaces the error
+            logger.error(f"Could not resolve model '{model_id}' to any provider with credentials")
     except Exception as e:
         logger.error(f"Model resolve failed: {e}")
     return None, None

@@ -242,7 +242,9 @@ async def _run_phase(pipeline_id: str, phase_index: int):
     # Resolve model
     model_orm, provider_orm = await _resolve_model(model_id)
     if not model_orm:
-        msg = f"Could not resolve model '{model_id}' for phase {phase_name}"
+        msg = (f"Could not resolve model '{model_id}' for phase {phase_name}. "
+               f"The model may not exist, or its provider has no API key configured. "
+               f"Check backend logs for details, or pick a different model for this phase.")
         logger.error(msg)
         await _db_update_phase(phase_run_id, status="failed", completed_at=datetime.utcnow())
         await _db_update_pipeline(pipeline_id, status="failed", completed_at=datetime.utcnow())

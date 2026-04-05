@@ -108,7 +108,22 @@ export default function WorkbenchListPage() {
       }
 
       if (asPipeline) {
-        // Create a multi-agent pipeline on top of this session
+        // Build model_overrides: apply the main Model selection to every phase
+        // unless the user has set a per-phase override via "customize models".
+        // This makes "pick GLM-5 as my Coder" actually work: the main Model
+        // dropdown overrides all phases, then per-phase overrides win over that.
+        const effectiveOverrides: Record<string, string> = {}
+        if (model) {
+          for (const ph of phasePreview) {
+            effectiveOverrides[ph.name] = modelOverrides[ph.name] || model
+          }
+        }
+        // Also preserve any explicit per-phase overrides for phases that
+        // weren't in phasePreview (shouldn't happen, but defensive)
+        for (const [k, v] of Object.entries(modelOverrides)) {
+          effectiveOverrides[k] = v
+        }
+
         const pipeRes = await fetch(`${API_BASE}/v1/workbench/pipelines`, {
           method: 'POST', headers: AUTH_HEADERS,
           body: JSON.stringify({
@@ -116,7 +131,7 @@ export default function WorkbenchListPage() {
             method_id: pipelineMethod,
             task: task.trim(),
             auto_approve: autoApprove,
-            model_overrides: Object.keys(modelOverrides).length > 0 ? modelOverrides : undefined,
+            model_overrides: Object.keys(effectiveOverrides).length > 0 ? effectiveOverrides : undefined,
           }),
         })
         const pipeline = await pipeRes.json()
@@ -257,7 +272,7 @@ export default function WorkbenchListPage() {
                 {asPipeline && (
                   <div className="pl-6 space-y-2">
                     <div className="text-xs text-indigo-700 dark:text-indigo-300">
-                      Specialist agents hand off to each other through approval gates.
+                      Specialist agents hand off to each other through approval gates. <b>All phases use the Model you selected below</b> — customize per-phase if needed.
                     </div>
                     <div className="grid grid-cols-2 gap-2">
                       <select value={pipelineMethod} onChange={e => setPipelineMethod(e.target.value as any)}
@@ -291,17 +306,18 @@ export default function WorkbenchListPage() {
                               <span className="text-gray-500 truncate flex-1">{ph.role}</span>
                               {customizeModels ? (
                                 <select
-                                  value={modelOverrides[ph.name] || ph.default_model}
+                                  value={modelOverrides[ph.name] || model || ph.default_model}
                                   onChange={e => setModelOverrides(prev => ({ ...prev, [ph.name]: e.target.value }))}
                                   className="rounded border border-indigo-200 dark:border-indigo-700 dark:bg-gray-800 dark:text-white px-1 py-0.5 text-[10px] max-w-[150px]">
-                                  <option value={ph.default_model}>{ph.default_model} (default)</option>
-                                  {models.filter(m => m.model_id !== ph.default_model).map(m => (
+                                  {model && <option value={model}>{model} (session default)</option>}
+                                  <option value={ph.default_model}>{ph.default_model} (phase default)</option>
+                                  {models.filter(m => m.model_id !== model && m.model_id !== ph.default_model).map(m => (
                                     <option key={m.id} value={m.model_id}>{m.display_name || m.model_id}</option>
                                   ))}
                                 </select>
                               ) : (
                                 <span className="font-mono text-[10px] text-gray-400 truncate max-w-[120px]">
-                                  {modelOverrides[ph.name] || ph.default_model}
+                                  {modelOverrides[ph.name] || model || ph.default_model}
                                 </span>
                               )}
                             </div>
