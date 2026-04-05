@@ -472,12 +472,8 @@ export default function WorkbenchSessionPage() {
       body: JSON.stringify({ message: msg })
     })
     if (res.ok) {
-      // Optimistically add user's message to event log + flip status to running
-      setEvents(prev => [...prev, {
-        type: 'user_message',
-        payload: { message: msg, handled: true },
-        ts: new Date().toISOString(),
-      }])
+      // Backend pushes a `user_message` event through SSE, so DON'T add it
+      // locally here or we get a duplicate. Just flip state + clear input.
       setStatus('running')
       setWaitingForHuman(false)
       setIntervention('')

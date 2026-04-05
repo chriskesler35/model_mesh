@@ -23,10 +23,16 @@ const NAV_ITEMS = [
 
 const GROUPS = [
   { label: 'MAIN',   items: ['/', '/chat'] },
-  { label: 'BUILD',  items: ['/agents', '/agents/sessions', '/workbench', '/projects'] },
+  { label: 'BUILD',  items: ['/agents', '/agents/sessions', '/projects', '/workbench'] },
   { label: 'CREATE', items: ['/gallery', '/methods'] },
   { label: 'MANAGE', items: ['/collaborate', '/personas', '/models', '/stats', '/settings', '/help'] },
 ]
+
+// Routes that should render indented under their parent
+const NESTED_UNDER: Record<string, string> = {
+  '/workbench': '/projects',
+  '/agents/sessions': '/agents',
+}
 
 function ThemeToggle({ collapsed }: { collapsed: boolean }) {
   const [isDark, setIsDark] = useState(false)
@@ -213,22 +219,25 @@ export default function Navigation() {
               <div className="space-y-0.5">
                 {groupItems.map(item => {
                   const active = isActive(item.href)
+                  const parentHref = NESTED_UNDER[item.href]
+                  const isNested = !!parentHref && !collapsed
                   return (
                     <Link key={item.href} href={item.href}
                       title={collapsed ? item.label : undefined}
                       className={`
                         flex items-center gap-2.5 rounded-lg transition-colors
-                        ${collapsed ? 'justify-center px-0 py-2.5' : 'px-3 py-2'}
+                        ${collapsed ? 'justify-center px-0 py-2.5' : isNested ? 'pl-7 pr-3 py-1.5' : 'px-3 py-2'}
                         ${active
                           ? 'bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400'
                           : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-200'
                         }
                       `}>
-                      <span className={`text-base flex-shrink-0 ${active ? '' : 'opacity-80'}`}>
-                        {item.icon}
+                      <span className={`${isNested ? 'text-sm' : 'text-base'} flex-shrink-0 ${active ? '' : 'opacity-80'}`}>
+                        {isNested ? '↳' : item.icon}
                       </span>
                       {!collapsed && (
-                        <span className={`text-sm truncate ${active ? 'font-semibold' : 'font-medium'}`}>
+                        <span className={`${isNested ? 'text-xs' : 'text-sm'} truncate ${active ? 'font-semibold' : 'font-medium'} flex items-center gap-1.5`}>
+                          {isNested && <span className="text-xs opacity-70">{item.icon}</span>}
                           {item.label}
                         </span>
                       )}
