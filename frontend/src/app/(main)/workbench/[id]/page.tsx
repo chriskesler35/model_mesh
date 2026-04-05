@@ -6,6 +6,7 @@ export const revalidate = 0
 
 import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 import { renderMarkdown } from '@/lib/markdown'
+import { RunPanel } from '@/components/RunPanel'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
@@ -375,6 +376,7 @@ export default function WorkbenchSessionPage() {
   const [sending, setSending] = useState(false)
   const [waitingForHuman, setWaitingForHuman] = useState(false)
   const [autoScroll, setAutoScroll] = useState(true)
+  const [showRunPanel, setShowRunPanel] = useState(false)
 
   const streamRef = useRef<EventSource | null>(null)
   const streamEndRef = useRef<HTMLDivElement>(null)
@@ -636,6 +638,27 @@ export default function WorkbenchSessionPage() {
             })()}
             <div ref={streamEndRef} />
           </div>
+
+          {/* Run panel (collapsible) */}
+          {session?.project_id && (
+            <div className="flex-shrink-0 border-t border-gray-200 dark:border-gray-700">
+              <button
+                onClick={() => setShowRunPanel(s => !s)}
+                className="w-full flex items-center justify-between px-4 py-2 bg-gray-50 dark:bg-gray-800/50 hover:bg-gray-100 dark:hover:bg-gray-800 text-xs font-semibold text-gray-600 dark:text-gray-400 transition-colors"
+              >
+                <span className="flex items-center gap-2">
+                  <span>{showRunPanel ? '▼' : '▶'}</span>
+                  Run & Test
+                </span>
+                <span className="text-[10px] text-gray-400">Click to {showRunPanel ? 'hide' : 'show'}</span>
+              </button>
+              {showRunPanel && (
+                <div className="h-64 border-t border-gray-200 dark:border-gray-700">
+                  <RunPanel projectId={session.project_id} compact />
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Intervention bar */}
           <div className={`flex-shrink-0 border-t transition-colors ${

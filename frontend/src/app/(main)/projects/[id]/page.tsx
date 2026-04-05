@@ -1,6 +1,7 @@
 'use client'
 
 import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+import { RunPanel } from '@/components/RunPanel'
 
 import { useState, useEffect, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
@@ -74,7 +75,7 @@ export default function ProjectDetailPage() {
   const [selectedFile, setSelectedFile] = useState<FileNode | null>(null)
   const [fileContent, setFileContent] = useState<string | null>(null)
   const [loadingFile, setLoadingFile] = useState(false)
-  const [activeTab, setActiveTab] = useState<'files' | 'sandbox'>('files')
+  const [activeTab, setActiveTab] = useState<'files' | 'sandbox' | 'run'>('files')
   const [sandboxSaving, setSandboxSaving] = useState(false)
 
   const setSandboxMode = async (mode: 'restricted' | 'full') => {
@@ -245,7 +246,7 @@ export default function ProjectDetailPage() {
 
       {/* Tabs */}
       <div className="flex items-center gap-1 px-6 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
-        {([['files', '📁 Files'], ['sandbox', '🔒 Sandbox']] as const).map(([tab, label]) => (
+        {([['files', '📁 Files'], ['run', '▶ Run'], ['sandbox', '🔒 Sandbox']] as const).map(([tab, label]) => (
           <button key={tab} onClick={() => setActiveTab(tab)}
             className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${activeTab === tab ? 'border-orange-500 text-orange-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
             {label}
@@ -257,6 +258,9 @@ export default function ProjectDetailPage() {
       <div className="flex-1 flex min-h-0 overflow-hidden">
         {activeTab === 'sandbox' && (
           <div className="flex-1 overflow-y-auto p-4"><SandboxPanel projectId={id} /></div>
+        )}
+        {activeTab === 'run' && (
+          <div className="flex-1 p-4 min-h-0"><RunPanel projectId={id} /></div>
         )}
         {activeTab === 'files' && (
         <>
