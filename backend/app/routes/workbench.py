@@ -452,8 +452,14 @@ async def _run_turn(
         llm_success = False
         llm_error = str(e)
         _push(session_id, "error", message=f"LLM error: {str(e)}")
-        await _db_update(session_id, status="failed", completed_at=datetime.utcnow())
         _push(session_id, "done", message="Session failed.", status="failed")
+        # Persist events_log AFTER the terminal events so reload sees the failure
+        await _db_update(
+            session_id,
+            status="failed",
+            completed_at=datetime.utcnow(),
+            events_log=_event_logs.get(session_id, []),
+        )
 
     # Estimate tokens if stream did not return usage
     if input_tokens == 0:
@@ -502,9 +508,14 @@ async def _run_turn(
         return
 
     if _pending_messages.get(session_id) == "cancelled":
-        await _db_update(session_id, status="cancelled", completed_at=datetime.utcnow())
         _push(session_id, "info", message="Session cancelled.")
         _push(session_id, "done", message="Session cancelled.", status="cancelled")
+        await _db_update(
+            session_id,
+            status="cancelled",
+            completed_at=datetime.utcnow(),
+            events_log=_event_logs.get(session_id, []),
+        )
         return
 
     # ── Parse files ──────────────────────────────────────────────────────────
@@ -593,6 +604,11 @@ async def _run_turn(
           message=f"Turn {turn_num} complete. {len(written)} file(s) updated in {location}. Send a follow-up to continue.",
           files_changed=written,
           status="waiting")
+
+    # Re-persist events_log now that the terminal events (agent_reply + done)
+    # have been pushed. Without this, reloading the session shows it as still
+    # "Working on it..." because the saved log is missing the done event.
+    await _db_update(session_id, events_log=_event_logs.get(session_id, []))
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -703,15 +719,24 @@ async def stream_session(session_id: str, request: Request):
     async def event_generator() -> AsyncGenerator[str, None]:
         queue = _queues.get(session_id)
         if not queue:
-            # Session exists in DB but not actively running - replay stored events
+            # Session exists in DB but not actively running - replay stored events.
+            # If events_log is missing terminal events (backend crash / restart mid-turn),
+            # synthesize them so the UI doesn't stay stuck on "Working on it…" forever.
             session_dict = session.to_dict()
             yield f"data: {json.dumps({'type':'init','payload':session_dict})}\n\n"
-            for evt in (session_dict.get('events_log') or []):
+            log = session_dict.get('events_log') or []
+            for evt in log:
                 yield f"data: {json.dumps(evt)}\n\n"
                 import asyncio as _asyncio; await _asyncio.sleep(0.02)
-            log_types = [e.get('type') for e in (session_dict.get('events_log') or [])]
+            log_types = [e.get('type') for e in log]
             if 'done' not in log_types:
-                yield f"data: {json.dumps({'type':'done','payload':{'message':'Session ' + session.status, 'status':session.status}})}\n\n"
+                # Use a safe terminal status. 'waiting' means "done with this turn,
+                # ready for next input". If session is actually failed/cancelled, say so.
+                terminal_status = session.status if session.status in ('failed', 'cancelled', 'completed', 'waiting') else 'waiting'
+                if 'agent_reply' not in log_types:
+                    # Also inject a synthetic agent_reply so the turn bubble has content
+                    yield f"data: {json.dumps({'type':'agent_reply','payload':{'message':'(Turn ended before completing — backend may have restarted.)','files_changed':[]}})}\n\n"
+                yield f"data: {json.dumps({'type':'done','payload':{'message':f'Session {terminal_status}','status':terminal_status}})}\n\n"
             return
 
         yield f"data: {json.dumps({'type':'init','payload':session.to_dict()})}\n\n"

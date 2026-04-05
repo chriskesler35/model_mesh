@@ -150,9 +150,17 @@ export default function WorkbenchListPage() {
   }
 
   const STATUS_COLOR: Record<string, string> = {
-    pending: 'text-yellow-600 bg-yellow-50', running: 'text-blue-600 bg-blue-50',
-    completed: 'text-green-600 bg-green-50', failed: 'text-red-600 bg-red-50',
+    pending: 'text-yellow-600 bg-yellow-50',
+    running: 'text-blue-600 bg-blue-50',
+    completed: 'text-green-600 bg-green-50',
+    failed: 'text-red-600 bg-red-50',
     cancelled: 'text-gray-500 bg-gray-50',
+    waiting: 'text-amber-600 bg-amber-50',  // turn done, waiting for your follow-up
+    awaiting_approval: 'text-amber-700 bg-amber-100',  // pipelines
+  }
+  const STATUS_LABEL: Record<string, string> = {
+    waiting: 'waiting for you',
+    awaiting_approval: 'awaiting approval',
   }
 
   return (
@@ -223,7 +231,7 @@ export default function WorkbenchListPage() {
                   className="text-left bg-white dark:bg-gray-800 rounded-xl border border-indigo-200 dark:border-indigo-800 p-4 hover:border-indigo-400 hover:shadow-md transition-all">
                   <div className="flex items-start justify-between mb-3">
                     <span className="text-2xl">{METHOD_ICONS[p.method_id] || '🎭'}</span>
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLOR[p.status] || 'bg-gray-100 text-gray-600'}`}>{p.status}</span>
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLOR[p.status] || 'bg-gray-100 text-gray-600'}`}>{STATUS_LABEL[p.status] || p.status}</span>
                   </div>
                   <p className="text-sm font-medium text-gray-900 dark:text-white line-clamp-2 mb-2">{p.initial_task}</p>
                   <p className="text-xs text-gray-400">
@@ -249,7 +257,7 @@ export default function WorkbenchListPage() {
                   className="text-left bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 hover:border-orange-300 hover:shadow-md transition-all">
                   <div className="flex items-start justify-between mb-3">
                     <span className="text-2xl">{AGENT_ICONS[s.agent_type] || '🤖'}</span>
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLOR[s.status] || 'bg-gray-100 text-gray-600'}`}>{s.status}</span>
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLOR[s.status] || 'bg-gray-100 text-gray-600'}`}>{STATUS_LABEL[s.status] || s.status}</span>
                   </div>
                   <p className="text-sm font-medium text-gray-900 dark:text-white line-clamp-2 mb-2">{s.task}</p>
                   <p className="text-xs text-gray-400">{s.agent_type} · {s.model}</p>
