@@ -71,6 +71,115 @@ def _github_git_env(github_token: str) -> Dict[str, str]:
 _ASKPASS_SCRIPT: Optional[str] = None
 
 
+def _is_git_push(command: str) -> bool:
+    """Is this specifically a git push command?"""
+    cmd = (command or "").strip().lower()
+    return cmd.startswith("git push")
+
+
+async def ensure_git_repo(cwd: Path, github_token: Optional[str] = None) -> list[str]:
+    """Ensure the project directory is a git repo with a GitHub remote.
+
+    If not a git repo: init + initial commit.
+    If no remote 'origin': create a GitHub repo + add remote.
+    Returns a list of log messages describing what was done.
+    """
+    import subprocess
+    logs = []
+
+    # 1. Check if already a git repo
+    git_dir = cwd / ".git"
+    if not git_dir.exists():
+        subprocess.run(["git", "init"], cwd=str(cwd), capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=str(cwd), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Initial commit from DevForgeAI"],
+            cwd=str(cwd), capture_output=True,
+        )
+        # Rename branch to main
+        subprocess.run(["git", "branch", "-M", "main"], cwd=str(cwd), capture_output=True)
+        logs.append("Initialized git repo + initial commit on 'main'")
+
+    # 2. Check if remote 'origin' exists
+    result = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=str(cwd), capture_output=True, text=True,
+    )
+    has_origin = result.returncode == 0
+
+    if not has_origin and github_token:
+        # Create a GitHub repo named after the project folder
+        repo_name = cwd.name
+        try:
+            import httpx
+            # Check if repo exists
+            r = httpx.get(
+                f"https://api.github.com/repos/{_get_github_username(github_token)}/{repo_name}",
+                headers={"Authorization": f"Bearer {github_token}", "Accept": "application/json"},
+                timeout=10,
+            )
+            if r.status_code == 404:
+                # Create it
+                r = httpx.post(
+                    "https://api.github.com/user/repos",
+                    headers={
+                        "Authorization": f"Bearer {github_token}",
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "name": repo_name,
+                        "description": f"Created by DevForgeAI",
+                        "private": False,
+                        "auto_init": False,
+                    },
+                    timeout=15,
+                )
+                if r.status_code == 201:
+                    logs.append(f"Created GitHub repo: {r.json().get('html_url')}")
+                else:
+                    logs.append(f"Failed to create GitHub repo: {r.status_code} {r.text[:100]}")
+                    return logs
+            elif r.status_code == 200:
+                logs.append(f"GitHub repo already exists: {r.json().get('html_url')}")
+
+            # Add remote
+            username = _get_github_username(github_token)
+            remote_url = f"https://github.com/{username}/{repo_name}.git"
+            subprocess.run(
+                ["git", "remote", "add", "origin", remote_url],
+                cwd=str(cwd), capture_output=True,
+            )
+            logs.append(f"Added remote origin: {remote_url}")
+        except Exception as e:
+            logs.append(f"GitHub repo setup failed: {e}")
+
+    return logs
+
+
+def _get_github_username(github_token: str) -> str:
+    """Fetch the GitHub username for a token. Cached."""
+    global _CACHED_GH_USERNAME
+    if _CACHED_GH_USERNAME:
+        return _CACHED_GH_USERNAME
+    try:
+        import httpx
+        r = httpx.get(
+            "https://api.github.com/user",
+            headers={"Authorization": f"Bearer {github_token}", "Accept": "application/json"},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            _CACHED_GH_USERNAME = r.json().get("login", "")
+            return _CACHED_GH_USERNAME
+    except Exception:
+        pass
+    return ""
+
+
+_CACHED_GH_USERNAME: str = ""
+
+
 # ─── CMD: block parser ────────────────────────────────────────────────────────
 _CMD_BLOCK_RE = re.compile(
     r"^\s*CMD:\s*(?P<cmd>.+?)\s*$",
@@ -170,6 +279,14 @@ async def run_command(
     # Inject GitHub creds for git operations when we have a token
     if github_token and _is_git_command(command):
         env.update(_github_git_env(github_token))
+        # Auto-setup git repo + GitHub remote before push
+        if _is_git_push(command):
+            try:
+                setup_logs = await ensure_git_repo(cwd, github_token)
+                for log in setup_logs:
+                    logger.info(f"Git auto-setup: {log}")
+            except Exception as e:
+                logger.warning(f"Git auto-setup failed (continuing anyway): {e}")
     try:
         proc = await asyncio.create_subprocess_shell(
             command,

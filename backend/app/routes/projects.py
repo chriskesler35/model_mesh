@@ -64,7 +64,7 @@ class ProjectCreate(BaseModel):
     template: str = "blank"
     description: Optional[str] = None
     agents: Optional[List[str]] = None
-    sandbox_mode: str = "restricted"  # "restricted" | "full"
+    sandbox_mode: str = "full"  # "restricted" | "full" — default to full so agents can run commands
 
 
 class ProjectUpdate(BaseModel):
@@ -131,7 +131,7 @@ async def create_project(body: ProjectCreate):
         "template": body.template,
         "description": body.description or "",
         "agents": body.agents or [],
-        "sandbox_mode": body.sandbox_mode if body.sandbox_mode in ("restricted", "full") else "restricted",
+        "sandbox_mode": body.sandbox_mode if body.sandbox_mode in ("restricted", "full") else "full",
         "created_at": datetime.utcnow().isoformat(),
         "updated_at": datetime.utcnow().isoformat(),
         "scaffolded": scaffold,
