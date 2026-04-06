@@ -100,12 +100,36 @@ async def ensure_git_repo(cwd: Path, github_token: Optional[str] = None) -> list
         subprocess.run(["git", "branch", "-M", "main"], cwd=str(cwd), capture_output=True)
         logs.append("Initialized git repo + initial commit on 'main'")
 
-    # 2. Check if remote 'origin' exists
+    # 2. Check if remote 'origin' exists and points to a valid GitHub URL
     result = subprocess.run(
         ["git", "remote", "get-url", "origin"],
         cwd=str(cwd), capture_output=True, text=True,
     )
     has_origin = result.returncode == 0
+    current_origin = result.stdout.strip() if has_origin else ""
+
+    # If origin exists but doesn't contain github.com, leave it alone (could be GitLab etc.)
+    # If it's a github.com URL, verify the repo name matches the project folder
+    if has_origin and "github.com" in current_origin and github_token:
+        expected_repo = cwd.name
+        # Check if the repo name in the URL matches the folder name
+        # URL format: https://github.com/user/repo.git
+        import re as _re
+        url_match = _re.search(r'github\.com[/:][\w-]+/([\w._-]+?)(?:\.git)?$', current_origin)
+        if url_match:
+            url_repo = url_match.group(1)
+            if url_repo != expected_repo:
+                # Mismatch — the agent (or a prior auto-setup) set a wrong repo name.
+                # Fix it to match the folder name.
+                username = _get_github_username(github_token)
+                if username:
+                    correct_url = f"https://github.com/{username}/{expected_repo}.git"
+                    subprocess.run(
+                        ["git", "remote", "set-url", "origin", correct_url],
+                        cwd=str(cwd), capture_output=True,
+                    )
+                    current_origin = correct_url
+                    logs.append(f"Fixed origin URL: {url_repo} -> {expected_repo}")
 
     if not has_origin and github_token:
         # Create a GitHub repo named after the project folder
@@ -287,6 +311,17 @@ async def run_command(
                     logger.info(f"Git auto-setup: {log}")
             except Exception as e:
                 logger.warning(f"Git auto-setup failed (continuing anyway): {e}")
+            # Try a rebase-pull first to avoid "rejected: fetch first" errors
+            # from divergent history (e.g., auto-init created a separate commit tree)
+            try:
+                import subprocess as _sp
+                _sp.run(
+                    ["git", "pull", "--rebase", "origin", "main"],
+                    cwd=str(cwd), capture_output=True, timeout=30,
+                    env=env,  # include GIT_ASKPASS for auth
+                )
+            except Exception:
+                pass  # best-effort; push may still work or fail with a clear error
     try:
         proc = await asyncio.create_subprocess_shell(
             command,

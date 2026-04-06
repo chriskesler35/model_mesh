@@ -270,6 +270,12 @@ Rules for CMD output (shell execution):
 - If a command was pending approval and the user rejects or approves, you'll be told.
 - DO NOT wrap commands in code fences. Just: CMD: <command>
 - DO NOT emit the same command twice in one turn.
+- Git setup (init, remote, GitHub repo creation) is handled automatically by the system.
+  You do NOT need to run git init or git remote add. Just use:
+    CMD: git add .
+    CMD: git commit -m "your message"
+    CMD: git push
+  The system will create the GitHub repo and configure the remote if needed.
 - After FILE + CMD blocks, add a brief summary (2-4 lines) of WHAT you changed and WHY.
 
 If the user's request is genuinely unclear and you cannot make a sensible assumption,
@@ -789,6 +795,18 @@ async def create_session(body: WorkbenchCreate, db: AsyncSession = Depends(get_d
     )
     db.add(session)
     await db.commit()
+
+    # Auto-setup git repo + GitHub remote BEFORE the agent runs, so the
+    # agent doesn't hallucinate wrong repo names or fail on divergent history.
+    if project_path and project_path.exists():
+        try:
+            from app.services.command_executor import ensure_git_repo, get_first_github_token
+            gh_token = get_first_github_token()
+            setup_logs = await ensure_git_repo(project_path, gh_token)
+            for log_msg in setup_logs:
+                logger.info(f"Session create git setup: {log_msg}")
+        except Exception as e:
+            logger.warning(f"Git auto-setup at session create failed (non-fatal): {e}")
 
     # Set up SSE queue
     _queues[session_id] = asyncio.Queue(maxsize=1000)
