@@ -33,8 +33,11 @@ export default function WorkbenchListPage() {
   const [loadingModels, setLoadingModels] = useState(false)
   // Pipeline mode
   const [asPipeline, setAsPipeline] = useState(false)
-  const [pipelineMethod, setPipelineMethod] = useState<'bmad' | 'gsd' | 'superpowers'>('bmad')
+  const [pipelineMethod, setPipelineMethod] = useState<string>('bmad')
   const [autoApprove, setAutoApprove] = useState(false)
+  // Active method stack from Methods page
+  const [activeStack, setActiveStack] = useState<string[]>([])
+  const [activeStackName, setActiveStackName] = useState<string>('')
   const [phasePreview, setPhasePreview] = useState<Array<{name: string; role: string; default_model: string; artifact_type: string; has_agent?: boolean; agent_name?: string | null; has_persona?: boolean; persona_name?: string | null; resolved_model?: string | null; resolved_via?: string | null}>>([])
   const [modelOverrides, setModelOverrides] = useState<Record<string, string>>({})
   const [customizeModels, setCustomizeModels] = useState(false)
@@ -62,14 +65,38 @@ export default function WorkbenchListPage() {
     if (pid || agentType) setShowNew(true)
   }, [searchParams])
 
+  // Fetch active method stack + phase preview when pipeline mode changes
+  useEffect(() => {
+    if (!asPipeline) { setPhasePreview([]); setActiveStack([]); return }
+    // Check if user has a method stack active
+    fetch(`${API_BASE}/v1/methods/active`, { headers: AUTH_HEADERS })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d && d.stack && d.stack.length > 0) {
+          setActiveStack(d.stack)
+          setActiveStackName(d.name || d.stack.join(' + '))
+          // Use the primary method from the stack for phase structure
+          setPipelineMethod(d.stack[0])
+        } else if (d && d.id && d.id !== 'standard') {
+          setActiveStack([d.id])
+          setActiveStackName(d.name || d.id)
+          setPipelineMethod(d.id)
+        } else {
+          setActiveStack([])
+          setActiveStackName('')
+        }
+      })
+      .catch(() => {})
+  }, [asPipeline])
+
   // Fetch phase preview when pipeline method changes
   useEffect(() => {
-    if (!asPipeline) { setPhasePreview([]); return }
+    if (!asPipeline || !pipelineMethod) { setPhasePreview([]); return }
     fetch(`${API_BASE}/v1/workbench/pipelines/methods/${pipelineMethod}/phases`, { headers: AUTH_HEADERS })
-      .then(r => r.json())
+      .then(r => r.ok ? r.json() : { phases: [] })
       .then(d => {
         setPhasePreview(d.phases || [])
-        setModelOverrides({})  // reset overrides when method changes
+        setModelOverrides({})
       })
       .catch(() => setPhasePreview([]))
   }, [asPipeline, pipelineMethod])
@@ -134,7 +161,7 @@ export default function WorkbenchListPage() {
           method: 'POST', headers: AUTH_HEADERS,
           body: JSON.stringify({
             session_id: session.id,
-            method_id: pipelineMethod,
+            method_id: activeStack.length > 1 ? 'stack' : pipelineMethod,
             task: task.trim(),
             auto_approve: autoApprove,
             model_overrides: Object.keys(effectiveOverrides).length > 0 ? effectiveOverrides : undefined,
@@ -318,19 +345,30 @@ export default function WorkbenchListPage() {
                         <div>Code phases will generate files but they won't be saved to disk. Go back and launch this session from a project to enable file writes + command execution.</div>
                       </div>
                     )}
-                    <div className="grid grid-cols-2 gap-2">
-                      <select value={pipelineMethod} onChange={e => setPipelineMethod(e.target.value as any)}
+                    {activeStack.length > 1 ? (
+                      <div className="p-2 rounded bg-purple-50 dark:bg-purple-900/20 border border-purple-300 dark:border-purple-700 text-xs text-purple-900 dark:text-purple-200">
+                        <div className="font-semibold flex items-center gap-1.5 mb-1">
+                          <span>🔀</span> Using your active method stack: <span className="font-bold">{activeStackName}</span>
+                        </div>
+                        <div className="text-[11px] text-purple-700 dark:text-purple-300">
+                          Phase structure from <b>{activeStack[0].toUpperCase()}</b>. Prompts from{' '}
+                          {activeStack.slice(1).map(m => m.toUpperCase()).join(' + ')} applied to every phase.
+                          Change your stack on the <a href="/methods" className="underline">Methods page</a>.
+                        </div>
+                      </div>
+                    ) : (
+                      <select value={pipelineMethod} onChange={e => setPipelineMethod(e.target.value)}
                         className="rounded-lg border border-indigo-300 dark:border-indigo-700 dark:bg-gray-800 dark:text-white px-2 py-1.5 text-xs">
                         <option value="bmad">BMAD — 6 phases (full lifecycle)</option>
                         <option value="gsd">GSD — 3 phases (ship fast)</option>
                         <option value="superpowers">SuperPowers — 4 phases (deep work)</option>
                       </select>
-                      <label className="flex items-center gap-2 text-xs text-indigo-900 dark:text-indigo-200">
-                        <input type="checkbox" checked={autoApprove} onChange={e => setAutoApprove(e.target.checked)}
-                          className="rounded text-indigo-600 focus:ring-indigo-400" />
-                        Auto-approve each phase
-                      </label>
-                    </div>
+                    )}
+                    <label className="flex items-center gap-2 text-xs text-indigo-900 dark:text-indigo-200">
+                      <input type="checkbox" checked={autoApprove} onChange={e => setAutoApprove(e.target.checked)}
+                        className="rounded text-indigo-600 focus:ring-indigo-400" />
+                      Auto-approve each phase
+                    </label>
                     {phasePreview.length > 0 && (() => {
                       const unresolved = phasePreview.filter(ph => !ph.resolved_model)
                       return (

@@ -781,13 +781,42 @@ async def create_pipeline(body: PipelineCreate, db: AsyncSession = Depends(get_d
     from app.models.workbench import WorkbenchSession
     from app.services.phase_templates import get_phases_for_method, list_supported_methods
 
+    # Resolve method — if "stack" or "active", use the currently-active method
+    # stack from the Methods page. The primary (first) method in the stack
+    # determines the phase structure; other stacked methods' prompts get
+    # injected into every phase.
+    from app.routes.methods import _load_state as _load_method_state, BUILT_IN_METHODS, _build_stack_prompt
+    effective_method_id = body.method_id
+    stacked_prompt = ""  # extra prompt from non-primary stacked methods
+
+    if body.method_id in ("stack", "active"):
+        method_state = _load_method_state()
+        stack = method_state.get("active_stack", [])
+        primary = stack[0] if stack else method_state.get("active_method", "standard")
+        effective_method_id = primary
+        # Build stacked prompt from non-primary methods
+        non_primary = [m for m in stack if m != primary]
+        if non_primary:
+            stacked_prompt = _build_stack_prompt(non_primary)
+            logger.info(f"Pipeline using stack: primary={primary}, also applying: {non_primary}")
+    elif body.method_id in ("bmad", "gsd", "superpowers"):
+        # Explicit single method — still check if there are stacked methods
+        # that should layer on top
+        method_state = _load_method_state()
+        stack = method_state.get("active_stack", [])
+        if len(stack) > 1 and body.method_id in stack:
+            non_primary = [m for m in stack if m != body.method_id]
+            if non_primary:
+                stacked_prompt = _build_stack_prompt(non_primary)
+                logger.info(f"Pipeline method={body.method_id}, layering stack: {non_primary}")
+
     # Validate method
     try:
-        template_phases = get_phases_for_method(body.method_id)
+        template_phases = get_phases_for_method(effective_method_id)
     except KeyError:
         raise HTTPException(
             status_code=400,
-            detail=f"Method '{body.method_id}' does not support pipelines. "
+            detail=f"Method '{effective_method_id}' does not support pipelines. "
                    f"Supported: {list_supported_methods()}"
         )
 
@@ -815,13 +844,18 @@ async def create_pipeline(body: PipelineCreate, db: AsyncSession = Depends(get_d
             phase["model"] = overrides[phase["name"]]
         else:
             phase["model"] = phase.get("default_model")
+        # Inject stacked method prompts into each phase so secondary methods
+        # (e.g., GTrack "commit after every change") apply to all phases.
+        if stacked_prompt:
+            existing = phase.get("system_prompt", "")
+            phase["system_prompt"] = f"{existing}\n\n---\n\n# Additional method instructions (from stack)\n{stacked_prompt}"
 
     # Create Pipeline row
     pipeline_id = str(uuid.uuid4())
     pipeline = Pipeline(
         id=pipeline_id,
         session_id=body.session_id,
-        method_id=body.method_id,
+        method_id=effective_method_id,
         phases=template_phases,
         current_phase_index=0,
         status="pending",
