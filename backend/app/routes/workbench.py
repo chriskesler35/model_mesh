@@ -188,8 +188,14 @@ def _parse_files(text: str) -> list[dict]:
         path = lines[0].strip()
         rest = '\n'.join(lines[1:])
 
-        # Find the code block
-        block_match = re.search(r'```[^\n]*\n(.*?)(?:```|$)', rest, re.DOTALL)
+        # Find the code block — use greedy match with explicit ``` close first,
+        # then fall back to consuming everything to the end if no closing fence
+        # (happens when LLM output was truncated). This prevents empty captures.
+        block_match = re.search(r'```[^\n]*\n(.*?)```', rest, re.DOTALL)
+        if not block_match:
+            # No closing ``` — LLM was likely truncated. Capture everything
+            # after the opening fence as the content (better than losing it).
+            block_match = re.search(r'```[^\n]*\n(.+)', rest, re.DOTALL)
         if block_match and path:
             content = block_match.group(1)
             # Strip trailing ``` if present
@@ -248,6 +254,8 @@ CMD: <single shell command>
 
 Rules for FILE output:
 - Every file must be complete and immediately runnable — no placeholders, no TODOs
+- NEVER truncate or split a file across multiple FILE: blocks. Write the COMPLETE file content in ONE block.
+- If a file is long (e.g., a detailed README.md), write the entire thing — do NOT say "continued in part 2" or split it.
 - Use only standard library + dependencies that are already in the project OR explicitly requested
 - If the user's request implies new dependencies, include an updated requirements.txt / package.json
 - Include or update README.md so it always reflects current install + usage instructions
@@ -305,7 +313,7 @@ def _parse_role(response: str) -> Optional[str]:
     return None
 
 
-def _read_project_snapshot(project_path: Optional[Path], max_files: int = 40, max_bytes_per_file: int = 8000) -> str:
+def _read_project_snapshot(project_path: Optional[Path], max_files: int = 40, max_bytes_per_file: int = 32000) -> str:
     """Read the current project files and return a formatted snapshot for the LLM."""
     if not project_path or not project_path.exists():
         return "(no existing files — this is a fresh project)"
@@ -418,7 +426,7 @@ async def _run_turn(
             messages=messages,
             stream=True,
             temperature=0.2,
-            max_tokens=8000,
+            max_tokens=16000,
         )
 
         chunk_count = 0

@@ -393,7 +393,7 @@ async def _run_phase(pipeline_id: str, phase_index: int):
             messages=messages,
             stream=True,
             temperature=0.3,
-            max_tokens=8000,
+            max_tokens=16000,
         )
 
         chunk_count = 0
