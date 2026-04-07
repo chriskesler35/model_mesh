@@ -902,9 +902,6 @@ async def stream_session(session_id: str, request: Request):
         queue = _queues.get(session_id)
         if not queue:
             # Session exists in DB but not actively running - replay stored events.
-            # If the LAST turn is incomplete (backend crash / restart mid-turn),
-            # synthesize terminal events so the UI doesn't stay stuck on
-            # "Working on it…" forever.
             session_dict = session.to_dict()
             yield f"data: {json.dumps({'type':'init','payload':session_dict})}\n\n"
             log = session_dict.get('events_log') or []
@@ -912,32 +909,39 @@ async def stream_session(session_id: str, request: Request):
                 yield f"data: {json.dumps(evt)}\n\n"
                 import asyncio as _asyncio; await _asyncio.sleep(0.02)
 
-            # Detect if the LAST turn in the log is incomplete. A complete
-            # turn always ends with a 'done' event — so we walk backwards
-            # from the final event and look for either (a) a 'done' event
-            # before any 'user_message', or (b) a 'user_message' before any
-            # 'done', which means that turn never finished.
+            # Detect if the LAST turn in the log is incomplete.
             last_turn_incomplete = False
             for evt in reversed(log):
                 t = evt.get('type')
                 if t == 'done':
-                    break  # last terminal event is a done → last turn completed
+                    break
                 if t == 'user_message':
-                    # A user_message without a done after it → turn stuck
                     last_turn_incomplete = True
                     break
 
             if not log:
-                # Empty log (session created but turn 1 never pushed anything)
                 last_turn_incomplete = True
 
             if last_turn_incomplete:
                 terminal_status = session.status if session.status in ('failed', 'cancelled', 'completed', 'waiting') else 'waiting'
                 yield f"data: {json.dumps({'type':'agent_reply','payload':{'message':'(Turn ended before completing — backend may have restarted. Send a new message to continue.)','files_changed':[]}})}\n\n"
                 yield f"data: {json.dumps({'type':'done','payload':{'message':f'Turn recovered ({terminal_status})','status':terminal_status}})}\n\n"
-            return
 
-        yield f"data: {json.dumps({'type':'init','payload':session.to_dict()})}\n\n"
+            # For 'waiting' sessions: create a live queue so the stream stays
+            # alive (user might send a follow-up). Without this, the generator
+            # returns → EventSource sees stream close → onerror → auto-reconnect
+            # → replays everything again → infinite loop.
+            if session.status == 'waiting':
+                _queues[session_id] = asyncio.Queue(maxsize=1000)
+                _pending_messages[session_id] = _pending_messages.get(session_id, [])
+                queue = _queues[session_id]
+                # Fall through to the live-stream loop below
+            else:
+                # Terminal session — end the stream. Frontend should close EventSource.
+                return
+
+        else:
+            yield f"data: {json.dumps({'type':'init','payload':session.to_dict()})}\n\n"
 
         while True:
             if await request.is_disconnected():
@@ -945,13 +949,10 @@ async def stream_session(session_id: str, request: Request):
             try:
                 evt = await asyncio.wait_for(queue.get(), timeout=30.0)
                 yield f"data: {json.dumps(evt)}\n\n"
-                # Only close the stream on terminal statuses. 'waiting' means
-                # the session stays open for follow-up turns.
                 if evt.get("type") == "done":
                     final_status = (evt.get("payload") or {}).get("status", "")
                     if final_status in ("completed", "failed", "cancelled", "error"):
                         break
-                    # status == "waiting" → keep streaming for next turn
             except asyncio.TimeoutError:
                 yield f"data: {json.dumps({'type':'ping','payload':{}})}\n\n"
 
