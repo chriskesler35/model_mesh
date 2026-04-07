@@ -187,6 +187,52 @@ interface Turn {
   error: string | null
 }
 
+function buildTurnsFromHistory(messages: Array<{role: string; content: string}>, initialTask: string | null): Turn[] {
+  /**
+   * Rebuild turns from the session.messages array (complete conversation history).
+   * Used when events_log has been truncated by the rolling buffer. This provides
+   * a simpler view (no agent_thought, no files_touched) but shows the full
+   * conversation so the user can see what turn they left off on.
+   */
+  const turns: Turn[] = []
+  let current: Turn | null = null
+
+  for (const msg of messages) {
+    if (msg.role === 'user' && !msg.content.startsWith('[system-note]')) {
+      if (current) turns.push(current)
+      current = {
+        userMessage: msg.content.replace(/^.*?User request for this turn:\s*/s, '').trim() || msg.content,
+        userTime: '',
+        role: null,
+        agentActivities: [],
+        agentReply: null,
+        filesTouched: [],
+        turnStatus: 'done',
+        error: null,
+      }
+    } else if (msg.role === 'assistant' && current) {
+      // Extract role from ROLE: line
+      const roleMatch = msg.content.match(/^\s*ROLE:\s*([A-Za-z][A-Za-z ]{0,30})/)
+      if (roleMatch) current.role = roleMatch[1].trim()
+      // Extract file paths from FILE: lines
+      const fileMatches = msg.content.matchAll(/^FILE:\s*(\S+)/gm)
+      for (const fm of fileMatches) current.filesTouched.push(fm[1])
+      // Strip ROLE: line + FILE: blocks for the reply summary
+      let reply = msg.content
+        .replace(/^\s*ROLE:\s*[A-Za-z][A-Za-z ]*\n/, '')
+        .replace(/FILE:[^\n]*\n```[^\n]*\n[\s\S]*?```/g, '')
+        .replace(/^\s*CMD:\s*.+$/gm, '')
+        .trim()
+      if (!reply && current.filesTouched.length > 0) {
+        reply = `Wrote ${current.filesTouched.length} file(s): ${current.filesTouched.join(', ')}`
+      }
+      current.agentReply = reply || msg.content.slice(0, 300)
+    }
+  }
+  if (current) turns.push(current)
+  return turns
+}
+
 function buildTurns(events: WBEvent[], initialTask: string | null): Turn[] {
   const turns: Turn[] = []
   let current: Turn | null = null
@@ -691,7 +737,15 @@ export default function WorkbenchSessionPage() {
           {/* Conversation turns */}
           <div className="flex-1 overflow-y-auto px-4 py-6 space-y-6">
             {(() => {
-              const turns = buildTurns(events, session?.task || null)
+              // Build turns from live events. If events_log was truncated (rolling
+              // buffer), also pull older turns from session.messages (complete history).
+              const eventTurns = buildTurns(events, session?.task || null)
+              const historyTurns = session?.messages ? buildTurnsFromHistory(session.messages, session?.task || null) : []
+              // Merge: show history turns that aren't covered by event turns.
+              // History turns are simpler (no agent_thought) but fill in older context.
+              const eventTurnCount = eventTurns.length
+              const historyOnly = historyTurns.slice(0, Math.max(0, historyTurns.length - eventTurnCount))
+              const turns = [...historyOnly, ...eventTurns]
               if (turns.length === 0) {
                 return (
                   <div className="flex items-center justify-center h-full">

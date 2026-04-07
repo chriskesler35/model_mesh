@@ -188,19 +188,33 @@ def _parse_files(text: str) -> list[dict]:
         path = lines[0].strip()
         rest = '\n'.join(lines[1:])
 
-        # Find the code block — use greedy match with explicit ``` close first,
-        # then fall back to consuming everything to the end if no closing fence
-        # (happens when LLM output was truncated). This prevents empty captures.
-        block_match = re.search(r'```[^\n]*\n(.*?)```', rest, re.DOTALL)
-        if not block_match:
-            # No closing ``` — LLM was likely truncated. Capture everything
-            # after the opening fence as the content (better than losing it).
-            block_match = re.search(r'```[^\n]*\n(.+)', rest, re.DOTALL)
-        if block_match and path:
-            content = block_match.group(1)
-            # Strip trailing ``` if present
-            content = re.sub(r'\s*```\s*$', '', content)
-            # Skip empty/whitespace-only content (truncation artifact)
+        # Find the code block content. The tricky part: markdown files contain
+        # their own ``` fences internally. We can't rely on finding a bare ```
+        # to close the FILE: block because internal code blocks also close with
+        # bare ```.
+        #
+        # Strategy: track fence nesting. The FILE: block's opening ```<lang>
+        # starts at depth 1. Each ``` toggles depth. When depth returns to 0,
+        # that's the real closing fence.
+        opening_match = re.search(r'```(\w*)\n', rest)
+        if opening_match and path:
+            start_pos = opening_match.end()
+            remaining = rest[start_pos:]
+            content_lines = []
+            depth = 1  # we're inside the FILE: block's opening fence
+            for line in remaining.split('\n'):
+                stripped = line.strip()
+                if stripped.startswith('```'):
+                    if stripped == '```':
+                        # Bare ``` — could be opening or closing an internal block
+                        depth -= 1
+                        if depth <= 0:
+                            break  # This is the FILE: block's closing fence
+                    else:
+                        # ```<language> — opening a new internal code block
+                        depth += 1
+                content_lines.append(line)
+            content = '\n'.join(content_lines)
             if content.strip():
                 files.append({"path": path, "content": content})
             else:
