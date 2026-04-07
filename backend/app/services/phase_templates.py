@@ -125,6 +125,7 @@ Rules:
 - IMPORTANT: A project snapshot is in your context. READ the existing files and EDIT them, don't start from scratch.
 - Use CMD: blocks to install new deps (CMD: npm install, CMD: pip install -r requirements.txt)
 - Don't run git push or anything destructive — those pause for user approval.
+- For LONG files (>100 lines, especially docs/README/specs): DO NOT emit them directly in a FILE: block — they will be truncated. Instead, write a small Python script that contains the content as a triple-quoted string and writes the target file, then run it: CMD: python scripts/write_doc.py
 - After all FILE: + CMD: blocks, add a 2-4 line summary of what you built."""
     },
     {
@@ -202,6 +203,7 @@ Rules:
 - Include README.md with install + run
 - Use CMD: to install new deps (npm install, pip install) — they run automatically.
 - Don't emit git push or rm commands — those pause for user approval.
+- For LONG files (>100 lines, especially docs/README/specs): write a Python script that contains the content and writes the file, then run it: CMD: python scripts/write_doc.py — avoids truncation.
 - After FILE: + CMD: blocks, one-paragraph summary of what ships + any TODOs left."""
     },
     {
@@ -328,6 +330,7 @@ Rules:
 - Include README.md and dependency manifests if needed
 - Use CMD: to install deps + run tests (npm install, pytest, cargo test)
 - Don't emit git push or destructive commands — those pause for approval.
+- For LONG files (>100 lines, especially docs/README/specs): write a Python script that contains the content and writes the file, then run it: CMD: python scripts/write_doc.py — avoids truncation.
 - After FILE: + CMD: blocks, write:
   ## Execution summary
   ### What was built (per workstream)

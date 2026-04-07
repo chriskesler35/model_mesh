@@ -200,7 +200,11 @@ def _parse_files(text: str) -> list[dict]:
             content = block_match.group(1)
             # Strip trailing ``` if present
             content = re.sub(r'\s*```\s*$', '', content)
-            files.append({"path": path, "content": content})
+            # Skip empty/whitespace-only content (truncation artifact)
+            if content.strip():
+                files.append({"path": path, "content": content})
+            else:
+                logger.warning(f"FILE: block for '{path}' had empty content (likely truncated) — skipped")
 
     if files:
         return files
@@ -254,12 +258,34 @@ CMD: <single shell command>
 
 Rules for FILE output:
 - Every file must be complete and immediately runnable — no placeholders, no TODOs
-- NEVER truncate or split a file across multiple FILE: blocks. Write the COMPLETE file content in ONE block.
-- If a file is long (e.g., a detailed README.md), write the entire thing — do NOT say "continued in part 2" or split it.
 - Use only standard library + dependencies that are already in the project OR explicitly requested
 - If the user's request implies new dependencies, include an updated requirements.txt / package.json
 - Include or update README.md so it always reflects current install + usage instructions
 - Only write files you're actually changing; don't rewrite untouched files
+
+CRITICAL — Long documents (README.md, specs, test plans, any file >100 lines):
+  DO NOT emit long documents directly in a FILE: block — they WILL be truncated.
+  Instead, write a small Python generator script that contains the content as a
+  triple-quoted string and writes the target file. Then run the script via CMD:.
+
+  Example for a long README:
+    FILE: scripts/write_readme.py
+    ```python
+    from pathlib import Path
+    content = \"\"\"
+    # My Project
+    ... (full content here, can be hundreds of lines) ...
+    \"\"\"
+    Path("README.md").write_text(content.strip(), encoding="utf-8")
+    print(f"Wrote README.md ({len(content)} bytes)")
+    ```
+
+    CMD: python scripts/write_readme.py
+
+  This avoids truncation because the script runs as a subprocess with no output
+  length limits. The FILE: block for the script itself is small (just the wrapper).
+  Use this pattern for ANY file that would be longer than ~100 lines.
+  After writing, verify with: CMD: wc -l README.md
 
 Rules for CMD output (shell execution):
 - Each CMD: line is ONE shell command that will be run in the project directory
@@ -575,10 +601,10 @@ async def _run_turn(
     files = _parse_files(full_response)
 
     if not files:
-        # No structured files found — save entire response as output.md
-        files = [{"path": "output.md", "content": full_response}]
+        # No FILE: blocks found — this turn was purely conversational (analysis,
+        # clarification, review). Don't create a junk output.md on disk.
         _push(session_id, "agent_thought",
-              thought="No FILE: blocks detected — saving full response as output.md")
+              thought="No FILE: blocks in response — agent provided commentary only")
 
     # ── Write files to disk ──────────────────────────────────────────────────
     written = []
