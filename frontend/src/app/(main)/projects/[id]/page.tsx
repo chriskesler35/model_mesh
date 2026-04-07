@@ -2,6 +2,7 @@
 
 import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 import { RunPanel } from '@/components/RunPanel'
+import { renderMarkdown } from '@/lib/markdown'
 
 import { useState, useEffect, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
@@ -314,6 +315,11 @@ export default function ProjectDetailPage() {
                   <div className="flex justify-center py-12">
                     <div className="flex gap-1">{[0,1,2].map(i => <div key={i} className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: `${i*0.1}s` }} />)}</div>
                   </div>
+                ) : selectedFile.name.endsWith('.md') && fileContent ? (
+                  <div
+                    className="prose prose-sm dark:prose-invert max-w-none text-sm text-gray-700 dark:text-gray-200 leading-relaxed"
+                    dangerouslySetInnerHTML={{ __html: renderMarkdown(fileContent) }}
+                  />
                 ) : (
                   <pre className="text-xs font-mono text-gray-700 dark:text-gray-200 whitespace-pre-wrap break-words leading-relaxed">
                     {fileContent}
