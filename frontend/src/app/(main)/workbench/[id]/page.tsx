@@ -406,6 +406,13 @@ export default function WorkbenchSessionPage() {
           setSession(evt.payload)
           setStatus(evt.payload.status || 'running')
           setBypassMode(!!evt.payload.bypass_approvals)
+          // Clear local event state — the stream will replay events_log from DB.
+          // Without this, page refreshes / reconnects cause events to pile up
+          // (old local events + replayed events = duplicate turns).
+          setEvents([])
+          setFiles([])
+          setPendingCommands([])
+          setCompletedCommands([])
           return
         }
 
@@ -484,7 +491,18 @@ export default function WorkbenchSessionPage() {
     }
 
     es.onerror = () => {
-      setStatus(prev => prev === 'running' || prev === 'connecting' ? 'disconnected' : prev)
+      // EventSource auto-reconnects on error (browser spec). For sessions that
+      // are done/waiting/failed, the server's replay-only stream ends immediately,
+      // which triggers onerror → reconnect → replay → onerror → infinite loop.
+      // Break the loop: if we're not actively running, close the EventSource.
+      setStatus(prev => {
+        if (prev === 'running' || prev === 'connecting') {
+          return 'disconnected'
+        }
+        // Session is idle/completed/failed — stop reconnecting
+        es.close()
+        return prev
+      })
     }
 
     return () => es.close()
