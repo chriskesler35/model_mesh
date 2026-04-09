@@ -1377,7 +1377,7 @@ async def create_pipeline(body: PipelineCreate, request: Request, db: AsyncSessi
     """Create and start a multi-agent pipeline attached to a workbench session."""
     from app.models.pipeline import Pipeline
     from app.models.workbench import WorkbenchSession
-    from app.services.phase_templates import get_phases_for_method, list_supported_methods, validate_phase_dag
+    from app.services.phase_templates import get_phases_for_method, list_supported_methods, validate_phase_dag, get_method_phases_with_custom
 
     # Resolve method — if "stack" or "active", use the currently-active method
     # stack from the Methods page. The primary (first) method in the stack
@@ -1408,9 +1408,9 @@ async def create_pipeline(body: PipelineCreate, request: Request, db: AsyncSessi
                 stacked_prompt = _build_stack_prompt(non_primary)
                 logger.info(f"Pipeline method={body.method_id}, layering stack: {non_primary}")
 
-    # Validate method
+    # Validate method — check custom methods (DB) first, then built-in
     try:
-        template_phases = get_phases_for_method(effective_method_id)
+        template_phases = await get_method_phases_with_custom(effective_method_id, db)
     except KeyError:
         raise HTTPException(
             status_code=400,

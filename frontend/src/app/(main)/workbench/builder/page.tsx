@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import { useRouter } from 'next/navigation'
 import { getApiBase, getAuthToken } from '@/lib/config'
 import { useToast } from '@/app/ToastProvider'
 
@@ -75,6 +76,7 @@ const NODE_H = 68
 // Page component
 // ---------------------------------------------------------------------------
 export default function WorkflowBuilderPage() {
+  const router = useRouter()
   const [nodes, setNodes] = useState<WorkflowNode[]>([])
   const [edges, setEdges] = useState<WorkflowEdge[]>([])
   const [selectedNode, setSelectedNode] = useState<WorkflowNode | null>(null)
@@ -99,6 +101,11 @@ export default function WorkflowBuilderPage() {
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null)
   const [availableModels, setAvailableModels] = useState<string[]>([])
 
+  // Run workflow state
+  const [showRunModal, setShowRunModal] = useState(false)
+  const [runTask, setRunTask] = useState('')
+  const [runError, setRunError] = useState<string | null>(null)
+  const [runLoading, setRunLoading] = useState(false)
   const { addToast } = useToast()
 
   const apiHeaders = useCallback(() => ({
@@ -268,6 +275,164 @@ export default function WorkflowBuilderPage() {
     setSavedWorkflows((prev) => prev.filter((w) => w.id !== id))
     if (currentWorkflowId === id) { setCurrentWorkflowId(null); setWorkflowName('') }
   }, [apiHeaders, currentWorkflowId])
+
+  // ------ Graph validation -----------------------------------------------
+  const validateGraph = useCallback((): string | null => {
+    if (nodes.length === 0) return 'Add at least one agent node to the canvas.'
+
+    // Check for disconnected/isolated nodes (nodes with no edges) when there
+    // are multiple nodes — a single node is fine to run standalone.
+    if (nodes.length > 1) {
+      const connectedIds = new Set<string>()
+      for (const e of edges) { connectedIds.add(e.source); connectedIds.add(e.target) }
+      const isolated = nodes.filter((n) => !connectedIds.has(n.id))
+      if (isolated.length > 0) {
+        return `Disconnected node${isolated.length > 1 ? 's' : ''}: ${isolated.map((n) => n.label).join(', ')}. Connect all nodes or remove unused ones.`
+      }
+    }
+
+    // Valid DAG check (topological sort via Kahn's algorithm)
+    const inDegree = new Map<string, number>()
+    nodes.forEach((n) => inDegree.set(n.id, 0))
+    for (const e of edges) {
+      inDegree.set(e.target, (inDegree.get(e.target) || 0) + 1)
+    }
+    const queue = Array.from(inDegree.entries()).filter(([, d]) => d === 0).map(([id]) => id)
+    let visited = 0
+    while (queue.length > 0) {
+      const curr = queue.shift()!
+      visited++
+      for (const e of edges) {
+        if (e.source === curr) {
+          const newDeg = (inDegree.get(e.target) || 1) - 1
+          inDegree.set(e.target, newDeg)
+          if (newDeg === 0) queue.push(e.target)
+        }
+      }
+    }
+    if (visited !== nodes.length) return 'Workflow contains a cycle. Remove circular connections to form a valid DAG.'
+
+    return null
+  }, [nodes, edges])
+
+  // ------ Graph to pipeline phases (topological sort) --------------------
+  const graphToPhases = useCallback(() => {
+    // Kahn's topological sort
+    const inDegree = new Map<string, number>()
+    nodes.forEach((n) => inDegree.set(n.id, 0))
+    for (const e of edges) {
+      inDegree.set(e.target, (inDegree.get(e.target) || 0) + 1)
+    }
+    const queue = Array.from(inDegree.entries()).filter(([, d]) => d === 0).map(([id]) => id)
+    const sorted: string[] = []
+    while (queue.length > 0) {
+      const curr = queue.shift()!
+      sorted.push(curr)
+      for (const e of edges) {
+        if (e.source === curr) {
+          const newDeg = (inDegree.get(e.target) || 1) - 1
+          inDegree.set(e.target, newDeg)
+          if (newDeg === 0) queue.push(e.target)
+        }
+      }
+    }
+
+    // Map node IDs to unique phase names
+    const nodeNameMap = new Map<string, string>()
+    const usedNames = new Set<string>()
+    for (const id of sorted) {
+      const node = nodes.find((n) => n.id === id)!
+      let name = node.label.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 50)
+      if (usedNames.has(name)) {
+        let i = 2
+        while (usedNames.has(`${name}_${i}`)) i++
+        name = `${name}_${i}`
+      }
+      usedNames.add(name)
+      nodeNameMap.set(id, name)
+    }
+
+    // Build phases array
+    return sorted.map((id) => {
+      const node = nodes.find((n) => n.id === id)!
+      const deps = edges.filter((e) => e.target === id).map((e) => nodeNameMap.get(e.source)!)
+      return {
+        name: nodeNameMap.get(id)!,
+        role: node.type.charAt(0).toUpperCase() + node.type.slice(1),
+        default_model: node.config.model || undefined,
+        system_prompt: node.config.systemPrompt || undefined,
+        artifact_type: node.config.artifactType === 'json' ? 'json' : node.config.artifactType === 'code' ? 'code' : 'md',
+        depends_on: deps.length > 0 ? deps : undefined,
+      }
+    })
+  }, [nodes, edges])
+
+  // ------ Run workflow ----------------------------------------------------
+  const handleRunClick = useCallback(() => {
+    const error = validateGraph()
+    if (error) {
+      addToast({ type: 'error', title: 'Invalid workflow', message: error, autoClose: 5000 })
+      return
+    }
+    setRunError(null)
+    setRunTask('')
+    setShowRunModal(true)
+  }, [validateGraph, addToast])
+
+  const handleRunSubmit = useCallback(async () => {
+    if (!runTask.trim()) { setRunError('Task description is required.'); return }
+    setRunError(null)
+    setRunLoading(true)
+    const headers = apiHeaders()
+    try {
+      const phases = graphToPhases()
+      const methodName = `builder-${(workflowName || 'workflow').replace(/[^a-zA-Z0-9_-]/g, '_')}-${Date.now()}`
+
+      // 1. Create custom method from graph phases
+      const methodRes = await fetch(`${getApiBase()}/v1/methods/custom`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ name: methodName, description: 'Auto-generated from Workflow Builder', phases }),
+      })
+      if (!methodRes.ok) {
+        const detail = await methodRes.json().catch(() => ({}))
+        throw new Error(detail.detail || `Method creation failed (${methodRes.status})`)
+      }
+      const method = await methodRes.json()
+
+      // 2. Create workbench session
+      const sessRes = await fetch(`${getApiBase()}/v1/workbench/sessions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ task: runTask.trim(), agent_type: 'coder', model: phases[0]?.default_model || undefined }),
+      })
+      if (!sessRes.ok) {
+        const detail = await sessRes.json().catch(() => ({}))
+        throw new Error(detail.detail || `Session creation failed (${sessRes.status})`)
+      }
+      const session = await sessRes.json()
+
+      // 3. Create pipeline with custom method
+      const pipeRes = await fetch(`${getApiBase()}/v1/workbench/pipelines`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ session_id: session.id, method_id: method.id || method.name, task: runTask.trim(), auto_approve: false }),
+      })
+      if (!pipeRes.ok) {
+        const detail = await pipeRes.json().catch(() => ({}))
+        throw new Error(detail.detail || `Pipeline creation failed (${pipeRes.status})`)
+      }
+      const pipeline = await pipeRes.json()
+
+      // 4. Redirect to pipeline execution view
+      setShowRunModal(false)
+      router.push(`/workbench/pipelines/${pipeline.id}`)
+    } catch (err: any) {
+      setRunError(err.message || 'Failed to run workflow')
+    } finally {
+      setRunLoading(false)
+    }
+  }, [runTask, apiHeaders, graphToPhases, workflowName, router])
 
   // ------ Drop from palette onto canvas ----------------------------------
   const handleCanvasDrop = useCallback(
@@ -503,6 +668,7 @@ export default function WorkflowBuilderPage() {
             Clear
           </button>
           <button
+            onClick={handleRunClick}
             className="px-3 py-1.5 text-sm rounded bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50 transition-colors"
             disabled={nodes.length === 0}
           >
@@ -1001,6 +1167,49 @@ export default function WorkflowBuilderPage() {
             )}
             <div className="flex justify-end mt-4">
               <button onClick={() => setShowLoadModal(false)} className="px-3 py-1.5 text-sm rounded bg-zinc-800 hover:bg-zinc-700 border border-zinc-700">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================== */}
+      {/* Run Workflow Modal                                               */}
+      {/* ============================================================== */}
+      {showRunModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => !runLoading && setShowRunModal(false)}>
+          <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-5 w-[480px] shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-lg font-semibold mb-1">Run Workflow</h2>
+            <p className="text-xs text-zinc-500 mb-4">
+              {nodes.length} node{nodes.length !== 1 ? 's' : ''} &middot; {edges.length} connection{edges.length !== 1 ? 's' : ''}
+            </p>
+            <label className="text-xs text-zinc-500 block mb-1">Task Description</label>
+            <textarea
+              value={runTask}
+              onChange={(e) => setRunTask(e.target.value)}
+              placeholder="Describe what this workflow should accomplish…"
+              rows={4}
+              className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm mb-3 resize-y focus:outline-none focus:ring-1 focus:ring-blue-500 min-h-[80px]"
+              autoFocus
+              disabled={runLoading}
+              onKeyDown={(e) => { if (e.key === 'Enter' && e.ctrlKey) handleRunSubmit() }}
+            />
+            <p className="text-xs text-zinc-600 mb-3">Ctrl+Enter to submit</p>
+            {runError && <p className="text-xs text-red-400 mb-3">{runError}</p>}
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowRunModal(false)}
+                disabled={runLoading}
+                className="px-3 py-1.5 text-sm rounded bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRunSubmit}
+                disabled={runLoading || !runTask.trim()}
+                className="px-4 py-1.5 text-sm rounded bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50 transition-colors"
+              >
+                {runLoading ? 'Launching…' : 'Run \u25B6'}
+              </button>
             </div>
           </div>
         </div>
