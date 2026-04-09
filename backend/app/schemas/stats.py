@@ -1,6 +1,6 @@
 """Stats schemas."""
 
-from typing import Dict
+from typing import Dict, List, Optional
 from pydantic import BaseModel
 from datetime import datetime
 
@@ -24,3 +24,25 @@ class UsageSummary(BaseModel):
     by_provider: Dict[str, Dict[str, int]]
     period_start: datetime
     period_end: datetime
+
+
+class DailyCostEntry(BaseModel):
+    """Single day cost breakdown."""
+    date: str
+    total_cost: float
+    total_requests: int
+    input_tokens: int
+    output_tokens: int
+
+
+class DailyCostSummary(BaseModel):
+    """Summary stats for the daily cost period."""
+    total_cost: float
+    daily_average: float
+    change_pct: Optional[float]
+
+
+class DailyCostResponse(BaseModel):
+    """Response for daily cost breakdown endpoint."""
+    daily: List[DailyCostEntry]
+    summary: DailyCostSummary
