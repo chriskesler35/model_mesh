@@ -18,6 +18,19 @@ interface UsageSummary {
   by_model: Record<string, { requests: number; input_tokens: number; output_tokens: number }>
 }
 
+interface FeedbackModelEntry {
+  model_id: string | null
+  total: number
+  positive: number
+  negative: number
+  satisfaction_rate: number
+}
+
+interface FeedbackSummary {
+  by_model: FeedbackModelEntry[]
+  period_days: number
+}
+
 function formatNumber(num: number): string {
   if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`
   if (num >= 1000) return `${(num / 1000).toFixed(1)}K`
@@ -33,21 +46,26 @@ function formatCost(cost: number): string {
 export default function StatsPage() {
   const [costs, setCosts] = useState<CostSummary | null>(null)
   const [usage, setUsage] = useState<UsageSummary | null>(null)
+  const [feedback, setFeedback] = useState<FeedbackSummary | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     async function fetchStats() {
       try {
-        const [costsRes, usageRes] = await Promise.all([
+        const [costsRes, usageRes, feedbackRes] = await Promise.all([
           fetch(`${API_BASE}/v1/stats/costs?days=7`, {
-            headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
+            headers: { ...AUTH_HEADERS }
           }).then(r => r.json()),
           fetch(`${API_BASE}/v1/stats/usage?days=7`, {
-            headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
-          }).then(r => r.json())
+            headers: { ...AUTH_HEADERS }
+          }).then(r => r.json()),
+          fetch(`${API_BASE}/v1/feedback?days=7`, {
+            headers: { ...AUTH_HEADERS }
+          }).then(r => r.json()).catch(() => null)
         ])
         setCosts(costsRes)
         setUsage(usageRes)
+        if (feedbackRes) setFeedback(feedbackRes)
       } catch (e) {
         console.error('Failed to fetch stats:', e)
       } finally {
@@ -249,6 +267,72 @@ export default function StatsPage() {
           <p className="mt-2 text-sm text-gray-500">
             {usage.total_requests} total requests in the last 7 days
           </p>
+        </div>
+      </div>
+
+      {/* User Satisfaction (Feedback) */}
+      <div className="mt-8">
+        <h2 className="text-lg font-medium text-gray-900 mb-4">User Satisfaction</h2>
+        <div className="bg-white shadow overflow-hidden sm:rounded-lg">
+          {feedback && feedback.by_model && feedback.by_model.length > 0 ? (
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Model
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Positive
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Negative
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Total
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Satisfaction
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {feedback.by_model.map((entry) => (
+                  <tr key={entry.model_id || 'unknown'}>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                      {entry.model_id || 'Unknown'}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-green-600">
+                      {entry.positive}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-red-600">
+                      {entry.negative}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                      {entry.total}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm">
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden max-w-[100px]">
+                          <div
+                            className={`h-full rounded-full ${
+                              entry.satisfaction_rate >= 70 ? 'bg-green-500' :
+                              entry.satisfaction_rate >= 40 ? 'bg-yellow-500' : 'bg-red-500'
+                            }`}
+                            style={{ width: `${entry.satisfaction_rate}%` }}
+                          />
+                        </div>
+                        <span className="text-gray-700 font-medium">{entry.satisfaction_rate}%</span>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="px-6 py-4 text-sm text-gray-500 text-center">
+              No feedback data yet. Users can rate AI responses with thumbs up/down in the chat.
+            </div>
+          )}
         </div>
       </div>
     </div>
