@@ -16,6 +16,7 @@ interface PhaseDef {
   default_model?: string
   artifact_type: 'json' | 'md' | 'code'
   system_prompt?: string
+  depends_on?: string[]
 }
 
 interface PhaseRun {
@@ -423,6 +424,213 @@ function SaveAsTemplateDialog({ pipelineId, onClose }: { pipelineId: string; onC
   )
 }
 
+// ─── Swim Lane View ───────────────────────────────────────────────────────────
+
+/** Group phases into layers by dependency depth (topological sort level). */
+function buildLayers(phases: PhaseDef[]): number[][] {
+  const nameToIdx: Record<string, number> = {}
+  phases.forEach((p, i) => { nameToIdx[p.name] = i })
+
+  const depth = new Array(phases.length).fill(0)
+  const visited = new Set<number>()
+
+  function dfs(idx: number): number {
+    if (visited.has(idx)) return depth[idx]
+    visited.add(idx)
+    const deps = phases[idx].depends_on || []
+    let maxParent = -1
+    for (const dep of deps) {
+      if (nameToIdx[dep] !== undefined) {
+        maxParent = Math.max(maxParent, dfs(nameToIdx[dep]))
+      }
+    }
+    depth[idx] = maxParent + 1
+    return depth[idx]
+  }
+
+  for (let i = 0; i < phases.length; i++) dfs(i)
+
+  const maxDepth = Math.max(...depth, 0)
+  const layers: number[][] = Array.from({ length: maxDepth + 1 }, () => [])
+  depth.forEach((d, i) => layers[d].push(i))
+  return layers
+}
+
+const LANE_STATUS: Record<string, { border: string; bg: string; dot: string }> = {
+  pending:           { border: 'border-gray-300 dark:border-gray-600',   bg: 'bg-gray-50 dark:bg-gray-800/50',     dot: 'bg-gray-400' },
+  running:           { border: 'border-blue-400 dark:border-blue-500',   bg: 'bg-blue-50 dark:bg-blue-900/20',     dot: 'bg-blue-500' },
+  awaiting_approval: { border: 'border-amber-400 dark:border-amber-500', bg: 'bg-amber-50 dark:bg-amber-900/10',   dot: 'bg-amber-500' },
+  approved:          { border: 'border-green-400 dark:border-green-500', bg: 'bg-green-50 dark:bg-green-900/10',   dot: 'bg-green-500' },
+  rejected:          { border: 'border-red-400 dark:border-red-500',     bg: 'bg-red-50 dark:bg-red-900/10',       dot: 'bg-red-500' },
+  failed:            { border: 'border-red-400 dark:border-red-500',     bg: 'bg-red-50 dark:bg-red-900/10',       dot: 'bg-red-500' },
+  skipped:           { border: 'border-gray-300 dark:border-gray-600',   bg: 'bg-gray-50 dark:bg-gray-800/50',     dot: 'bg-gray-400' },
+}
+
+function formatDuration(startedAt?: string, completedAt?: string): string | null {
+  if (!startedAt) return null
+  const start = new Date(startedAt).getTime()
+  const end = completedAt ? new Date(completedAt).getTime() : Date.now()
+  const sec = Math.round((end - start) / 1000)
+  if (sec < 60) return `${sec}s`
+  const min = Math.floor(sec / 60)
+  return `${min}m ${sec % 60}s`
+}
+
+function estimateTokenCost(input: number, output: number): string {
+  // Rough estimate: $3 per 1M input, $15 per 1M output (Claude-class pricing)
+  const cost = (input * 3 + output * 15) / 1_000_000
+  if (cost < 0.001) return '<$0.001'
+  return `$${cost.toFixed(3)}`
+}
+
+function SwimLaneView({
+  phases, runsByIndex,
+}: {
+  phases: PhaseDef[]
+  runsByIndex: Record<number, PhaseRun>
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const cardRefs = useRef<Record<number, HTMLDivElement | null>>({})
+  const [arrows, setArrows] = useState<{ x1: number; y1: number; x2: number; y2: number }[]>([])
+
+  const layers = buildLayers(phases)
+  const nameToIdx: Record<string, number> = {}
+  phases.forEach((p, i) => { nameToIdx[p.name] = i })
+
+  // Compute SVG arrows after layout
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => {
+      if (!containerRef.current) return
+      const containerRect = containerRef.current.getBoundingClientRect()
+      const newArrows: typeof arrows = []
+
+      phases.forEach((phase, idx) => {
+        const deps = phase.depends_on || []
+        const targetCard = cardRefs.current[idx]
+        if (!targetCard) return
+
+        for (const dep of deps) {
+          const srcIdx = nameToIdx[dep]
+          if (srcIdx === undefined) continue
+          const srcCard = cardRefs.current[srcIdx]
+          if (!srcCard) continue
+
+          const srcRect = srcCard.getBoundingClientRect()
+          const tgtRect = targetCard.getBoundingClientRect()
+
+          newArrows.push({
+            x1: srcRect.left + srcRect.width / 2 - containerRect.left,
+            y1: srcRect.bottom - containerRect.top,
+            x2: tgtRect.left + tgtRect.width / 2 - containerRect.left,
+            y2: tgtRect.top - containerRect.top,
+          })
+        }
+      })
+      setArrows(newArrows)
+    })
+    return () => cancelAnimationFrame(raf)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phases, runsByIndex])
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 mb-1">
+        <span className="font-semibold uppercase tracking-wider">Pipeline Timeline</span>
+        <span className="text-gray-300 dark:text-gray-600">—</span>
+        <span>Sequential ↓ · Parallel ↔</span>
+      </div>
+      <div ref={containerRef} className="relative overflow-x-auto">
+        {/* SVG arrow overlay */}
+        <svg className="absolute inset-0 w-full h-full pointer-events-none z-10" style={{ overflow: 'visible' }}>
+          <defs>
+            <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L8,3 L0,6" fill="none" stroke="currentColor" className="text-gray-400 dark:text-gray-500" strokeWidth="1.5" />
+            </marker>
+          </defs>
+          {arrows.map((a, i) => {
+            const midY = (a.y1 + a.y2) / 2
+            return (
+              <path
+                key={i}
+                d={`M${a.x1},${a.y1} C${a.x1},${midY} ${a.x2},${midY} ${a.x2},${a.y2}`}
+                fill="none"
+                stroke="currentColor"
+                className="text-gray-300 dark:text-gray-600"
+                strokeWidth="2"
+                markerEnd="url(#arrowhead)"
+              />
+            )
+          })}
+        </svg>
+
+        {/* Layers */}
+        <div className="flex flex-col gap-6">
+          {layers.map((layer, layerIdx) => (
+            <div key={layerIdx} className="flex items-stretch justify-center gap-4 relative">
+              {/* Layer label */}
+              <div className="flex items-center justify-center w-8 flex-shrink-0">
+                <span className="text-[10px] font-mono text-gray-400 dark:text-gray-500 -rotate-90 whitespace-nowrap">
+                  L{layerIdx}
+                </span>
+              </div>
+              {/* Phase cards in this layer */}
+              <div className={`flex-1 grid gap-4`} style={{
+                gridTemplateColumns: `repeat(${layer.length}, minmax(200px, 1fr))`
+              }}>
+                {layer.map(phaseIdx => {
+                  const phase = phases[phaseIdx]
+                  const run = runsByIndex[phaseIdx] || null
+                  const status = run?.status || 'pending'
+                  const style = LANE_STATUS[status] || LANE_STATUS.pending
+                  const avatar = ROLE_AVATARS[phase.role] || { icon: '🤖', color: 'from-gray-400 to-gray-600' }
+                  const isRunning = status === 'running'
+                  const tokens = (run?.input_tokens || 0) + (run?.output_tokens || 0)
+                  const duration = formatDuration(run?.started_at, run?.completed_at)
+                  const isDone = status === 'approved' || status === 'skipped'
+
+                  return (
+                    <div
+                      key={phaseIdx}
+                      ref={el => { cardRefs.current[phaseIdx] = el }}
+                      className={`relative rounded-lg border-2 ${style.border} ${style.bg} p-3 transition-all
+                        ${isRunning ? 'animate-pulse ring-2 ring-blue-400/50 dark:ring-blue-500/40' : ''}`}
+                    >
+                      {/* Header row */}
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <div className={`w-7 h-7 rounded-full bg-gradient-to-br ${avatar.color} flex items-center justify-center text-sm flex-shrink-0`}>
+                          {avatar.icon}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-semibold text-gray-900 dark:text-white truncate">{phase.name}</div>
+                          <div className="text-[10px] text-gray-500 dark:text-gray-400 truncate">{phase.role}</div>
+                        </div>
+                        <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${style.dot}`} title={STATUS_STYLE[status]?.label || status} />
+                      </div>
+                      {/* Meta row */}
+                      <div className="flex items-center gap-2 text-[10px] text-gray-500 dark:text-gray-400 flex-wrap">
+                        <span className={`uppercase font-semibold tracking-wider ${STATUS_STYLE[status]?.text || 'text-gray-500'}`}>
+                          {STATUS_STYLE[status]?.label || status}
+                        </span>
+                        {duration && <span className="font-mono">⏱ {duration}</span>}
+                        {isDone && tokens > 0 && (
+                          <>
+                            <span className="font-mono">{tokens.toLocaleString()} tok</span>
+                            <span className="font-mono">{estimateTokenCost(run?.input_tokens || 0, run?.output_tokens || 0)}</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function PipelinePage() {
   const params = useParams()
@@ -676,18 +884,24 @@ export default function PipelinePage() {
         </div>
       )}
 
-      {/* Swim lanes */}
-      <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${pipeline.phases.length}, minmax(240px, 1fr))` }}>
-        {pipeline.phases.map((phase, idx) => (
-          <PhaseCard
-            key={idx}
-            phase={phase}
-            run={runsByIndex[idx] || null}
-            isCurrent={idx === pipeline.current_phase_index && pipeline.status !== 'completed'}
-            onOpenApproval={setApprovalRun}
-            onViewArtifact={setViewArtifactRun}
-          />
-        ))}
+      {/* Swim-lane timeline (parallel phases side-by-side) */}
+      <SwimLaneView phases={pipeline.phases} runsByIndex={runsByIndex} />
+
+      {/* Detailed phase cards */}
+      <div>
+        <div className="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3">Phase Details</div>
+        <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${Math.min(pipeline.phases.length, 3)}, minmax(240px, 1fr))` }}>
+          {pipeline.phases.map((phase, idx) => (
+            <PhaseCard
+              key={idx}
+              phase={phase}
+              run={runsByIndex[idx] || null}
+              isCurrent={idx === pipeline.current_phase_index && pipeline.status !== 'completed'}
+              onOpenApproval={setApprovalRun}
+              onViewArtifact={setViewArtifactRun}
+            />
+          ))}
+        </div>
       </div>
 
       {/* Approval modal */}
