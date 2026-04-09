@@ -2,7 +2,7 @@
 
 import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 
 interface CostSummary {
   total_cost: number
@@ -18,6 +18,33 @@ interface UsageSummary {
   by_model: Record<string, { requests: number; input_tokens: number; output_tokens: number }>
 }
 
+interface ModelPerformanceMetrics {
+  model_name: string
+  display_name: string | null
+  total_requests: number
+  avg_latency_ms: number
+  p95_latency_ms: number
+  success_rate: number
+  avg_tokens_per_request: number
+  total_cost: number
+}
+
+interface ModelPerformanceHighlights {
+  cheapest: string | null
+  fastest: string | null
+  most_reliable: string | null
+}
+
+interface ModelPerformanceSummary {
+  models: ModelPerformanceMetrics[]
+  highlights: ModelPerformanceHighlights
+}
+
+type SortKey = keyof Pick<
+  ModelPerformanceMetrics,
+  'model_name' | 'total_requests' | 'avg_latency_ms' | 'p95_latency_ms' | 'success_rate' | 'avg_tokens_per_request' | 'total_cost'
+>
+
 function formatNumber(num: number): string {
   if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`
   if (num >= 1000) return `${(num / 1000).toFixed(1)}K`
@@ -30,11 +57,225 @@ function formatCost(cost: number): string {
   return `$${cost.toFixed(2)}`
 }
 
+function formatLatency(ms: number): string {
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.round(ms)}ms`
+}
+
+/* ------------------------------------------------------------------ */
+/*  Model Performance Table (sortable) + Latency Bar Chart            */
+/* ------------------------------------------------------------------ */
+
+function ModelPerformanceSection({ performance }: { performance: ModelPerformanceSummary }) {
+  const [sortKey, setSortKey] = useState<SortKey>('total_requests')
+  const [sortAsc, setSortAsc] = useState(false)
+
+  const handleSort = useCallback((key: SortKey) => {
+    if (key === sortKey) {
+      setSortAsc(prev => !prev)
+    } else {
+      setSortKey(key)
+      // Default descending for numbers, ascending for names
+      setSortAsc(key === 'model_name')
+    }
+  }, [sortKey])
+
+  const sorted = useMemo(() => {
+    const list = [...performance.models]
+    list.sort((a, b) => {
+      const av = a[sortKey]
+      const bv = b[sortKey]
+      if (typeof av === 'string' && typeof bv === 'string') {
+        return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av)
+      }
+      const diff = (av as number) - (bv as number)
+      return sortAsc ? diff : -diff
+    })
+    return list
+  }, [performance.models, sortKey, sortAsc])
+
+  const { highlights } = performance
+
+  // Badge helper — returns a label if the model matches a highlight
+  function badge(m: ModelPerformanceMetrics): { label: string; color: string } | null {
+    const name = m.display_name || m.model_name
+    if (name === highlights.fastest) return { label: 'Fastest', color: 'bg-blue-100 text-blue-800' }
+    if (name === highlights.cheapest) return { label: 'Cheapest', color: 'bg-green-100 text-green-800' }
+    if (name === highlights.most_reliable) return { label: 'Most Reliable', color: 'bg-purple-100 text-purple-800' }
+    return null
+  }
+
+  // Column header with sort indicator
+  function SortHeader({ label, field, align }: { label: string; field: SortKey; align?: string }) {
+    const active = sortKey === field
+    return (
+      <th
+        onClick={() => handleSort(field)}
+        className={`px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-gray-700 ${align === 'right' ? 'text-right' : 'text-left'}`}
+      >
+        <span className="inline-flex items-center gap-1">
+          {label}
+          {active && <span className="text-gray-800">{sortAsc ? '\u25B2' : '\u25BC'}</span>}
+        </span>
+      </th>
+    )
+  }
+
+  // Bar chart: max latency determines 100% width
+  const maxLatency = useMemo(
+    () => Math.max(...performance.models.map(m => m.avg_latency_ms), 1),
+    [performance.models]
+  )
+
+  if (performance.models.length === 0) {
+    return (
+      <div className="mt-8">
+        <h2 className="text-lg font-medium text-gray-900 mb-4">Model Performance Comparison</h2>
+        <div className="bg-white shadow sm:rounded-lg px-6 py-4 text-sm text-gray-500 text-center">
+          No performance data available yet
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <>
+      {/* Highlights bar */}
+      <div className="mt-8">
+        <h2 className="text-lg font-medium text-gray-900 mb-4">Model Performance Comparison</h2>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+          {highlights.fastest && (
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-center gap-3">
+              <span className="text-xl">&#9889;</span>
+              <div>
+                <p className="text-xs font-medium text-blue-600 uppercase">Fastest</p>
+                <p className="text-sm font-semibold text-blue-900">{highlights.fastest}</p>
+              </div>
+            </div>
+          )}
+          {highlights.cheapest && (
+            <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-center gap-3">
+              <span className="text-xl">&#128176;</span>
+              <div>
+                <p className="text-xs font-medium text-green-600 uppercase">Cheapest</p>
+                <p className="text-sm font-semibold text-green-900">{highlights.cheapest}</p>
+              </div>
+            </div>
+          )}
+          {highlights.most_reliable && (
+            <div className="bg-purple-50 border border-purple-200 rounded-lg p-4 flex items-center gap-3">
+              <span className="text-xl">&#9989;</span>
+              <div>
+                <p className="text-xs font-medium text-purple-600 uppercase">Most Reliable</p>
+                <p className="text-sm font-semibold text-purple-900">{highlights.most_reliable}</p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Sortable table */}
+        <div className="bg-white shadow overflow-x-auto sm:rounded-lg">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-50">
+              <tr>
+                <SortHeader label="Model" field="model_name" />
+                <SortHeader label="Requests" field="total_requests" align="right" />
+                <SortHeader label="Avg Latency" field="avg_latency_ms" align="right" />
+                <SortHeader label="P95 Latency" field="p95_latency_ms" align="right" />
+                <SortHeader label="Success Rate" field="success_rate" align="right" />
+                <SortHeader label="Avg Tokens" field="avg_tokens_per_request" align="right" />
+                <SortHeader label="Cost" field="total_cost" align="right" />
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {sorted.map((m) => {
+                const b = badge(m)
+                return (
+                  <tr key={m.model_name} className="hover:bg-gray-50">
+                    <td className="px-4 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                      <span className="flex items-center gap-2">
+                        {m.display_name || m.model_name}
+                        {b && (
+                          <span className={`inline-flex text-[10px] font-semibold px-1.5 py-0.5 rounded ${b.color}`}>
+                            {b.label}
+                          </span>
+                        )}
+                      </span>
+                    </td>
+                    <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900 text-right">
+                      {formatNumber(m.total_requests)}
+                    </td>
+                    <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900 text-right">
+                      {formatLatency(m.avg_latency_ms)}
+                    </td>
+                    <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900 text-right">
+                      {formatLatency(m.p95_latency_ms)}
+                    </td>
+                    <td className="px-4 py-4 whitespace-nowrap text-sm text-right">
+                      <span className={m.success_rate >= 99 ? 'text-green-600 font-medium' : m.success_rate >= 90 ? 'text-yellow-600' : 'text-red-600 font-medium'}>
+                        {m.success_rate.toFixed(1)}%
+                      </span>
+                    </td>
+                    <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900 text-right">
+                      {formatNumber(m.avg_tokens_per_request)}
+                    </td>
+                    <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900 text-right">
+                      {formatCost(m.total_cost)}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Latency Bar Chart */}
+      <div className="mt-8">
+        <h2 className="text-lg font-medium text-gray-900 mb-4">Latency Comparison</h2>
+        <div className="bg-white shadow sm:rounded-lg p-6 space-y-3">
+          {performance.models
+            .sort((a, b) => a.avg_latency_ms - b.avg_latency_ms)
+            .map((m) => {
+              const pct = (m.avg_latency_ms / maxLatency) * 100
+              const name = m.display_name || m.model_name
+              const isFastest = name === highlights.fastest
+              return (
+                <div key={m.model_name} className="flex items-center gap-3">
+                  <div className="w-40 text-sm text-gray-700 truncate text-right" title={name}>
+                    {name}
+                  </div>
+                  <div className="flex-1 h-6 bg-gray-100 rounded overflow-hidden relative">
+                    <div
+                      className={`h-full rounded ${isFastest ? 'bg-blue-500' : 'bg-indigo-400'}`}
+                      style={{ width: `${Math.max(pct, 2)}%` }}
+                    />
+                  </div>
+                  <div className="w-20 text-sm text-gray-600 tabular-nums text-right">
+                    {formatLatency(m.avg_latency_ms)}
+                  </div>
+                </div>
+              )
+            })}
+        </div>
+      </div>
+    </>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/*  Main Page                                                          */
+/* ------------------------------------------------------------------ */
+
 export default function StatsPage() {
   const [costs, setCosts] = useState<CostSummary | null>(null)
   const [usage, setUsage] = useState<UsageSummary | null>(null)
+  const [performance, setPerformance] = useState<ModelPerformanceSummary | null>(null)
   const [loading, setLoading] = useState(true)
+  const [perfDays, setPerfDays] = useState(7)
 
+  // Fetch core stats once
   useEffect(() => {
     async function fetchStats() {
       try {
@@ -56,6 +297,24 @@ export default function StatsPage() {
     }
     fetchStats()
   }, [])
+
+  // Fetch performance data (reactive to day selector)
+  useEffect(() => {
+    async function fetchPerformance() {
+      try {
+        const res = await fetch(`${API_BASE}/v1/stats/models/performance?days=${perfDays}`, {
+          headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
+        })
+        if (res.ok) {
+          const data = await res.json()
+          setPerformance(data)
+        }
+      } catch (e) {
+        console.error('Failed to fetch model performance:', e)
+      }
+    }
+    fetchPerformance()
+  }, [perfDays])
 
   if (loading) {
     return (
@@ -251,6 +510,27 @@ export default function StatsPage() {
           </p>
         </div>
       </div>
+
+      {/* Model Performance Comparison */}
+      {performance && (
+        <div>
+          <div className="mt-8 flex items-center gap-4">
+            <label className="text-sm text-gray-600">Performance period:</label>
+            <select
+              value={perfDays}
+              onChange={(e) => setPerfDays(Number(e.target.value))}
+              className="border border-gray-300 rounded px-2 py-1 text-sm bg-white text-gray-700"
+            >
+              <option value={1}>Last 24 hours</option>
+              <option value={7}>Last 7 days</option>
+              <option value={14}>Last 14 days</option>
+              <option value={30}>Last 30 days</option>
+              <option value={90}>Last 90 days</option>
+            </select>
+          </div>
+          <ModelPerformanceSection performance={performance} />
+        </div>
+      )}
     </div>
   )
 }
