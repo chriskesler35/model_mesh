@@ -57,6 +57,8 @@ class PhaseRun(Base):
     output_artifact = Column(JSON, nullable=True)                # structured output of this phase
     raw_response    = Column(Text, nullable=True)                # full LLM response text
     user_feedback   = Column(Text, nullable=True)                # feedback when rejected
+    retry_count     = Column(Integer, default=0, nullable=False) # how many times this phase has been retried with feedback
+    max_retries     = Column(Integer, default=0, nullable=False) # max auto-retries allowed (from phase template)
     input_tokens    = Column(Integer, nullable=True)
     output_tokens   = Column(Integer, nullable=True)
     started_at      = Column(DateTime, nullable=True)
@@ -76,6 +78,8 @@ class PhaseRun(Base):
             "output_artifact": self.output_artifact,
             "raw_response":    self.raw_response,
             "user_feedback":   self.user_feedback,
+            "retry_count":     self.retry_count or 0,
+            "max_retries":     self.max_retries or 0,
             "input_tokens":    self.input_tokens,
             "output_tokens":   self.output_tokens,
             "started_at":      self.started_at.isoformat() if self.started_at else None,
