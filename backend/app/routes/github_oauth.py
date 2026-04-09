@@ -40,6 +40,10 @@ GITHUB_EMAILS_URL = "https://api.github.com/user/emails"
 # - repo → read+write access to user's repos (needed for git push via HTTPS)
 DEFAULT_SCOPES = "read:user user:email repo"
 
+# In-memory mapping of state → redirect_uri so the callback exchange uses the
+# same redirect_uri that was sent to GitHub's authorize endpoint.
+_state_redirect_uris: Dict[str, str] = {}
+
 
 def _load_users() -> Dict[str, Any]:
     if _USERS_FILE.exists():
@@ -76,11 +80,15 @@ async def github_status():
 
 
 @router.get("/authorize", response_model=AuthorizeResponse)
-async def github_authorize():
+async def github_authorize(origin: Optional[str] = None):
     """Return the GitHub authorize URL + a state token.
 
     Frontend opens this URL in a popup/redirect. GitHub calls back to
     our configured redirect URL with ?code=...&state=...
+
+    If ``origin`` is provided (e.g. ``https://myhost:3001``), the redirect
+    URI is built dynamically so OAuth works from any hostname — not just
+    localhost.
     """
     if not _github_configured():
         raise HTTPException(
@@ -89,9 +97,16 @@ async def github_authorize():
                    "GITHUB_CLIENT_SECRET in .env and restart."
         )
     state = secrets.token_urlsafe(32)
+    # Build redirect URI: prefer caller-supplied origin, fall back to config
+    if origin:
+        redirect_uri = f"{origin.rstrip('/')}/auth/github/callback"
+    else:
+        redirect_uri = settings.github_oauth_redirect_url
+    # Store so the callback exchange uses the same redirect_uri
+    _state_redirect_uris[state] = redirect_uri
     params = {
         "client_id": settings.github_client_id,
-        "redirect_uri": settings.github_oauth_redirect_url,
+        "redirect_uri": redirect_uri,
         "scope": DEFAULT_SCOPES,
         "state": state,
     }
@@ -147,6 +162,11 @@ async def github_callback(body: CallbackBody):
     if not _github_configured():
         raise HTTPException(status_code=503, detail="GitHub OAuth not configured")
 
+    # Resolve the redirect_uri that was used for the authorize step
+    redirect_uri = _state_redirect_uris.pop(body.state, None) if body.state else None
+    if not redirect_uri:
+        redirect_uri = settings.github_oauth_redirect_url
+
     # 1. Exchange code for access token
     async with httpx.AsyncClient(timeout=20.0) as client:
         token_resp = await client.post(
@@ -156,7 +176,7 @@ async def github_callback(body: CallbackBody):
                 "client_id": settings.github_client_id,
                 "client_secret": settings.github_client_secret,
                 "code": body.code,
-                "redirect_uri": settings.github_oauth_redirect_url,
+                "redirect_uri": redirect_uri,
             },
         )
         if token_resp.status_code != 200:

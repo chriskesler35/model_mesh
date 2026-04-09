@@ -70,8 +70,8 @@ export default function AuthLoginPage() {
   const startOAuth = async (provider: OAuthProvider) => {
     try {
       if (provider.name === 'github') {
-        // GitHub uses its own authorize endpoint
-        const res = await fetch(`${getApiBase()}/v1/auth/github/authorize`)
+        // GitHub uses its own authorize endpoint — pass origin so redirect works remotely
+        const res = await fetch(`${getApiBase()}/v1/auth/github/authorize?origin=${encodeURIComponent(window.location.origin)}`)
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const { authorize_url, state } = await res.json()
         sessionStorage.setItem('github_oauth_state', state)
