@@ -15,10 +15,12 @@ from app.models.pipeline import Pipeline, PhaseRun
 from app.models.command_execution import CommandExecution
 from app.models.preference import Preference
 from app.models.app_settings import AppSetting
+from app.models.custom_method import CustomMethod
 
 __all__ = [
     "Base", "BaseMixin", "Provider", "Model", "Persona",
     "Conversation", "Message", "RequestLog",
     "UserProfile", "MemoryFile", "PreferenceTracking", "SystemModification",
     "Agent", "Task", "WorkbenchSession", "Pipeline", "PhaseRun", "CommandExecution",
+    "CustomMethod",
 ]
