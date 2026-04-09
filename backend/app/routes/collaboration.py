@@ -388,6 +388,49 @@ async def login(body: LoginRequest, request: Request):
     )
 
 
+class RegisterRequest(BaseModel):
+    username: str
+    display_name: str = ""
+    email: Optional[str] = None
+    password: str
+
+
+@public_router.post("/register")
+async def register(body: RegisterRequest):
+    """Self-register a new user account.
+
+    Creates a user with the 'member' role. The username must be unique
+    and the password must be at least 8 characters.
+    """
+    username = body.username.strip()
+    if not username or len(username) < 2:
+        raise HTTPException(status_code=422, detail="Username must be at least 2 characters")
+    if len(body.password) < 8:
+        raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
+
+    users = _load(_USERS_FILE)
+    if any(u.get("username") == username for u in users.values()):
+        raise HTTPException(status_code=409, detail="Username already exists")
+
+    user_id = str(uuid.uuid4())
+    users[user_id] = {
+        "id": user_id,
+        "username": username,
+        "display_name": body.display_name.strip() or username,
+        "email": body.email.strip() if body.email else None,
+        "role": "member",
+        "password_hash": _hash_password(body.password),
+        "is_active": True,
+        "created_at": _now(),
+        "last_active": None,
+    }
+    _save(_USERS_FILE, users)
+    _audit("user_registered", "user", user_id, f"User {username} self-registered")
+
+    safe_user = {k: v for k, v in users[user_id].items() if k != "password_hash"}
+    return safe_user
+
+
 @public_router.get("/me")
 async def get_current_user_info(request: Request):
     """Return the currently authenticated user.

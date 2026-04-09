@@ -77,7 +77,7 @@ export default function GitHubCallbackPage() {
           {message}
         </p>
         {status === 'error' && (
-          <a href="/login" className="inline-block mt-4 px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium rounded-lg">
+          <a href="/auth/login" className="inline-block mt-4 px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium rounded-lg">
             Try again
           </a>
         )}

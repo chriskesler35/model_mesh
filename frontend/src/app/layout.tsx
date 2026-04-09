@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import './globals.css'
 import ToastProvider from './ToastProvider'
+import { AuthProvider } from '@/contexts/AuthContext'
 
 export const metadata: Metadata = {
   title: 'DevForgeAI | Intelligent Development Platform',
@@ -31,9 +32,11 @@ export default function RootLayout({
   return (
     <html lang="en" className="h-full">
       <body className="bg-gray-50 dark:bg-gray-900 h-full overflow-hidden">
-        <ToastProvider>
-          {children}
-        </ToastProvider>
+        <AuthProvider>
+          <ToastProvider>
+            {children}
+          </ToastProvider>
+        </AuthProvider>
       </body>
     </html>
   )

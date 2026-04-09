@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useState, useEffect } from 'react'
+import { useAuth } from '@/contexts/AuthContext'
 
 const NAV_ITEMS = [
   { href: '/',                label: 'Dashboard',  icon: '◈' },
@@ -68,34 +69,18 @@ interface CurrentUser {
   display_name: string
   role: string
   auth_method: string
+  avatar_url?: string
 }
 
 function UserMenu({ collapsed }: { collapsed: boolean }) {
-  const [user, setUser] = useState<CurrentUser | null>(null)
+  const { user, logout } = useAuth()
 
-  useEffect(() => {
-    // Try to read cached user from localStorage first
-    const cached = localStorage.getItem('devforge_user')
-    if (cached) {
-      try { setUser(JSON.parse(cached)) } catch {}
-    }
-    // Then verify with /v1/auth/me
-    const { getApiBase, getAuthToken } = require('@/lib/config')
-    fetch(`${getApiBase()}/v1/auth/me`, {
-      headers: { 'Authorization': `Bearer ${getAuthToken()}` }
-    })
-      .then(r => r.ok ? r.json() : null)
-      .then(u => { if (u) { setUser(u); localStorage.setItem('devforge_user', JSON.stringify(u)) } })
-      .catch(() => {})
-  }, [])
-
-  const logout = () => {
-    localStorage.removeItem('devforge_auth_token')
-    localStorage.removeItem('devforge_user')
-    window.location.href = '/login'
+  const handleLogout = async () => {
+    await logout()
+    window.location.href = '/auth/login'
   }
 
-  const goToLogin = () => { window.location.href = '/login' }
+  const goToLogin = () => { window.location.href = '/auth/login' }
 
   if (!user) return null
 
@@ -107,9 +92,13 @@ function UserMenu({ collapsed }: { collapsed: boolean }) {
       title={collapsed ? `${user.display_name} (${user.role})` : undefined}
       className="flex items-center gap-2 w-full px-3 py-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
     >
-      <div className="w-6 h-6 rounded-full bg-gradient-to-br from-orange-400 to-red-500 flex items-center justify-center text-white font-bold text-xs flex-shrink-0">
-        {initial}
-      </div>
+      {user.avatar_url ? (
+        <img src={user.avatar_url} alt="" className="w-6 h-6 rounded-full flex-shrink-0" />
+      ) : (
+        <div className="w-6 h-6 rounded-full bg-gradient-to-br from-orange-400 to-red-500 flex items-center justify-center text-white font-bold text-xs flex-shrink-0">
+          {initial}
+        </div>
+      )}
       {!collapsed && (
         <>
           <div className="flex-1 min-w-0">
@@ -121,7 +110,7 @@ function UserMenu({ collapsed }: { collapsed: boolean }) {
               title="Sign in as a user"
               className="text-[10px] text-indigo-500 hover:text-indigo-700">Sign in</button>
           ) : (
-            <button onClick={logout}
+            <button onClick={handleLogout}
               title="Sign out"
               className="text-[10px] text-gray-400 hover:text-red-500">⎋</button>
           )}
