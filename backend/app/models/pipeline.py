@@ -23,6 +23,9 @@ class Pipeline(Base):
     current_phase_index = Column(Integer, default=0, nullable=False)
     status              = Column(String(30), default="pending")    # pending, running, awaiting_approval, completed, failed, cancelled
     auto_approve        = Column(Boolean, default=False, nullable=False)
+    approvers           = Column(JSON, nullable=True)              # list of user IDs who can approve phases
+    approval_policy     = Column(String(20), default="any")        # 'any', 'majority', 'all'
+    created_by          = Column(String(100), nullable=True)       # user ID of pipeline creator
     initial_task        = Column(Text, nullable=False)
     created_at          = Column(DateTime, server_default=func.now())
     completed_at        = Column(DateTime, nullable=True)
@@ -36,6 +39,9 @@ class Pipeline(Base):
             "current_phase_index": self.current_phase_index,
             "status":              self.status,
             "auto_approve":        self.auto_approve,
+            "approvers":           self.approvers or [],
+            "approval_policy":     self.approval_policy or "any",
+            "created_by":          self.created_by,
             "initial_task":        self.initial_task,
             "created_at":          self.created_at.isoformat() if self.created_at else None,
             "completed_at":        self.completed_at.isoformat() if self.completed_at else None,
@@ -57,6 +63,7 @@ class PhaseRun(Base):
     output_artifact = Column(JSON, nullable=True)                # structured output of this phase
     raw_response    = Column(Text, nullable=True)                # full LLM response text
     user_feedback   = Column(Text, nullable=True)                # feedback when rejected
+    approvals       = Column(JSON, nullable=True)                # [{user_id, action, timestamp}] for multi-approver
     retry_count     = Column(Integer, default=0, nullable=False) # how many times this phase has been retried with feedback
     max_retries     = Column(Integer, default=0, nullable=False) # max auto-retries allowed (from phase template)
     input_tokens    = Column(Integer, nullable=True)
@@ -78,6 +85,7 @@ class PhaseRun(Base):
             "output_artifact": self.output_artifact,
             "raw_response":    self.raw_response,
             "user_feedback":   self.user_feedback,
+            "approvals":       self.approvals or [],
             "retry_count":     self.retry_count or 0,
             "max_retries":     self.max_retries or 0,
             "input_tokens":    self.input_tokens,

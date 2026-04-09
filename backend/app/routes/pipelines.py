@@ -48,10 +48,13 @@ class PipelineCreate(BaseModel):
     task: str
     auto_approve: bool = False
     model_overrides: Optional[Dict[str, str]] = None   # {phase_name: model_id}
+    approvers: Optional[List[str]] = None              # list of user IDs
+    approval_policy: Optional[str] = "any"             # 'any', 'majority', 'all'
 
 
 class PipelineApprove(BaseModel):
     feedback: Optional[str] = None
+    user_id: Optional[str] = None              # approver user ID (optional, falls back to request user)
 
 
 class PipelineReject(BaseModel):
@@ -103,6 +106,82 @@ async def _db_update_phase(phase_run_id: str, **kwargs):
                 await db.commit()
     except Exception as e:
         logger.warning(f"PhaseRun DB update failed for {phase_run_id}: {e}")
+
+
+async def _notify_approvers(pipeline_id: str, phase_index: int, phase_name: str):
+    """Send notifications + WebSocket alerts to all pipeline approvers when a phase needs approval."""
+    from app.models.pipeline import Pipeline
+    from app.models.notification import Notification
+    from app.services.ws_manager import manager
+
+    try:
+        async with AsyncSessionLocal() as db:
+            p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
+            if not p:
+                return
+
+            approvers = p.approvers or []
+            if not approvers:
+                # Fallback to pipeline creator
+                approvers = [p.created_by] if p.created_by else ["owner"]
+
+            for user_id in approvers:
+                notif = Notification(
+                    user_id=user_id,
+                    type="pipeline_approval",
+                    title=f"Approval needed: {phase_name}",
+                    message=f"Phase '{phase_name}' in pipeline is awaiting your approval.",
+                    conversation_id=pipeline_id,
+                )
+                db.add(notif)
+
+                # Real-time WebSocket push
+                try:
+                    await manager.send_to_user(user_id, {
+                        "type": "pipeline_approval_needed",
+                        "payload": {
+                            "pipeline_id": pipeline_id,
+                            "phase_index": phase_index,
+                            "phase_name": phase_name,
+                            "approval_policy": p.approval_policy or "any",
+                        },
+                    })
+                except Exception as ws_err:
+                    logger.debug(f"WebSocket notify failed for {user_id}: {ws_err}")
+
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to notify approvers for pipeline {pipeline_id}: {e}")
+
+
+def _check_approval_threshold(approvals: list, approvers: list, policy: str) -> str:
+    """Check if approval threshold is met based on policy.
+
+    Returns: 'approved', 'rejected', or 'pending'.
+    Any single rejection immediately rejects regardless of policy.
+    """
+    if not approvals:
+        return "pending"
+
+    approve_count = sum(1 for a in approvals if a.get("action") == "approve")
+    reject_count = sum(1 for a in approvals if a.get("action") == "reject")
+
+    # Any rejection immediately rejects
+    if reject_count > 0:
+        return "rejected"
+
+    total_approvers = max(len(approvers), 1)
+
+    if policy == "any":
+        return "approved" if approve_count >= 1 else "pending"
+    elif policy == "majority":
+        needed = (total_approvers // 2) + 1
+        return "approved" if approve_count >= needed else "pending"
+    elif policy == "all":
+        return "approved" if approve_count >= total_approvers else "pending"
+
+    # Default to 'any'
+    return "approved" if approve_count >= 1 else "pending"
 
 
 # ─── Artifact extractors ──────────────────────────────────────────────────────
@@ -977,6 +1056,8 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
             await _db_update_pipeline(pipeline_id, status="awaiting_approval")
             _push(pipeline_id, "awaiting_approval", phase_index=phase_index,
                   message=f"Phase '{phase_name}' complete — awaiting your approval.")
+            # Notify approvers (collaborative approval from E8.5)
+            await _notify_approvers(pipeline_id, phase_index, phase_name)
 
 
 async def _advance_to_next(pipeline_id: str, _current_index: int = -1):
@@ -1292,7 +1373,7 @@ async def preview_phases(method_id: str):
 
 
 @router.post("", dependencies=[Depends(verify_api_key)])
-async def create_pipeline(body: PipelineCreate, db: AsyncSession = Depends(get_db)):
+async def create_pipeline(body: PipelineCreate, request: Request, db: AsyncSession = Depends(get_db)):
     """Create and start a multi-agent pipeline attached to a workbench session."""
     from app.models.pipeline import Pipeline
     from app.models.workbench import WorkbenchSession
@@ -1375,6 +1456,15 @@ async def create_pipeline(body: PipelineCreate, db: AsyncSession = Depends(get_d
             existing = phase.get("system_prompt", "")
             phase["system_prompt"] = f"{existing}\n\n---\n\n# Additional method instructions (from stack)\n{stacked_prompt}"
 
+    # Determine creator user ID
+    user = getattr(request.state, "user", None)
+    creator_id = user.get("id", "owner") if user else "owner"
+
+    # Validate approval_policy
+    policy = (body.approval_policy or "any").lower()
+    if policy not in ("any", "majority", "all"):
+        raise HTTPException(status_code=400, detail=f"Invalid approval_policy '{policy}'. Must be 'any', 'majority', or 'all'.")
+
     # Create Pipeline row
     pipeline_id = str(uuid.uuid4())
     pipeline = Pipeline(
@@ -1385,6 +1475,9 @@ async def create_pipeline(body: PipelineCreate, db: AsyncSession = Depends(get_d
         current_phase_index=0,
         status="pending",
         auto_approve=body.auto_approve,
+        approvers=body.approvers or [],
+        approval_policy=policy,
+        created_by=creator_id,
         initial_task=body.task,
     )
     db.add(pipeline)
@@ -1439,21 +1532,30 @@ async def get_pipeline(pipeline_id: str, db: AsyncSession = Depends(get_db)):
 async def approve_phase(
     pipeline_id: str,
     body: PipelineApprove,
+    request: Request,
     phase_index: Optional[int] = None,
     phase_run_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """Approve a phase and advance the pipeline.
+    """Approve a phase — supports multi-approver collaborative approval.
 
+    Records the individual approval gesture. If the approval threshold
+    (based on pipeline's approval_policy) is met, advances the pipeline.
     With parallel execution multiple phases may be awaiting approval
     simultaneously.  Use ``phase_index`` or ``phase_run_id`` query params to
     target a specific phase; if omitted, falls back to the first
     awaiting_approval run found (backward-compat).
     """
     from app.models.pipeline import Pipeline, PhaseRun
+    from app.services.ws_manager import manager
+
     p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Pipeline not found")
+
+    # Resolve approver user ID
+    user = getattr(request.state, "user", None)
+    approver_id = body.user_id or (user.get("id", "owner") if user else "owner")
 
     # Build query for the awaiting_approval PhaseRun
     q = (
@@ -1475,36 +1577,99 @@ async def approve_phase(
         raise HTTPException(status_code=404, detail="No phase awaiting approval")
 
     approved_index = pr.phase_index
-    pr.status = "approved"
-    if body.feedback:
-        pr.user_feedback = body.feedback
-    await db.commit()
 
-    _push(pipeline_id, "phase_approved", phase_index=approved_index, feedback=body.feedback)
+    # Get approvers list and policy
+    approvers = p.approvers or []
+    policy = p.approval_policy or "any"
 
-    # Advance — launch any phases whose deps are now met
-    await _advance_to_next(pipeline_id)
+    # Record individual approval
+    current_approvals = list(pr.approvals or [])
 
-    return {"ok": True, "approved_phase": approved_index}
+    # Prevent duplicate votes
+    already_voted = any(a["user_id"] == approver_id for a in current_approvals)
+    if already_voted:
+        raise HTTPException(status_code=409, detail=f"User '{approver_id}' has already voted on this phase")
+
+    current_approvals.append({
+        "user_id": approver_id,
+        "action": "approve",
+        "feedback": body.feedback,
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    pr.approvals = current_approvals
+
+    # Push WebSocket event for real-time approval tracking
+    _push(pipeline_id, "phase_approval_update",
+          phase_index=approved_index,
+          approver=approver_id,
+          action="approve",
+          approvals=current_approvals,
+          feedback=body.feedback)
+
+    try:
+        await manager.broadcast_to_channel(f"pipeline:{pipeline_id}", {
+            "type": "pipeline_approval_update",
+            "payload": {
+                "pipeline_id": pipeline_id,
+                "phase_index": approved_index,
+                "approver": approver_id,
+                "action": "approve",
+                "approvals": current_approvals,
+            },
+        })
+    except Exception as ws_err:
+        logger.debug(f"WebSocket broadcast for approval failed: {ws_err}")
+
+    # Check threshold
+    effective_approvers = approvers if approvers else [p.created_by or "owner"]
+    threshold_result = _check_approval_threshold(current_approvals, effective_approvers, policy)
+
+    if threshold_result == "approved":
+        pr.status = "approved"
+        if body.feedback:
+            pr.user_feedback = body.feedback
+        await db.commit()
+
+        _push(pipeline_id, "phase_approved", phase_index=approved_index, feedback=body.feedback)
+        await _advance_to_next(pipeline_id)
+
+        return {"ok": True, "approved_phase": approved_index, "threshold_met": True,
+                "approvals": current_approvals, "policy": policy}
+    else:
+        # Threshold not yet met — save and wait for more approvals
+        await db.commit()
+        return {"ok": True, "approved_phase": approved_index, "threshold_met": False,
+                "approvals": current_approvals, "policy": policy,
+                "pending_approvers": [uid for uid in effective_approvers
+                                       if not any(a["user_id"] == uid for a in current_approvals)]}
 
 
 @router.post("/{pipeline_id}/reject", dependencies=[Depends(verify_api_key)])
 async def reject_phase(
     pipeline_id: str,
     body: PipelineReject,
+    request: Request,
     phase_index: Optional[int] = None,
     phase_run_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
     """Reject a phase with feedback — re-runs the same phase.
 
+    Records the individual rejection in the approvals list. Any single
+    rejection immediately rejects the phase.
     Supports ``phase_index`` or ``phase_run_id`` query params to target a
     specific phase when multiple are awaiting approval in parallel.
     """
     from app.models.pipeline import Pipeline, PhaseRun
+    from app.services.ws_manager import manager
+
     p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Pipeline not found")
+
+    # Resolve rejector user ID
+    user = getattr(request.state, "user", None)
+    rejector_id = user.get("id", "owner") if user else "owner"
 
     q = (
         select(PhaseRun)
@@ -1524,11 +1689,37 @@ async def reject_phase(
         raise HTTPException(status_code=404, detail="No phase awaiting approval")
 
     rejected_index = pr.phase_index
+
+    # Record individual rejection in approvals list
+    current_approvals = list(pr.approvals or [])
+    current_approvals.append({
+        "user_id": rejector_id,
+        "action": "reject",
+        "feedback": body.feedback,
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    pr.approvals = current_approvals
     pr.status = "rejected"
     pr.user_feedback = body.feedback
     await db.commit()
 
-    _push(pipeline_id, "phase_rejected", phase_index=rejected_index, feedback=body.feedback)
+    _push(pipeline_id, "phase_rejected", phase_index=rejected_index, feedback=body.feedback,
+          rejector=rejector_id, approvals=current_approvals)
+
+    # Push WebSocket event
+    try:
+        await manager.broadcast_to_channel(f"pipeline:{pipeline_id}", {
+            "type": "pipeline_approval_update",
+            "payload": {
+                "pipeline_id": pipeline_id,
+                "phase_index": rejected_index,
+                "approver": rejector_id,
+                "action": "reject",
+                "approvals": current_approvals,
+            },
+        })
+    except Exception as ws_err:
+        logger.debug(f"WebSocket broadcast for rejection failed: {ws_err}")
 
     # Bake the rejection feedback into the phase's system prompt for the re-run
     try:
@@ -1596,6 +1787,52 @@ async def skip_phase(
 
     await _advance_to_next(pipeline_id)
     return {"ok": True, "skipped_phase": skipped_index}
+
+
+@router.get("/{pipeline_id}/approvals", dependencies=[Depends(verify_api_key)])
+async def get_approval_status(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Show approval status for each phase — who approved, who is pending."""
+    from app.models.pipeline import Pipeline, PhaseRun
+
+    p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
+    if not p:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+
+    runs = (await db.execute(
+        select(PhaseRun)
+        .where(PhaseRun.pipeline_id == pipeline_id)
+        .order_by(PhaseRun.phase_index, PhaseRun.created_at)
+    )).scalars().all()
+
+    approvers = p.approvers or []
+    effective_approvers = approvers if approvers else [p.created_by or "owner"]
+    policy = p.approval_policy or "any"
+
+    phases_status = []
+    for run in runs:
+        run_approvals = run.approvals or []
+        voted_users = {a["user_id"] for a in run_approvals}
+        pending_users = [uid for uid in effective_approvers if uid not in voted_users]
+
+        phases_status.append({
+            "phase_index": run.phase_index,
+            "phase_name": run.phase_name,
+            "phase_run_id": run.id,
+            "status": run.status,
+            "approvals": run_approvals,
+            "pending_approvers": pending_users if run.status == "awaiting_approval" else [],
+            "threshold_met": run.status == "approved",
+        })
+
+    return {
+        "pipeline_id": pipeline_id,
+        "approval_policy": policy,
+        "approvers": effective_approvers,
+        "phases": phases_status,
+    }
 
 
 @router.post("/{pipeline_id}/retry", dependencies=[Depends(verify_api_key)])
