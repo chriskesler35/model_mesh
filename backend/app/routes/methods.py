@@ -2,10 +2,12 @@
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
@@ -192,6 +194,19 @@ class StackUpdate(BaseModel):
 class MethodSettingsUpdate(BaseModel):
     settings: Dict[str, Any]
 
+class MethodImportPayload(BaseModel):
+    """Schema for the inner 'method' object in an import request."""
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    phases: List[Dict[str, Any]]
+    trigger_keywords: Optional[List[str]] = None
+    category: Optional[str] = None
+
+class MethodImportRequest(BaseModel):
+    """Top-level import request body."""
+    version: str
+    method: MethodImportPayload
+
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 @router.get("/")
@@ -344,6 +359,67 @@ async def clear_stack():
     state["active_method"] = "standard"
     _save_state(state)
     return {"ok": True, "active_stack": []}
+
+
+# ─── Import / Export ──────────────────────────────────────────────────────────
+
+@router.get("/custom/{method_id}/export")
+async def export_custom_method(method_id: str, db: AsyncSession = Depends(get_db)):
+    """Export a custom method as downloadable JSON."""
+    result = await db.execute(
+        select(CustomMethod).where(CustomMethod.id == method_id)
+    )
+    cm = result.scalar_one_or_none()
+    if not cm:
+        raise HTTPException(status_code=404, detail="Custom method not found")
+
+    export_data = {
+        "version": "1.0",
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "method": {
+            "name": cm.name,
+            "description": cm.description,
+            "phases": cm.phases or [],
+            "trigger_keywords": cm.trigger_keywords or [],
+            "category": "custom",
+        },
+    }
+    filename = cm.name.replace(" ", "_").lower() + ".json"
+    return JSONResponse(
+        content=export_data,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/custom/import")
+async def import_custom_method(body: MethodImportRequest, db: AsyncSession = Depends(get_db)):
+    """Import a custom method from JSON. Warns if a method with the same name exists."""
+    method_data = body.method
+
+    # Duplicate detection
+    existing = await db.execute(
+        select(CustomMethod).where(CustomMethod.name == method_data.name)
+    )
+    duplicate = existing.scalar_one_or_none()
+    warning = None
+    if duplicate:
+        warning = f"A method named '{method_data.name}' already exists (id={duplicate.id}). A new copy was created."
+
+    new_method = CustomMethod(
+        name=method_data.name if not duplicate else f"{method_data.name} (imported)",
+        description=method_data.description,
+        phases=method_data.phases,
+        trigger_keywords=method_data.trigger_keywords or [],
+        is_active=True,
+    )
+    db.add(new_method)
+    await db.commit()
+    await db.refresh(new_method)
+
+    result = {"ok": True, "method": new_method.to_dict()}
+    if warning:
+        result["warning"] = warning
+    return result
 
 
 @router.get("/{method_id}")
