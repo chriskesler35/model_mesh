@@ -537,6 +537,205 @@ function InlineImage({ src, meta }: { src: string; meta?: Message['image_meta'] 
   )
 }
 
+// ─── TTS Speaker Button ──────────────────────────────────────────────────────
+const TTS_VOICES = [
+  { id: 'alloy', name: 'Alloy' },
+  { id: 'echo', name: 'Echo' },
+  { id: 'nova', name: 'Nova' },
+] as const
+
+function SpeakerButton({ text }: { text: string }) {
+  const [status, setStatus] = useState<'idle' | 'loading' | 'playing' | 'paused'>('idle')
+  const [voice, setVoice] = useState('alloy')
+  const [showVoiceMenu, setShowVoiceMenu] = useState(false)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const blobUrlRef = useRef<string | null>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  // Close voice menu on outside click
+  useEffect(() => {
+    const close = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setShowVoiceMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [])
+
+  // Cleanup audio on unmount
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause()
+        audioRef.current = null
+      }
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current)
+        blobUrlRef.current = null
+      }
+    }
+  }, [])
+
+  const handlePlay = async () => {
+    if (status === 'playing') {
+      audioRef.current?.pause()
+      setStatus('paused')
+      return
+    }
+
+    if (status === 'paused' && audioRef.current) {
+      audioRef.current.play()
+      setStatus('playing')
+      return
+    }
+
+    // Stop any previous playback
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current = null
+    }
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current)
+      blobUrlRef.current = null
+    }
+
+    setStatus('loading')
+    try {
+      const resp = await fetch(`${API_BASE}/v1/audio/synthesize`, {
+        method: 'POST',
+        headers: { ...AUTH_HEADERS, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text.slice(0, 4096), voice }),
+      })
+      if (!resp.ok) {
+        setStatus('idle')
+        return
+      }
+      const blob = await resp.blob()
+      const url = URL.createObjectURL(blob)
+      blobUrlRef.current = url
+      const audio = new Audio(url)
+      audioRef.current = audio
+
+      audio.onended = () => {
+        setStatus('idle')
+        if (blobUrlRef.current) {
+          URL.revokeObjectURL(blobUrlRef.current)
+          blobUrlRef.current = null
+        }
+      }
+      audio.onerror = () => {
+        setStatus('idle')
+        if (blobUrlRef.current) {
+          URL.revokeObjectURL(blobUrlRef.current)
+          blobUrlRef.current = null
+        }
+      }
+
+      await audio.play()
+      setStatus('playing')
+    } catch {
+      setStatus('idle')
+    }
+  }
+
+  const handleStop = () => {
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current.currentTime = 0
+      audioRef.current = null
+    }
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current)
+      blobUrlRef.current = null
+    }
+    setStatus('idle')
+  }
+
+  return (
+    <span className="inline-flex items-center gap-0.5 relative" ref={menuRef}>
+      {/* Main play/pause/stop button */}
+      <button
+        onClick={handlePlay}
+        disabled={status === 'loading'}
+        className={`text-xs transition-opacity ${
+          status === 'idle'
+            ? 'opacity-0 group-hover:opacity-100 text-gray-400 hover:text-gray-600'
+            : status === 'loading'
+            ? 'opacity-100 text-gray-400'
+            : 'opacity-100 text-orange-500 hover:text-orange-600'
+        }`}
+        title={status === 'playing' ? 'Pause' : status === 'paused' ? 'Resume' : 'Listen'}
+      >
+        {status === 'loading' ? (
+          <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+        ) : status === 'playing' ? (
+          <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+            <rect x="6" y="4" width="4" height="16" rx="1" />
+            <rect x="14" y="4" width="4" height="16" rx="1" />
+          </svg>
+        ) : status === 'paused' ? (
+          <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M8 5v14l11-7z" />
+          </svg>
+        ) : (
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15.536 8.464a5 5 0 010 7.072M17.95 6.05a8 8 0 010 11.9M11 5L6 9H2v6h4l5 4V5z" />
+          </svg>
+        )}
+      </button>
+
+      {/* Stop button (visible during playing/paused) */}
+      {(status === 'playing' || status === 'paused') && (
+        <button
+          onClick={handleStop}
+          className="text-xs text-gray-400 hover:text-red-500 transition-colors"
+          title="Stop"
+        >
+          <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+            <rect x="6" y="6" width="12" height="12" rx="1" />
+          </svg>
+        </button>
+      )}
+
+      {/* Voice selector toggle */}
+      <button
+        onClick={() => setShowVoiceMenu(!showVoiceMenu)}
+        className={`text-xs transition-opacity ${
+          status === 'idle'
+            ? 'opacity-0 group-hover:opacity-100 text-gray-400 hover:text-gray-600'
+            : 'opacity-100 text-gray-400 hover:text-gray-600'
+        }`}
+        title="Change voice"
+      >
+        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {/* Voice dropdown */}
+      {showVoiceMenu && (
+        <div className="absolute bottom-full left-0 mb-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-1 z-10 min-w-[100px]">
+          {TTS_VOICES.map(v => (
+            <button
+              key={v.id}
+              onClick={() => { setVoice(v.id); setShowVoiceMenu(false) }}
+              className={`block w-full text-left px-3 py-1 text-xs hover:bg-gray-100 dark:hover:bg-gray-700 ${
+                voice === v.id ? 'text-orange-500 font-medium' : 'text-gray-600 dark:text-gray-300'
+              }`}
+            >
+              {v.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
+  )
+}
+
 // ─── Message bubble ───────────────────────────────────────────────────────────
 function MessageBubble({ msg, conversationId }: { msg: Message; conversationId?: string | null }) {
   const [copied, setCopied] = useState(false)
@@ -688,6 +887,9 @@ function MessageBubble({ msg, conversationId }: { msg: Message; conversationId?:
                 <span className="text-xs text-gray-400 ml-1">Thanks!</span>
               )}
             </div>
+          {/* TTS listen button — assistant messages only, not while streaming */}
+          {!isUser && !msg.streaming && msg.content && (
+            <SpeakerButton text={msg.content} />
           )}
         </div>
 
