@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { getApiBase, getAuthToken } from '@/lib/config'
+import { useToast } from '@/app/ToastProvider'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -64,6 +65,12 @@ const TYPE_COLORS: Record<string, string> = {
 }
 
 // ---------------------------------------------------------------------------
+// Node geometry constants (must match Tailwind classes on node cards)
+// ---------------------------------------------------------------------------
+const NODE_W = 176 // w-44
+const NODE_H = 68
+
+// ---------------------------------------------------------------------------
 // Page component
 // ---------------------------------------------------------------------------
 export default function WorkflowBuilderPage() {
@@ -86,6 +93,11 @@ export default function WorkflowBuilderPage() {
   // Palette state
   const [paletteSearch, setPaletteSearch] = useState('')
   const [customAgents, setCustomAgents] = useState<CustomAgent[]>([])
+  const [selectedEdge, setSelectedEdge] = useState<string | null>(null)
+  const [handleDragSource, setHandleDragSource] = useState<string | null>(null)
+  const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null)
+
+  const { addToast } = useToast()
 
   const apiHeaders = useCallback(() => ({
     'Content-Type': 'application/json',
@@ -133,6 +145,53 @@ export default function WorkflowBuilderPage() {
         (a.description ?? '').toLowerCase().includes(q),
     )
   }, [paletteSearch, customAgents])
+
+  // ------ DAG cycle detection (DFS) --------------------------------------
+  const wouldCreateCycle = useCallback(
+    (source: string, target: string): boolean => {
+      // Adding source→target: walk forward from target; if we reach source it's a cycle
+      const visited = new Set<string>()
+      const stack = [target]
+      while (stack.length > 0) {
+        const current = stack.pop()!
+        if (current === source) return true
+        if (visited.has(current)) continue
+        visited.add(current)
+        for (const edge of edges) {
+          if (edge.source === current) stack.push(edge.target)
+        }
+      }
+      return false
+    },
+    [edges],
+  )
+
+  // ------ Connect two nodes (with cycle + duplicate guard) ---------------
+  const connectNodes = useCallback(
+    (source: string, target: string) => {
+      if (source === target) return
+      // Duplicate check
+      const exists = edges.some((e) => e.source === source && e.target === target)
+      if (exists) return
+      // Cycle check
+      if (wouldCreateCycle(source, target)) {
+        addToast({
+          type: 'error',
+          title: 'Circular dependency',
+          message: 'Adding this connection would create a cycle. Workflows must be directed acyclic graphs (DAGs).',
+          autoClose: 5000,
+        })
+        return
+      }
+      const newEdge: WorkflowEdge = {
+        id: `edge-${source}-${target}`,
+        source,
+        target,
+      }
+      setEdges((prev) => [...prev, newEdge])
+    },
+    [edges, wouldCreateCycle, addToast],
+  )
 
   const handleSave = useCallback(async () => {
     if (!workflowName.trim()) { setSaveError('Name is required'); return }
@@ -255,21 +314,17 @@ export default function WorkflowBuilderPage() {
   const handleNodeClick = useCallback(
     (nodeId: string, e: React.MouseEvent) => {
       if (e.shiftKey && edgeSource && edgeSource !== nodeId) {
-        const newEdge: WorkflowEdge = {
-          id: `edge-${edgeSource}-${nodeId}`,
-          source: edgeSource,
-          target: nodeId,
-        }
-        setEdges((prev) => [...prev, newEdge])
+        connectNodes(edgeSource, nodeId)
         setEdgeSource(null)
       } else if (e.shiftKey) {
         setEdgeSource(nodeId)
       } else {
         setSelectedNode(nodes.find((n) => n.id === nodeId) || null)
         setEdgeSource(null)
+        setSelectedEdge(null)
       }
     },
-    [edgeSource, nodes],
+    [edgeSource, nodes, connectNodes],
   )
 
   // ------ Toolbar actions -------------------------------------------------
@@ -288,6 +343,72 @@ export default function WorkflowBuilderPage() {
     )
     if (selectedNode?.id === nodeId) setSelectedNode(null)
   }
+
+  // ------ Handle-based edge dragging ------------------------------------
+  const handleOutputHandleMouseDown = useCallback(
+    (nodeId: string, e: React.MouseEvent) => {
+      e.stopPropagation()
+      e.preventDefault()
+      setHandleDragSource(nodeId)
+      setSelectedEdge(null)
+    },
+    [],
+  )
+
+  useEffect(() => {
+    if (!handleDragSource) return
+    const onMouseMove = (e: MouseEvent) => {
+      if (!canvasRef.current) return
+      const rect = canvasRef.current.getBoundingClientRect()
+      setMousePos({ x: e.clientX - rect.left, y: e.clientY - rect.top })
+    }
+    const onMouseUp = () => {
+      setHandleDragSource(null)
+      setMousePos(null)
+    }
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+    }
+  }, [handleDragSource])
+
+  const handleInputHandleMouseUp = useCallback(
+    (nodeId: string, e: React.MouseEvent) => {
+      e.stopPropagation()
+      if (handleDragSource && handleDragSource !== nodeId) {
+        connectNodes(handleDragSource, nodeId)
+      }
+      setHandleDragSource(null)
+      setMousePos(null)
+    },
+    [handleDragSource, connectNodes],
+  )
+
+  // ------ Delete selected edge via keyboard -----------------------------
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedEdge) {
+        const tag = (e.target as HTMLElement)?.tagName
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+        setEdges((prev) => prev.filter((edge) => edge.id !== selectedEdge))
+        setSelectedEdge(null)
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [selectedEdge])
+
+  // ------ Edge click handler --------------------------------------------
+  const handleEdgeClick = useCallback(
+    (edgeId: string, e: React.MouseEvent) => {
+      e.stopPropagation()
+      setSelectedEdge(edgeId)
+      setSelectedNode(null)
+    },
+    [],
+  )
 
   // ------ Node config helpers --------------------------------------------
   const updateNodeField = <K extends keyof WorkflowNode>(
@@ -432,8 +553,8 @@ export default function WorkflowBuilderPage() {
           )}
           <div className="mt-4 pt-3 border-t border-zinc-800">
             <p className="text-xs text-zinc-600">
-              Drag agents onto the canvas. Shift+click two nodes to connect
-              them.
+              Drag agents onto the canvas. Drag between handles or Shift+click
+              two nodes to connect them. Click an edge &amp; press Delete to remove.
             </p>
           </div>
         </div>
@@ -449,6 +570,8 @@ export default function WorkflowBuilderPage() {
           onClick={() => {
             setSelectedNode(null)
             setEdgeSource(null)
+            setSelectedEdge(null)
+            setHandleDragSource(null)
           }}
         >
           {/* Dot-grid background */}
@@ -470,7 +593,7 @@ export default function WorkflowBuilderPage() {
                   Drag agents from the left to start building your workflow
                 </div>
                 <div className="text-sm mt-1">
-                  Shift+click two nodes to create a connection
+                  Drag between node handles or Shift+click to connect
                 </div>
               </div>
             </div>
@@ -478,8 +601,8 @@ export default function WorkflowBuilderPage() {
 
           {/* SVG layer for edges */}
           <svg
-            className="absolute inset-0 w-full h-full pointer-events-none"
-            style={{ zIndex: 1 }}
+            className="absolute inset-0 w-full h-full"
+            style={{ zIndex: 1, pointerEvents: 'none' }}
           >
             <defs>
               <marker
@@ -492,25 +615,84 @@ export default function WorkflowBuilderPage() {
               >
                 <polygon points="0 0, 10 3.5, 0 7" fill="#3b82f6" />
               </marker>
+              <marker
+                id="arrowhead-selected"
+                markerWidth="10"
+                markerHeight="7"
+                refX="10"
+                refY="3.5"
+                orient="auto"
+              >
+                <polygon points="0 0, 10 3.5, 0 7" fill="#f59e0b" />
+              </marker>
             </defs>
             {edges.map((edge) => {
               const source = nodes.find((n) => n.id === edge.source)
               const target = nodes.find((n) => n.id === edge.target)
               if (!source || !target) return null
-              // Center the endpoints on the node cards (node width=160, height~60)
+              const x1 = source.x + NODE_W / 2
+              const y1 = source.y + NODE_H
+              const x2 = target.x + NODE_W / 2
+              const y2 = target.y
+              const dy = Math.abs(y2 - y1)
+              const cp = Math.max(50, dy * 0.5)
+              const d = `M ${x1},${y1} C ${x1},${y1 + cp} ${x2},${y2 - cp} ${x2},${y2}`
+              const isSel = selectedEdge === edge.id
               return (
-                <line
-                  key={edge.id}
-                  x1={source.x + 80}
-                  y1={source.y + 30}
-                  x2={target.x + 80}
-                  y2={target.y + 30}
-                  stroke="#3b82f6"
-                  strokeWidth={2}
-                  markerEnd="url(#arrowhead)"
-                />
+                <g key={edge.id} style={{ pointerEvents: 'auto' }}>
+                  {/* Wide invisible hit-area for click detection */}
+                  <path
+                    d={d}
+                    stroke="transparent"
+                    strokeWidth={14}
+                    fill="none"
+                    className="cursor-pointer"
+                    onClick={(e) => handleEdgeClick(edge.id, e)}
+                  />
+                  {/* Visible edge */}
+                  <path
+                    d={d}
+                    stroke={isSel ? '#f59e0b' : '#3b82f6'}
+                    strokeWidth={isSel ? 2.5 : 2}
+                    fill="none"
+                    markerEnd={isSel ? 'url(#arrowhead-selected)' : 'url(#arrowhead)'}
+                    strokeDasharray="8 4"
+                    className="pointer-events-none"
+                  >
+                    <animate
+                      attributeName="stroke-dashoffset"
+                      from="12"
+                      to="0"
+                      dur={isSel ? '0.6s' : '1s'}
+                      repeatCount="indefinite"
+                    />
+                  </path>
+                </g>
               )
             })}
+            {/* In-progress drag edge */}
+            {handleDragSource && mousePos && (() => {
+              const src = nodes.find((n) => n.id === handleDragSource)
+              if (!src) return null
+              const x1 = src.x + NODE_W / 2
+              const y1 = src.y + NODE_H
+              const x2 = mousePos.x
+              const y2 = mousePos.y
+              const dy = Math.abs(y2 - y1)
+              const cp = Math.max(50, dy * 0.5)
+              const d = `M ${x1},${y1} C ${x1},${y1 + cp} ${x2},${y2 - cp} ${x2},${y2}`
+              return (
+                <path
+                  d={d}
+                  stroke="#3b82f6"
+                  strokeWidth={2}
+                  fill="none"
+                  strokeDasharray="6 3"
+                  opacity={0.6}
+                  className="pointer-events-none"
+                />
+              )
+            })()}
           </svg>
 
           {/* Node cards */}
@@ -536,6 +718,16 @@ export default function WorkflowBuilderPage() {
                   handleNodeClick(node.id, e)
                 }}
               >
+                {/* Input handle (top center) */}
+                <div
+                  className="absolute -top-2 left-1/2 -translate-x-1/2 w-4 h-4 rounded-full border-2 border-blue-500 bg-zinc-900 cursor-crosshair hover:bg-blue-500 hover:scale-125 transition-all"
+                  onMouseUp={(e) => handleInputHandleMouseUp(node.id, e)}
+                />
+                {/* Output handle (bottom center) */}
+                <div
+                  className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-4 h-4 rounded-full border-2 border-blue-500 bg-zinc-900 cursor-crosshair hover:bg-blue-500 hover:scale-125 transition-all"
+                  onMouseDown={(e) => handleOutputHandleMouseDown(node.id, e)}
+                />
                 <div className="flex items-center gap-2">
                   {/* Status indicator */}
                   <span className="relative flex h-2.5 w-2.5 shrink-0">
