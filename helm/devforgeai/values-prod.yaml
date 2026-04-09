@@ -1,0 +1,90 @@
+# Production environment overrides
+# Usage: helm install devforgeai ./helm/devforgeai -f helm/devforgeai/values-prod.yaml
+#
+# IMPORTANT: Set secrets via --set or external secret management.
+# Do NOT store real API keys in this file.
+#   helm install devforgeai ./helm/devforgeai \
+#     -f helm/devforgeai/values-prod.yaml \
+#     --set secrets.anthropicApiKey="sk-..." \
+#     --set secrets.openaiApiKey="sk-..."
+
+namespace: devforgeai
+
+backend:
+  replicaCount: 3
+  image:
+    tag: "0.2.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "500m"
+    limits:
+      memory: "512Mi"
+      cpu: "1000m"
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+frontend:
+  replicaCount: 2
+  image:
+    tag: "0.2.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "250m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+ingress:
+  enabled: true
+  className: nginx
+  host: devforgeai.example.com
+  tls:
+    enabled: true
+    secretName: devforgeai-tls
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+
+secrets:
+  # Set via --set flags or external secret manager
+  create: true
+  modelmeshApiKey: ""
+
+postgresql:
+  enabled: true
+  auth:
+    username: modelmesh
+    # Set via --set postgresql.auth.password=...
+    password: ""
+    database: modelmesh
+  primary:
+    persistence:
+      size: 50Gi
+
+redis:
+  enabled: true
+  auth:
+    # Set via --set redis.auth.password=...
+    password: ""
+  master:
+    persistence:
+      size: 5Gi
