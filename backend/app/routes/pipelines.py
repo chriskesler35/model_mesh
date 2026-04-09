@@ -210,6 +210,65 @@ async def _run_phase(pipeline_id: str, phase_index: int):
     phase_name = phase_def["name"]
     agent_role = phase_def["role"]
 
+    # ── Condition evaluation ─────────────────────────────────────────────
+    # If the phase has conditions, evaluate them against the parent phase's
+    # output artifact.  If any condition fails, skip the phase entirely.
+    if phase_def.get("conditions"):
+        from app.services.phase_templates import evaluate_phase_conditions, format_condition_reason
+
+        # Find the parent phase's output -- use the last approved/skipped
+        # prior run's raw artifact JSON (prefer the parsed "data" for JSON
+        # artifacts, fall back to "raw" text).
+        parent_output: Optional[str] = None
+        if prior_run_dicts:
+            last_parent = prior_run_dicts[-1]
+            artifact_data = last_parent.get("output_artifact") or {}
+            if artifact_data.get("type") == "json" and artifact_data.get("data") is not None:
+                parent_output = json.dumps(artifact_data["data"])
+            elif artifact_data.get("raw"):
+                parent_output = artifact_data["raw"]
+
+        if not evaluate_phase_conditions(phase_def, parent_output):
+            # Build a human-readable skip reason from the first failing condition
+            skip_reasons = []
+            for cond in phase_def["conditions"]:
+                skip_reasons.append(format_condition_reason(cond))
+            reason = "; ".join(skip_reasons)
+
+            # Create a PhaseRun marked as "skipped"
+            skip_run_id = str(uuid.uuid4())
+            async with AsyncSessionLocal() as db:
+                pr = PhaseRun(
+                    id=skip_run_id,
+                    pipeline_id=pipeline_id,
+                    phase_index=phase_index,
+                    phase_name=phase_name,
+                    agent_role=agent_role,
+                    model_id=None,
+                    status="skipped",
+                    started_at=datetime.utcnow(),
+                    completed_at=datetime.utcnow(),
+                    input_context={"skip_reason": reason},
+                )
+                db.add(pr)
+                await db.commit()
+
+            logger.info(
+                "Pipeline %s: skipping phase %d (%s) — %s",
+                pipeline_id, phase_index, phase_name, reason,
+            )
+            _push(
+                pipeline_id, "phase_skipped",
+                phase_index=phase_index,
+                phase_name=phase_name,
+                reason=reason,
+            )
+
+            # Advance to next phase
+            await _advance_to_next(pipeline_id, phase_index)
+            return
+    # ── End condition evaluation ──────────────────────────────────────────
+
     # Model resolution chain (highest priority wins):
     #   1. Per-phase user override (phase_def["model"] from model_overrides)
     #   2. Agent bound to this method_phase → its persona → persona.primary_model
