@@ -1,180 +1,144 @@
-"""Chat command parser -- detects system commands in user messages.
+"""Chat command parser -- detects actionable commands in natural language chat messages.
 
-Returns a parsed command dict or None for regular chat messages.
-Command format: { "action": str, "entity_type": str, "params": dict, "raw": str }
+Parses user messages like "add model gpt-4 from openai", "list my models",
+"delete model X", "switch to model Y" and returns structured command dicts
+for the dispatcher to execute.
 
-Supports:
-  - Slash commands: /list-models, /add-model gpt-4, /switch-persona coder
-  - Natural language: "show my models", "add model gpt-4 from openai"
-
-This module is a pure parser -- it does NOT execute commands.
-Execution is handled by downstream handlers (E11.2-E11.4).
+Returns:
+    None if the message is not a command.
+    dict with {action, entity_type, params} if a command is detected.
 """
 
 from __future__ import annotations
 
 import re
+import logging
 from typing import Optional
 
+logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Slash command definitions: /command -> base template
-# ---------------------------------------------------------------------------
-SLASH_COMMANDS: dict[str, dict] = {
-    "/list-models":    {"action": "list",   "entity_type": "model"},
-    "/list-personas":  {"action": "list",   "entity_type": "persona"},
-    "/list-agents":    {"action": "list",   "entity_type": "agent"},
-    "/add-model":      {"action": "create", "entity_type": "model"},
-    "/delete-model":   {"action": "delete", "entity_type": "model"},
-    "/add-persona":    {"action": "create", "entity_type": "persona"},
-    "/delete-persona": {"action": "delete", "entity_type": "persona"},
-    "/switch-model":   {"action": "switch", "entity_type": "model"},
-    "/switch-persona": {"action": "switch", "entity_type": "persona"},
-    "/help":           {"action": "help",   "entity_type": "system"},
-    "/status":         {"action": "status", "entity_type": "system"},
-}
+# ── Model command patterns ────────────────────────────────────────────────────
+# Each tuple: (compiled_regex, action, param_extractor_lambda)
 
-# ---------------------------------------------------------------------------
-# Natural language patterns (order matters -- first match wins)
-# ---------------------------------------------------------------------------
-NL_PATTERNS: list[tuple[str, dict]] = [
-    # ---- List -----------------------------------------------------------------
-    (r"(?:show|list|display)\s+(?:my\s+)?(?:all\s+)?models",
-     {"action": "list", "entity_type": "model"}),
-    (r"(?:show|list|display)\s+(?:my\s+)?(?:all\s+)?personas",
-     {"action": "list", "entity_type": "persona"}),
-    (r"(?:show|list|display)\s+(?:my\s+)?(?:all\s+)?agents",
-     {"action": "list", "entity_type": "agent"}),
-
-    # ---- Add/Create model -----------------------------------------------------
-    (r"(?:add|create|register)\s+(?:a\s+)?model\s+(?:called\s+)?['\"]?(\S+)['\"]?"
-     r"\s+(?:from|using|via)\s+(\S+)",
-     {"action": "create", "entity_type": "model", "param_names": ["name", "provider"]}),
-    (r"(?:add|create|register)\s+(?:a\s+)?model\s+(?:called\s+)?['\"]?(\S+)['\"]?",
-     {"action": "create", "entity_type": "model", "param_names": ["name"]}),
-
-    # ---- Delete model ---------------------------------------------------------
-    (r"(?:delete|remove|drop)\s+(?:the\s+)?model\s+['\"]?(\S+)['\"]?",
-     {"action": "delete", "entity_type": "model", "param_names": ["name"]}),
-
-    # ---- Create persona -------------------------------------------------------
-    (r"(?:create|add|make)\s+(?:a\s+)?persona\s+(?:called|named)\s+"
-     r"['\"]?(.+?)['\"]?\s+(?:that|which|who|to)\s+(.+)",
-     {"action": "create", "entity_type": "persona", "param_names": ["name", "description"]}),
-    (r"(?:create|add|make)\s+(?:a\s+)?persona\s+(?:called|named)\s+['\"]?(\S+)['\"]?",
-     {"action": "create", "entity_type": "persona", "param_names": ["name"]}),
-
-    # ---- Delete persona -------------------------------------------------------
-    (r"(?:delete|remove|drop)\s+(?:the\s+)?persona\s+['\"]?(\S+)['\"]?",
-     {"action": "delete", "entity_type": "persona", "param_names": ["name"]}),
-
-    # ---- Switch ---------------------------------------------------------------
-    (r"(?:switch|change|use)\s+(?:to\s+)?(?:the\s+)?model\s+['\"]?(\S+)['\"]?",
-     {"action": "switch", "entity_type": "model", "param_names": ["name"]}),
-    (r"(?:switch|change|use)\s+(?:to\s+)?(?:the\s+)?persona\s+['\"]?(\S+)['\"]?",
-     {"action": "switch", "entity_type": "persona", "param_names": ["name"]}),
-
-    # ---- Status ---------------------------------------------------------------
-    (r"(?:what(?:'s| is)\s+(?:the\s+)?)?(?:system\s+)?status",
-     {"action": "status", "entity_type": "system"}),
-]
+_MODEL_PATTERNS: list[tuple[re.Pattern, str, callable]] = []
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+def _mp(pattern: str, action: str, extractor):
+    """Register a model command pattern."""
+    _MODEL_PATTERNS.append((re.compile(pattern, re.IGNORECASE), action, extractor))
+
+
+# "add model <name> from <provider>"
+_mp(
+    r"^(?:add|create|register|new)\s+model\s+([^\s]+)(?:\s+(?:from|on|via|provider)\s+(.+))?$",
+    "create",
+    lambda m: {"name": m.group(1).strip(), "provider": (m.group(2) or "").strip()},
+)
+
+# "remove/delete model <name>"
+_mp(
+    r"^(?:remove|delete|deactivate|disable)\s+model\s+(.+)$",
+    "delete",
+    lambda m: {"name": m.group(1).strip()},
+)
+
+# "list models" / "list my models" / "show models"
+_mp(
+    r"^(?:list|show|get|display)\s+(?:my\s+)?models?$",
+    "list",
+    lambda m: {},
+)
+
+# "switch to model <name>" / "use model <name>" / "set model <name> as default"
+_mp(
+    r"^(?:switch\s+(?:to\s+)?|use\s+|set\s+)model\s+([^\s]+)(?:\s+as\s+default(?:\s+for\s+(.+))?)?$",
+    "switch",
+    lambda m: {"name": m.group(1).strip(), "purpose": (m.group(2) or "").strip()},
+)
+
+# Slash-command variants: /add-model, /list-models, /delete-model
+_mp(
+    r"^/add[-_]?model\s+([^\s]+)(?:\s+(?:from|on|via)\s+(.+))?$",
+    "create",
+    lambda m: {"name": m.group(1).strip(), "provider": (m.group(2) or "").strip()},
+)
+_mp(
+    r"^/(?:list|show)[-_]?models?$",
+    "list",
+    lambda m: {},
+)
+_mp(
+    r"^/(?:delete|remove)[-_]?model\s+(.+)$",
+    "delete",
+    lambda m: {"name": m.group(1).strip()},
+)
+
+# ── System command patterns ───────────────────────────────────────────────────
+_SYSTEM_PATTERNS: list[tuple[re.Pattern, str, callable]] = []
+
+
+def _sp(pattern: str, action: str, extractor):
+    """Register a system command pattern."""
+    _SYSTEM_PATTERNS.append((re.compile(pattern, re.IGNORECASE), action, extractor))
+
+
+_sp(r"^/?help$", "help", lambda m: {})
+_sp(r"^/?status$", "status", lambda m: {})
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def parse_chat_command(message: str) -> Optional[dict]:
-    """Parse a user message for system commands.
+    """Parse a user chat message into a structured command.
+
+    Args:
+        message: Raw user message text.
 
     Returns:
-        dict with keys ``action``, ``entity_type``, ``params``, ``raw``
-        when the message is recognised as a command, or ``None`` if it is
-        a regular chat message that should be forwarded to the LLM.
+        None if the message is not a recognized command.
+        dict with keys:
+            - action: str (create, delete, list, switch, help, status)
+            - entity_type: str (model, system)
+            - params: dict (action-specific parameters)
     """
-    text = message.strip()
+    text = (message or "").strip()
     if not text:
         return None
 
-    # 1. Slash commands first (explicit mode)
-    if text.startswith("/"):
-        return _parse_slash_command(text)
+    # Try model patterns first
+    for pattern, action, extractor in _MODEL_PATTERNS:
+        match = pattern.match(text)
+        if match:
+            params = extractor(match)
+            logger.info(f"Parsed model command: action={action}, params={params}")
+            return {"action": action, "entity_type": "model", "params": params}
 
-    # 2. Natural language patterns
-    return _parse_natural_language(text)
+    # Try system patterns
+    for pattern, action, extractor in _SYSTEM_PATTERNS:
+        match = pattern.match(text)
+        if match:
+            params = extractor(match)
+            return {"action": action, "entity_type": "system", "params": params}
+
+    return None
 
 
 def format_command_help() -> str:
     """Return help text listing available chat commands."""
-    return (
-        "**Available Commands:**\n"
-        "\n"
-        "**Models:**\n"
-        '- `/list-models` or "show my models"\n'
-        '- `/add-model <name>` or "add model <name> from <provider>"\n'
-        '- `/delete-model <name>` or "delete model <name>"\n'
-        '- `/switch-model <name>` or "switch to model <name>"\n'
-        "\n"
-        "**Personas:**\n"
-        '- `/list-personas` or "list personas"\n'
-        '- `/add-persona <name>` or "create a persona called <name> that <description>"\n'
-        '- `/delete-persona <name>` or "delete persona <name>"\n'
-        '- `/switch-persona <name>` or "switch to persona <name>"\n'
-        "\n"
-        "**System:**\n"
-        '- `/status` or "what\'s the status"\n'
-        '- `/help` or "show help"\n'
-    )
+    return """**Available Chat Commands:**
 
+| Command | Description |
+|---------|-------------|
+| `add model <name> from <provider>` | Add a new model |
+| `list models` | Show all active models |
+| `delete model <name>` | Deactivate a model |
+| `switch to model <name>` | Get info on using a model |
+| `/help` | Show this help |
+| `/status` | System status |
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _parse_slash_command(text: str) -> Optional[dict]:
-    """Parse ``/slash-command [args]`` format."""
-    parts = text.split(None, 1)
-    cmd = parts[0].lower()
-    args = parts[1] if len(parts) > 1 else ""
-
-    template = SLASH_COMMANDS.get(cmd)
-    if not template:
-        return None
-
-    result: dict = {
-        "action": template["action"],
-        "entity_type": template["entity_type"],
-        "params": {},
-        "raw": text,
-    }
-
-    # Attach arguments for commands that accept a target name
-    if args and template["action"] in ("create", "delete", "switch"):
-        result["params"]["name"] = args.strip().strip("'\"")
-
-    return result
-
-
-def _parse_natural_language(text: str) -> Optional[dict]:
-    """Parse natural language commands using regex patterns."""
-    lower = text.lower()
-
-    for pattern, template in NL_PATTERNS:
-        match = re.search(pattern, lower, re.IGNORECASE)
-        if match:
-            result: dict = {
-                "action": template["action"],
-                "entity_type": template["entity_type"],
-                "params": {},
-                "raw": text,
-            }
-
-            # Extract named params from capture groups
-            param_names: list[str] = template.get("param_names", [])
-            for i, name in enumerate(param_names):
-                if i < len(match.groups()):
-                    result["params"][name] = match.group(i + 1).strip().strip("'\"")
-
-            return result
-
-    return None
+**Examples:**
+- "add model gemini-2.5-pro from google"
+- "list my models"
+- "remove model gpt-3.5-turbo"
+- "switch to model claude-sonnet"
+"""
