@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { getApiBase, getAuthToken } from '@/lib/config'
 
 // ---------------------------------------------------------------------------
@@ -20,6 +20,15 @@ interface WorkflowNode {
     timeout?: number
     artifactType?: string
   }
+}
+
+interface CustomAgent {
+  id: string
+  name: string
+  agent_type: string
+  description?: string | null
+  resolved_model_name?: string | null
+  is_active: boolean
 }
 
 interface WorkflowEdge {
@@ -42,6 +51,19 @@ const AGENT_TYPES = [
 ] as const
 
 // ---------------------------------------------------------------------------
+// Colour mapping for type badges
+// ---------------------------------------------------------------------------
+const TYPE_COLORS: Record<string, string> = {
+  coder:      'bg-blue-600',
+  researcher: 'bg-purple-600',
+  designer:   'bg-pink-600',
+  reviewer:   'bg-green-600',
+  planner:    'bg-amber-600',
+  executor:   'bg-red-600',
+  writer:     'bg-teal-600',
+}
+
+// ---------------------------------------------------------------------------
 // Page component
 // ---------------------------------------------------------------------------
 export default function WorkflowBuilderPage() {
@@ -61,10 +83,56 @@ export default function WorkflowBuilderPage() {
   const [loadingWorkflows, setLoadingWorkflows] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
+  // Palette state
+  const [paletteSearch, setPaletteSearch] = useState('')
+  const [customAgents, setCustomAgents] = useState<CustomAgent[]>([])
+
   const apiHeaders = useCallback(() => ({
     'Content-Type': 'application/json',
     Authorization: `Bearer ${getAuthToken()}`,
   }), [])
+
+  // ------ Fetch custom agents from API -----------------------------------
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(`${getApiBase()}/v1/agents`, { headers: apiHeaders() })
+        if (!res.ok) return
+        const body = await res.json()
+        const agents: CustomAgent[] = (body.data ?? [])
+        if (!cancelled) {
+          // Exclude default agent types — they already appear in AGENT_TYPES
+          const defaultTypes = new Set<string>(AGENT_TYPES.map((a) => a.type))
+          setCustomAgents(agents.filter((a) => !defaultTypes.has(a.agent_type) || !a.id.startsWith('default-')))
+        }
+      } catch { /* silent — palette still shows defaults */ }
+    })()
+    return () => { cancelled = true }
+  }, [apiHeaders])
+
+  // ------ Palette filtering ----------------------------------------------
+  const filteredDefaults = useMemo(() => {
+    const q = paletteSearch.toLowerCase()
+    if (!q) return [...AGENT_TYPES]
+    return AGENT_TYPES.filter(
+      (a) =>
+        a.label.toLowerCase().includes(q) ||
+        a.type.toLowerCase().includes(q) ||
+        a.description.toLowerCase().includes(q),
+    )
+  }, [paletteSearch])
+
+  const filteredCustom = useMemo(() => {
+    const q = paletteSearch.toLowerCase()
+    if (!q) return customAgents
+    return customAgents.filter(
+      (a) =>
+        a.name.toLowerCase().includes(q) ||
+        a.agent_type.toLowerCase().includes(q) ||
+        (a.description ?? '').toLowerCase().includes(q),
+    )
+  }, [paletteSearch, customAgents])
 
   const handleSave = useCallback(async () => {
     if (!workflowName.trim()) { setSaveError('Name is required'); return }
@@ -133,21 +201,26 @@ export default function WorkflowBuilderPage() {
       const x = e.clientX - rect.left
       const y = e.clientY - rect.top
 
+      // Check built-in agents first, then custom
       const agentType = AGENT_TYPES.find((a) => a.type === draggingType)
-      if (!agentType) return
+      const custom = !agentType ? customAgents.find((a) => a.id === draggingType) : null
+      if (!agentType && !custom) return
 
       const newNode: WorkflowNode = {
         id: `node-${Date.now()}`,
-        type: draggingType,
-        label: agentType.label,
+        type: agentType ? agentType.type : custom!.agent_type,
+        label: agentType ? agentType.label : custom!.name,
         x,
         y,
-        config: { artifactType: 'markdown' },
+        config: {
+          artifactType: 'markdown',
+          ...(custom?.resolved_model_name ? { model: custom.resolved_model_name } : {}),
+        },
       }
       setNodes((prev) => [...prev, newNode])
       setDraggingType(null)
     },
-    [draggingType],
+    [draggingType, customAgents],
   )
 
   // ------ Drag nodes on the canvas ----------------------------------------
@@ -306,10 +379,19 @@ export default function WorkflowBuilderPage() {
         {/* Left sidebar: Agent palette                                     */}
         {/* -------------------------------------------------------------- */}
         <div className="w-56 border-r border-zinc-800 bg-zinc-900 p-3 overflow-y-auto shrink-0">
-          <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-3">
+          <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-2">
             Agents
           </h2>
-          {AGENT_TYPES.map((agent) => (
+          {/* Search input */}
+          <input
+            type="text"
+            value={paletteSearch}
+            onChange={(e) => setPaletteSearch(e.target.value)}
+            placeholder="Search agents…"
+            className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm mb-3 focus:outline-none focus:ring-1 focus:ring-blue-500 placeholder-zinc-600"
+          />
+          {/* Default agent types */}
+          {filteredDefaults.map((agent) => (
             <div
               key={agent.type}
               draggable
@@ -317,12 +399,37 @@ export default function WorkflowBuilderPage() {
               className="flex items-center gap-2 p-2 mb-1 rounded cursor-grab hover:bg-zinc-800 border border-transparent hover:border-zinc-700 transition-colors"
             >
               <span className="text-lg">{agent.icon}</span>
-              <div>
+              <div className="min-w-0">
                 <div className="text-sm font-medium">{agent.label}</div>
-                <div className="text-xs text-zinc-500">{agent.description}</div>
+                <div className="text-xs text-zinc-500 truncate">{agent.description}</div>
               </div>
             </div>
           ))}
+          {/* Custom agents from API */}
+          {filteredCustom.length > 0 && (
+            <>
+              <h3 className="text-xs uppercase tracking-wider text-zinc-500 mt-4 mb-2">
+                Custom
+              </h3>
+              {filteredCustom.map((agent) => (
+                <div
+                  key={agent.id}
+                  draggable
+                  onDragStart={() => setDraggingType(agent.id)}
+                  className="flex items-center gap-2 p-2 mb-1 rounded cursor-grab hover:bg-zinc-800 border border-transparent hover:border-zinc-700 transition-colors"
+                >
+                  <span className="text-lg">{'\u{1F916}'}</span>
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">{agent.name}</div>
+                    <div className="text-xs text-zinc-500 truncate">{agent.description ?? agent.agent_type}</div>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+          {filteredDefaults.length === 0 && filteredCustom.length === 0 && (
+            <p className="text-xs text-zinc-600 mt-2">No agents match &ldquo;{paletteSearch}&rdquo;</p>
+          )}
           <div className="mt-4 pt-3 border-t border-zinc-800">
             <p className="text-xs text-zinc-600">
               Drag agents onto the canvas. Shift+click two nodes to connect
@@ -411,10 +518,11 @@ export default function WorkflowBuilderPage() {
             const agentType = AGENT_TYPES.find((a) => a.type === node.type)
             const isSelected = selectedNode?.id === node.id
             const isEdgeSrc = edgeSource === node.id
+            const badgeColor = TYPE_COLORS[node.type] || 'bg-zinc-600'
             return (
               <div
                 key={node.id}
-                className={`absolute cursor-move select-none rounded-lg border-2 p-3 w-40 transition-colors ${
+                className={`absolute cursor-move select-none rounded-lg border-2 p-3 w-44 transition-colors ${
                   isSelected
                     ? 'border-blue-500 bg-zinc-800'
                     : isEdgeSrc
@@ -429,13 +537,24 @@ export default function WorkflowBuilderPage() {
                 }}
               >
                 <div className="flex items-center gap-2">
-                  <span>{agentType?.icon}</span>
+                  {/* Status indicator */}
+                  <span className="relative flex h-2.5 w-2.5 shrink-0">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500" />
+                  </span>
+                  <span>{agentType?.icon ?? '\u{1F916}'}</span>
                   <span className="text-sm font-medium truncate">
                     {node.label}
                   </span>
                 </div>
-                <div className="text-xs text-zinc-500 mt-1">
-                  {node.config.artifactType || 'markdown'}
+                {/* Type badge + model */}
+                <div className="flex items-center gap-1.5 mt-1.5">
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full text-white font-medium leading-none ${badgeColor}`}>
+                    {node.type}
+                  </span>
+                  <span className="text-[10px] text-zinc-500 truncate">
+                    {node.config.model || 'default'}
+                  </span>
                 </div>
               </div>
             )
