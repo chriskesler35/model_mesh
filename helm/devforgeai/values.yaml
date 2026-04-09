@@ -1,0 +1,150 @@
+# Default values for devforgeai.
+# This is a YAML-formatted file.
+
+# -- Override the release name
+nameOverride: ""
+# -- Override the full release name
+fullnameOverride: ""
+
+# -- Namespace to deploy into (created if not exists)
+namespace: devforgeai
+
+# --------------------------------------------------------------------------
+# Backend (Python/FastAPI)
+# --------------------------------------------------------------------------
+backend:
+  replicaCount: 2
+  image:
+    repository: devforgeai/backend
+    tag: latest
+    pullPolicy: IfNotPresent
+  port: 18800
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "250m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+  # -- Extra environment variables (key: value)
+  env: {}
+  # -- Liveness probe settings
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 3
+  # -- Readiness probe settings
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  # -- Rolling update strategy
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  # -- Pod disruption budget
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+
+# --------------------------------------------------------------------------
+# Frontend (Next.js)
+# --------------------------------------------------------------------------
+frontend:
+  replicaCount: 2
+  image:
+    repository: devforgeai/frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+  port: 3000
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "125m"
+    limits:
+      memory: "128Mi"
+      cpu: "250m"
+  # -- Extra environment variables (key: value)
+  env: {}
+  livenessProbe:
+    httpGet:
+      path: /
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readinessProbe:
+    httpGet:
+      path: /
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+
+# --------------------------------------------------------------------------
+# Ingress
+# --------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: nginx
+  host: devforgeai.local
+  tls:
+    enabled: false
+    secretName: devforgeai-tls
+  annotations: {}
+
+# --------------------------------------------------------------------------
+# Secrets (API keys)
+# --------------------------------------------------------------------------
+secrets:
+  # -- Set to false to manage secrets externally
+  create: true
+  anthropicApiKey: ""
+  googleApiKey: ""
+  openrouterApiKey: ""
+  openaiApiKey: ""
+  modelmeshApiKey: "modelmesh_local_dev_key"
+
+# --------------------------------------------------------------------------
+# PostgreSQL (bitnami sub-chart)
+# --------------------------------------------------------------------------
+postgresql:
+  enabled: true
+  auth:
+    username: modelmesh
+    password: modelmesh
+    database: modelmesh
+  primary:
+    persistence:
+      size: 10Gi
+
+# --------------------------------------------------------------------------
+# Redis (bitnami sub-chart)
+# --------------------------------------------------------------------------
+redis:
+  enabled: true
+  auth:
+    password: devforgeai-redis
+  master:
+    persistence:
+      size: 1Gi

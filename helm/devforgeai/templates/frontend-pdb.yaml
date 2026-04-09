@@ -1,0 +1,14 @@
+{{- if .Values.frontend.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "devforgeai.fullname" . }}-frontend
+  namespace: {{ include "devforgeai.namespace" . }}
+  labels:
+    {{- include "devforgeai.frontend.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.frontend.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "devforgeai.frontend.selectorLabels" . | nindent 6 }}
+{{- end }}

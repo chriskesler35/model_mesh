@@ -1,0 +1,55 @@
+
+DevForgeAI / AgentMesh has been deployed!
+
+{{- if .Values.ingress.enabled }}
+
+1. Access the application at:
+{{- if .Values.ingress.tls.enabled }}
+   https://{{ .Values.ingress.host }}
+{{- else }}
+   http://{{ .Values.ingress.host }}
+{{- end }}
+
+   Make sure DNS or /etc/hosts points {{ .Values.ingress.host }} to your ingress controller IP.
+
+{{- else }}
+
+1. Get the frontend URL by running:
+   export POD_NAME=$(kubectl get pods --namespace {{ include "devforgeai.namespace" . }} -l "app.kubernetes.io/name={{ include "devforgeai.name" . }}-frontend" -o jsonpath="{.items[0].metadata.name}")
+   kubectl --namespace {{ include "devforgeai.namespace" . }} port-forward $POD_NAME 3000:{{ .Values.frontend.port }}
+   Then visit: http://localhost:3000
+
+{{- end }}
+
+2. Backend API docs:
+{{- if .Values.ingress.enabled }}
+{{- if .Values.ingress.tls.enabled }}
+   https://{{ .Values.ingress.host }}/docs
+{{- else }}
+   http://{{ .Values.ingress.host }}/docs
+{{- end }}
+{{- else }}
+   export POD_NAME=$(kubectl get pods --namespace {{ include "devforgeai.namespace" . }} -l "app.kubernetes.io/name={{ include "devforgeai.name" . }}-backend" -o jsonpath="{.items[0].metadata.name}")
+   kubectl --namespace {{ include "devforgeai.namespace" . }} port-forward $POD_NAME 18800:{{ .Values.backend.port }}
+   Then visit: http://localhost:18800/docs
+{{- end }}
+
+3. Check deployment status:
+   kubectl get pods --namespace {{ include "devforgeai.namespace" . }}
+   kubectl get svc --namespace {{ include "devforgeai.namespace" . }}
+
+4. View logs:
+   kubectl logs -l app.kubernetes.io/component=backend --namespace {{ include "devforgeai.namespace" . }} -f
+   kubectl logs -l app.kubernetes.io/component=frontend --namespace {{ include "devforgeai.namespace" . }} -f
+
+{{- if .Values.postgresql.enabled }}
+
+5. PostgreSQL is managed by the bitnami/postgresql sub-chart.
+   Connection: postgresql://{{ .Values.postgresql.auth.username }}@{{ include "devforgeai.fullname" . }}-postgresql:5432/{{ .Values.postgresql.auth.database }}
+{{- end }}
+
+{{- if .Values.redis.enabled }}
+
+6. Redis is managed by the bitnami/redis sub-chart.
+   Connection: redis://{{ include "devforgeai.fullname" . }}-redis-master:6379
+{{- end }}

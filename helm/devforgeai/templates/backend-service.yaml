@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "devforgeai.fullname" . }}-backend
+  namespace: {{ include "devforgeai.namespace" . }}
+  labels:
+    {{- include "devforgeai.backend.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.backend.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "devforgeai.backend.selectorLabels" . | nindent 4 }}

@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "devforgeai.fullname" . }}-backend
+  namespace: {{ include "devforgeai.namespace" . }}
+  labels:
+    {{- include "devforgeai.backend.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.backend.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "devforgeai.backend.selectorLabels" . | nindent 6 }}
+  strategy:
+    {{- toYaml .Values.backend.strategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "devforgeai.backend.labels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: backend
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.backend.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "devforgeai.fullname" . }}-config
+            - secretRef:
+                name: {{ include "devforgeai.fullname" . }}-secrets
+          {{- if .Values.backend.env }}
+          env:
+            {{- range $key, $value := .Values.backend.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          {{- with .Values.backend.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.backend.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}

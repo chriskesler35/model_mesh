@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "devforgeai.fullname" . }}-frontend
+  namespace: {{ include "devforgeai.namespace" . }}
+  labels:
+    {{- include "devforgeai.frontend.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.frontend.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "devforgeai.frontend.selectorLabels" . | nindent 6 }}
+  strategy:
+    {{- toYaml .Values.frontend.strategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "devforgeai.frontend.labels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: frontend
+          image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}"
+          imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.frontend.port }}
+              protocol: TCP
+          env:
+            - name: INTERNAL_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "devforgeai.fullname" . }}-config
+                  key: INTERNAL_API_URL
+            - name: NEXT_PUBLIC_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "devforgeai.fullname" . }}-config
+                  key: NEXT_PUBLIC_API_URL
+            - name: NEXT_PUBLIC_MODELMESH_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "devforgeai.fullname" . }}-secrets
+                  key: MODELMESH_API_KEY
+            {{- range $key, $value := .Values.frontend.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+          {{- with .Values.frontend.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.frontend.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
