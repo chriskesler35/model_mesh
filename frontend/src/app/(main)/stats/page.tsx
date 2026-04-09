@@ -356,6 +356,27 @@ function formatLatency(ms: number): string {
   return `${Math.round(ms)}ms`
 }
 
+function ExportCSVButton({ type, days }: { type: string; days: number }) {
+  const handleExport = () => {
+    const url = `${API_BASE}/v1/stats/export?type=${type}&days=${days}&format=csv`
+    const a = document.createElement('a')
+    a.href = url
+    a.rel = 'noopener'
+    a.click()
+  }
+  return (
+    <button
+      onClick={handleExport}
+      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md shadow-sm hover:bg-gray-50"
+    >
+      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V3" />
+      </svg>
+      Export CSV
+    </button>
+  )
+}
+
 /* ------------------------------------------------------------------ */
 /*  Model Performance Table (sortable) + Latency Bar Chart            */
 /* ------------------------------------------------------------------ */
@@ -895,7 +916,10 @@ export default function StatsPage() {
 
       {/* Cost by Model */}
       <div className="mt-8">
-        <h2 className="text-lg font-medium text-gray-900 mb-4">Cost by Model</h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-medium text-gray-900">Cost by Model</h2>
+          <ExportCSVButton type="costs" days={7} />
+        </div>
         <div className="bg-white shadow overflow-hidden sm:rounded-lg">
           {Object.keys(costs.by_model).length > 0 ? (
             <table className="min-w-full divide-y divide-gray-200">
@@ -938,7 +962,10 @@ export default function StatsPage() {
 
       {/* Usage by Model */}
       <div className="mt-8">
-        <h2 className="text-lg font-medium text-gray-900 mb-4">Usage by Model</h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-medium text-gray-900">Usage by Model</h2>
+          <ExportCSVButton type="models" days={7} />
+        </div>
         <div className="bg-white shadow overflow-hidden sm:rounded-lg">
           {Object.keys(usage.by_model).length > 0 ? (
             <table className="min-w-full divide-y divide-gray-200">
@@ -1078,7 +1105,8 @@ export default function StatsPage() {
       {/* Model Performance Comparison */}
       {performance && (
         <div>
-          <div className="mt-8 flex items-center gap-4">
+          <div className="mt-8 flex items-center justify-between">
+           <div className="flex items-center gap-4">
             <label className="text-sm text-gray-600">Performance period:</label>
             <select
               value={perfDays}
@@ -1091,6 +1119,8 @@ export default function StatsPage() {
               <option value={30}>Last 30 days</option>
               <option value={90}>Last 90 days</option>
             </select>
+           </div>
+           <ExportCSVButton type="agents" days={perfDays} />
           </div>
           <ModelPerformanceSection performance={performance} />
         </div>

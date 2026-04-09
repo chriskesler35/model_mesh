@@ -1,10 +1,13 @@
 """Stats endpoints."""
 
+import csv
+import io
 import math
 import calendar
 from datetime import datetime, timedelta
 from typing import Dict, List
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from app.database import get_db
@@ -409,3 +412,110 @@ async def set_budget(body: BudgetUpdate):
 async def get_budget():
     """Get the current budget threshold."""
     return {"budget_limit": _budget_limit}
+
+
+@router.get("/export")
+async def export_stats(
+    type: str = Query(..., pattern="^(costs|models|agents)$"),
+    days: int = Query(7, ge=1, le=90),
+    format: str = Query("csv", pattern="^csv$"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export stats as CSV file download."""
+    now = datetime.utcnow()
+    start_date = now - timedelta(days=days)
+    end_str = now.strftime("%Y-%m-%d")
+    start_str = start_date.strftime("%Y-%m-%d")
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    if type == "costs":
+        writer.writerow(["model", "provider", "cost", "period_start", "period_end"])
+        result = await db.execute(text("""
+            SELECT m.model_id, p.name, COALESCE(SUM(r.estimated_cost), 0) as cost
+            FROM request_logs r
+            JOIN models m ON REPLACE(r.model_id, '-', '') = REPLACE(m.id, '-', '')
+            JOIN providers p ON REPLACE(m.provider_id, '-', '') = REPLACE(p.id, '-', '')
+            WHERE r.created_at >= :start
+            GROUP BY m.model_id, p.name
+            ORDER BY cost DESC
+        """), {"start": start_date})
+        for row in result.fetchall():
+            writer.writerow([row[0], row[1], round(float(row[2]), 6), start_str, end_str])
+
+    elif type == "models":
+        writer.writerow([
+            "model", "display_name", "total_requests", "avg_latency_ms",
+            "success_rate", "avg_tokens_per_request", "total_cost",
+            "period_start", "period_end",
+        ])
+        result = await db.execute(text("""
+            SELECT
+                m.model_id, m.display_name,
+                COUNT(*) as total_requests,
+                AVG(r.latency_ms) as avg_latency_ms,
+                CASE WHEN COUNT(*) > 0
+                    THEN CAST(SUM(CASE WHEN r.success = 1 THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100
+                    ELSE 0 END as success_rate,
+                AVG(COALESCE(r.input_tokens, 0) + COALESCE(r.output_tokens, 0)) as avg_tokens,
+                COALESCE(SUM(r.estimated_cost), 0) as total_cost
+            FROM request_logs r
+            JOIN models m ON REPLACE(r.model_id, '-', '') = REPLACE(m.id, '-', '')
+            WHERE r.created_at >= :start
+            GROUP BY m.model_id, m.display_name
+            ORDER BY total_requests DESC
+        """), {"start": start_date})
+        for row in result.fetchall():
+            writer.writerow([
+                row[0], row[1] or "", int(row[2]),
+                round(float(row[3] or 0), 1),
+                round(float(row[4] or 0), 1),
+                round(float(row[5] or 0), 0),
+                round(float(row[6] or 0), 6),
+                start_str, end_str,
+            ])
+
+    elif type == "agents":
+        writer.writerow([
+            "agent_role", "total_runs", "success_rate",
+            "avg_tokens", "avg_duration_ms", "retry_rate",
+            "period_start", "period_end",
+        ])
+        result = await db.execute(text("""
+            SELECT
+                agent_role,
+                COUNT(*) as total_runs,
+                SUM(CASE WHEN status IN ('approved', 'completed') THEN 1 ELSE 0 END) as success_count,
+                AVG(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) as avg_tokens,
+                AVG(
+                    CASE WHEN started_at IS NOT NULL AND completed_at IS NOT NULL
+                    THEN (julianday(completed_at) - julianday(started_at)) * 86400000
+                    ELSE NULL END
+                ) as avg_duration_ms,
+                SUM(retry_count) as total_retries
+            FROM workbench_phase_runs
+            WHERE created_at >= :start
+            GROUP BY agent_role
+            ORDER BY total_runs DESC
+        """), {"start": start_date})
+        for row in result.fetchall():
+            total_runs = int(row[1])
+            success_count = int(row[2])
+            total_retries = int(row[5] or 0)
+            writer.writerow([
+                row[0], total_runs,
+                round(success_count / total_runs, 4) if total_runs > 0 else 0.0,
+                round(float(row[3] or 0), 0),
+                round(float(row[4] or 0), 1),
+                round(total_retries / total_runs, 4) if total_runs > 0 else 0.0,
+                start_str, end_str,
+            ])
+
+    filename = f"devforgeai_{type}_{start_str}_{end_str}.csv"
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
