@@ -1,6 +1,7 @@
 'use client'
 
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
+import { getApiBase, getAuthToken } from '@/lib/config'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -50,6 +51,77 @@ export default function WorkflowBuilderPage() {
   const [draggingType, setDraggingType] = useState<string | null>(null)
   const [edgeSource, setEdgeSource] = useState<string | null>(null)
   const canvasRef = useRef<HTMLDivElement>(null)
+
+  // Save / Load state
+  const [currentWorkflowId, setCurrentWorkflowId] = useState<string | null>(null)
+  const [workflowName, setWorkflowName] = useState('')
+  const [showSaveModal, setShowSaveModal] = useState(false)
+  const [showLoadModal, setShowLoadModal] = useState(false)
+  const [savedWorkflows, setSavedWorkflows] = useState<any[]>([])
+  const [loadingWorkflows, setLoadingWorkflows] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  const apiHeaders = useCallback(() => ({
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${getAuthToken()}`,
+  }), [])
+
+  const handleSave = useCallback(async () => {
+    if (!workflowName.trim()) { setSaveError('Name is required'); return }
+    setSaveError(null)
+    const graphData = { nodes, edges }
+    try {
+      if (currentWorkflowId) {
+        await fetch(`${getApiBase()}/v1/workflows/custom/${currentWorkflowId}`, {
+          method: 'PUT',
+          headers: apiHeaders(),
+          body: JSON.stringify({ name: workflowName, graph_data: graphData }),
+        })
+      } else {
+        const res = await fetch(`${getApiBase()}/v1/workflows/custom`, {
+          method: 'POST',
+          headers: apiHeaders(),
+          body: JSON.stringify({ name: workflowName, graph_data: graphData }),
+        })
+        if (!res.ok) throw new Error(await res.text())
+        const created = await res.json()
+        setCurrentWorkflowId(created.id)
+      }
+      setShowSaveModal(false)
+    } catch (err: any) {
+      setSaveError(err.message || 'Save failed')
+    }
+  }, [workflowName, nodes, edges, currentWorkflowId, apiHeaders])
+
+  const openLoadModal = useCallback(async () => {
+    setShowLoadModal(true)
+    setLoadingWorkflows(true)
+    try {
+      const res = await fetch(`${getApiBase()}/v1/workflows/custom`, { headers: apiHeaders() })
+      if (!res.ok) throw new Error('Failed to fetch workflows')
+      setSavedWorkflows(await res.json())
+    } catch { setSavedWorkflows([]) }
+    setLoadingWorkflows(false)
+  }, [apiHeaders])
+
+  const handleLoad = useCallback((wf: any) => {
+    setNodes(wf.graph_data?.nodes || [])
+    setEdges(wf.graph_data?.edges || [])
+    setCurrentWorkflowId(wf.id)
+    setWorkflowName(wf.name)
+    setSelectedNode(null)
+    setEdgeSource(null)
+    setShowLoadModal(false)
+  }, [])
+
+  const handleDeleteWorkflow = useCallback(async (id: string) => {
+    await fetch(`${getApiBase()}/v1/workflows/custom/${id}`, {
+      method: 'DELETE',
+      headers: apiHeaders(),
+    })
+    setSavedWorkflows((prev) => prev.filter((w) => w.id !== id))
+    if (currentWorkflowId === id) { setCurrentWorkflowId(null); setWorkflowName('') }
+  }, [apiHeaders, currentWorkflowId])
 
   // ------ Drop from palette onto canvas ----------------------------------
   const handleCanvasDrop = useCallback(
@@ -199,10 +271,16 @@ export default function WorkflowBuilderPage() {
           <h1 className="text-lg font-semibold">Workflow Builder</h1>
         </div>
         <div className="flex items-center gap-2">
-          <button className="px-3 py-1.5 text-sm rounded bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 transition-colors">
+          <button
+            onClick={openLoadModal}
+            className="px-3 py-1.5 text-sm rounded bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 transition-colors"
+          >
             Load
           </button>
-          <button className="px-3 py-1.5 text-sm rounded bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 transition-colors">
+          <button
+            onClick={() => { setSaveError(null); setShowSaveModal(true) }}
+            className="px-3 py-1.5 text-sm rounded bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 transition-colors"
+          >
             Save
           </button>
           <button
@@ -466,6 +544,67 @@ export default function WorkflowBuilderPage() {
           )}
         </div>
       </div>
+
+      {/* ============================================================== */}
+      {/* Save Modal                                                      */}
+      {/* ============================================================== */}
+      {showSaveModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowSaveModal(false)}>
+          <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-5 w-96 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-lg font-semibold mb-4">{currentWorkflowId ? 'Update Workflow' : 'Save Workflow'}</h2>
+            <label className="text-xs text-zinc-500 block mb-1">Name</label>
+            <input
+              value={workflowName}
+              onChange={(e) => setWorkflowName(e.target.value)}
+              placeholder="My Workflow"
+              className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              autoFocus
+              onKeyDown={(e) => e.key === 'Enter' && handleSave()}
+            />
+            {saveError && <p className="text-xs text-red-400 mb-2">{saveError}</p>}
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setShowSaveModal(false)} className="px-3 py-1.5 text-sm rounded bg-zinc-800 hover:bg-zinc-700 border border-zinc-700">Cancel</button>
+              <button onClick={handleSave} className="px-3 py-1.5 text-sm rounded bg-blue-600 hover:bg-blue-500 text-white">Save</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================== */}
+      {/* Load Modal                                                      */}
+      {/* ============================================================== */}
+      {showLoadModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowLoadModal(false)}>
+          <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-5 w-[480px] max-h-[70vh] flex flex-col shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-lg font-semibold mb-4">Load Workflow</h2>
+            {loadingWorkflows ? (
+              <p className="text-sm text-zinc-500">Loading…</p>
+            ) : savedWorkflows.length === 0 ? (
+              <p className="text-sm text-zinc-500">No saved workflows yet.</p>
+            ) : (
+              <div className="overflow-y-auto flex-1 space-y-2">
+                {savedWorkflows.map((wf) => (
+                  <div key={wf.id} className="flex items-center justify-between p-3 rounded bg-zinc-800 border border-zinc-700 hover:border-zinc-500 transition-colors">
+                    <button onClick={() => handleLoad(wf)} className="flex-1 text-left">
+                      <div className="text-sm font-medium">{wf.name}</div>
+                      <div className="text-xs text-zinc-500">{wf.graph_data?.nodes?.length ?? 0} nodes · updated {new Date(wf.updated_at).toLocaleDateString()}</div>
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDeleteWorkflow(wf.id) }}
+                      className="ml-2 text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-zinc-700"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex justify-end mt-4">
+              <button onClick={() => setShowLoadModal(false)} className="px-3 py-1.5 text-sm rounded bg-zinc-800 hover:bg-zinc-700 border border-zinc-700">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -22,6 +22,7 @@ from app.models.feedback import Feedback
 from app.models.custom_method import CustomMethod
 from app.models.learning_suggestion import LearningSuggestion
 from app.models.notification import Notification
+from app.models.custom_workflow import CustomWorkflow
 
 __all__ = [
     "Base", "BaseMixin", "Provider", "Model", "Persona",
@@ -30,6 +31,7 @@ __all__ = [
     "Agent", "AgentMemory", "AgentRun", "Task", "WorkbenchSession", "Pipeline", "PhaseRun", "CommandExecution",
     "Feedback",
     "CustomMethod",
+    "CustomWorkflow",
     "LearningSuggestion",
     "Notification",
 ]

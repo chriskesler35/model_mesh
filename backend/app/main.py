@@ -98,6 +98,7 @@ from app.routes.audio import router as audio_router
 from app.routes.websocket import router as websocket_router
 from app.routes.feedback import router as feedback_router
 from app.routes.learning import router as learning_router
+from app.routes.custom_workflows import router as custom_workflows_router
 from app.routes.notifications import router as notifications_router
 from app.routes.websocket import router as websocket_router
 
@@ -231,6 +232,7 @@ app.include_router(audio_router)
 app.include_router(websocket_router)
 app.include_router(feedback_router)
 app.include_router(learning_router)
+app.include_router(custom_workflows_router)
 app.include_router(notifications_router)
 app.include_router(websocket_router)
 app.include_router(metrics_router)
