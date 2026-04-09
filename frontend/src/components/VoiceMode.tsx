@@ -4,7 +4,14 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-type VoiceState = 'idle' | 'listening' | 'transcribing' | 'waiting' | 'speaking'
+type VoiceState = 'idle' | 'listening' | 'transcribing' | 'waiting' | 'speaking' | 'confirming'
+
+interface WorkflowTrigger {
+  method_id: string
+  method_name: string
+  score: number
+  is_custom: boolean
+}
 
 interface VoiceModeProps {
   /** Whether voice mode is active */
@@ -19,6 +26,10 @@ interface VoiceModeProps {
   loading: boolean
   /** Configurable silence duration in seconds (1-5) */
   silenceDuration?: number
+  /** Workflow trigger metadata from the last chat response */
+  workflowTrigger?: WorkflowTrigger | null
+  /** Active pipeline ID to track status via SSE */
+  activePipelineId?: string | null
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -29,12 +40,16 @@ export default function VoiceMode({
   lastAssistantMessage,
   loading,
   silenceDuration = 3,
+  workflowTrigger,
+  activePipelineId,
 }: VoiceModeProps) {
   const [state, setState] = useState<VoiceState>('idle')
   const [silenceConfig, setSilenceConfig] = useState(silenceDuration)
   const [showConfig, setShowConfig] = useState(false)
   const [pushToTalk, setPushToTalk] = useState(false)
   const [pttActive, setPttActive] = useState(false)
+  const [pendingWorkflow, setPendingWorkflow] = useState<WorkflowTrigger | null>(null)
+  const [pipelineStatus, setPipelineStatus] = useState<string | null>(null)
 
   // Refs for audio resources
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
@@ -48,6 +63,8 @@ export default function VoiceMode({
   const lastSpokenRef = useRef<string | null>(null)
   const activeRef = useRef(active)
   const configRef = useRef<HTMLDivElement>(null)
+  const pipelineEsRef = useRef<EventSource | null>(null)
+  const lastSpokenStatusRef = useRef<string | null>(null)
 
   // Keep activeRef in sync
   useEffect(() => { activeRef.current = active }, [active])
@@ -106,8 +123,33 @@ export default function VoiceMode({
 
       const data = await resp.json()
       if (data.text && data.text.trim()) {
+        const spoken = data.text.trim()
+        const lower = spoken.toLowerCase().replace(/[.,!?]/g, '')
+
+        // Voice confirmation for pending workflow
+        const confirmWords = ['yes', 'proceed', 'go ahead', 'go', 'confirm', 'start', 'do it', 'yep', 'yeah', 'sure']
+        const denyWords = ['no', 'cancel', 'stop', 'never mind', 'nope', 'nah', 'don\'t']
+
+        if (pendingWorkflow) {
+          if (confirmWords.some(w => lower === w || lower.startsWith(w + ' '))) {
+            // User confirmed — send "yes" to trigger pipeline via chat
+            setPendingWorkflow(null)
+            setState('waiting')
+            onTranscript('yes')
+            return
+          }
+          if (denyWords.some(w => lower === w || lower.startsWith(w + ' '))) {
+            // User declined
+            setPendingWorkflow(null)
+            setState('idle')
+            if (activeRef.current) startListening()
+            return
+          }
+        }
+
+        // Normal flow
         setState('waiting')
-        onTranscript(data.text.trim())
+        onTranscript(spoken)
       } else {
         // No speech detected — go back to listening
         if (activeRef.current) startListening()
@@ -119,7 +161,7 @@ export default function VoiceMode({
       else setState('idle')
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onTranscript])
+  }, [onTranscript, pendingWorkflow])
 
   // ─── Start listening (recording) ──────────────────────────────────────────
   const startListening = useCallback(async () => {
@@ -306,9 +348,105 @@ export default function VoiceMode({
     if (lastAssistantMessage === lastSpokenRef.current) return
 
     lastSpokenRef.current = lastAssistantMessage
+
+    // Check if the response is a workflow trigger suggestion
+    if (workflowTrigger && /shall i proceed|reply \*\*yes\*\*/i.test(lastAssistantMessage)) {
+      setPendingWorkflow(workflowTrigger)
+      setState('confirming')
+      // Speak the suggestion, then start listening for voice confirmation
+      speak(lastAssistantMessage).then(() => {
+        // After speaking the suggestion, listen for confirmation
+        // speak() already chains to startListening on audio end,
+        // but we want to stay in 'confirming' state
+      })
+      return
+    }
+
     speak(lastAssistantMessage)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, lastAssistantMessage, loading, state])
+  }, [active, lastAssistantMessage, loading, state, workflowTrigger])
+
+  // ─── Detect pipeline start from response and track status ─────────────────
+  useEffect(() => {
+    if (!active || !lastAssistantMessage) return
+    // Check if response indicates a pipeline was started
+    const pipelineMatch = lastAssistantMessage.match(/\*\*Pipeline ID:\*\*\s*`([^`]+)`/)
+    if (pipelineMatch) {
+      setPipelineStatus(`Pipeline ${pipelineMatch[1].slice(0, 8)} started`)
+    }
+  }, [active, lastAssistantMessage])
+
+  // ─── Subscribe to pipeline SSE for voice status announcements ─────────────
+  useEffect(() => {
+    if (!active || !activePipelineId) return
+    // Close previous SSE if any
+    if (pipelineEsRef.current) {
+      pipelineEsRef.current.close()
+      pipelineEsRef.current = null
+    }
+
+    const es = new EventSource(`${API_BASE}/v1/workbench/pipelines/${activePipelineId}/stream`)
+    pipelineEsRef.current = es
+    lastSpokenStatusRef.current = null
+
+    es.onmessage = (e) => {
+      try {
+        const evt = JSON.parse(e.data)
+        if (evt.type === 'ping' || evt.type === 'init') return
+
+        // Build a spoken status announcement from pipeline events
+        const payload = evt.payload || evt
+        let announcement = ''
+
+        if (evt.type === 'phase_complete' || evt.type === 'phase_completed') {
+          const phaseIndex = payload.phase_index ?? payload.current_phase
+          const totalPhases = payload.total_phases ?? payload.phase_count
+          const phaseName = payload.phase_name || payload.name || ''
+          const summary = payload.summary || payload.result_summary || ''
+          announcement = `Phase ${(phaseIndex ?? 0) + 1} of ${totalPhases || '?'} complete.`
+          if (phaseName) announcement += ` ${phaseName}.`
+          if (summary) announcement += ` ${summary.slice(0, 150)}`
+        } else if (evt.type === 'pipeline_complete' || evt.type === 'pipeline_completed') {
+          announcement = 'Pipeline completed successfully.'
+          setPipelineStatus(null)
+        } else if (evt.type === 'pipeline_error' || evt.type === 'pipeline_failed') {
+          announcement = 'Pipeline encountered an error.'
+          setPipelineStatus(null)
+        } else if (evt.type === 'phase_started' || evt.type === 'phase_start') {
+          const phaseName = payload.phase_name || payload.name || ''
+          announcement = phaseName ? `Starting phase: ${phaseName}` : ''
+        }
+
+        // Speak the announcement if it's new
+        if (announcement && announcement !== lastSpokenStatusRef.current) {
+          lastSpokenStatusRef.current = announcement
+          setPipelineStatus(announcement)
+          // Only speak if not currently speaking something else
+          if (state === 'idle' || state === 'listening' || state === 'confirming') {
+            speak(announcement)
+          }
+        }
+      } catch { /* ignore parse errors */ }
+    }
+
+    es.onerror = () => { /* browser retries automatically */ }
+
+    return () => {
+      es.close()
+      pipelineEsRef.current = null
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, activePipelineId])
+
+  // ─── Clean up pipeline SSE when voice mode deactivates ────────────────────
+  useEffect(() => {
+    if (!active && pipelineEsRef.current) {
+      pipelineEsRef.current.close()
+      pipelineEsRef.current = null
+      setPendingWorkflow(null)
+      setPipelineStatus(null)
+    }
+  }, [active])
 
   // ─── Push-to-talk: spacebar ───────────────────────────────────────────────
   useEffect(() => {
@@ -357,13 +495,30 @@ export default function VoiceMode({
     return () => document.removeEventListener('mousedown', handler)
   }, [showConfig])
 
+  // ─── Workflow confirmation handlers ────────────────────────────────────────
+  const handleConfirmWorkflow = useCallback(() => {
+    setPendingWorkflow(null)
+    setState('waiting')
+    onTranscript('yes')
+  }, [onTranscript])
+
+  const handleDenyWorkflow = useCallback(() => {
+    setPendingWorkflow(null)
+    if (activeRef.current) startListening()
+    else setState('idle')
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // ─── State label ──────────────────────────────────────────────────────────
   const stateLabel: Record<VoiceState, string> = {
     idle: 'Voice Mode Off',
-    listening: pushToTalk && pttActive ? 'Listening (hold Space)…' : 'Listening…',
+    listening: pendingWorkflow
+      ? 'Say "yes" to confirm or "no" to cancel…'
+      : pushToTalk && pttActive ? 'Listening (hold Space)…' : 'Listening…',
     transcribing: 'Transcribing…',
     waiting: 'Thinking…',
-    speaking: 'Speaking…',
+    speaking: pipelineStatus ? pipelineStatus : 'Speaking…',
+    confirming: `Start ${pendingWorkflow?.method_name || 'workflow'} pipeline?`,
   }
 
   if (!active) return null
@@ -379,9 +534,11 @@ export default function VoiceMode({
               ? 'bg-red-100 dark:bg-red-900/40 text-red-500'
               : state === 'speaking'
                 ? 'bg-green-100 dark:bg-green-900/40 text-green-500'
-                : state === 'transcribing' || state === 'waiting'
-                  ? 'bg-orange-100 dark:bg-orange-900/40 text-orange-500'
-                  : 'bg-gray-100 dark:bg-gray-800 text-gray-400'
+                : state === 'confirming'
+                  ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-500'
+                  : state === 'transcribing' || state === 'waiting'
+                    ? 'bg-orange-100 dark:bg-orange-900/40 text-orange-500'
+                    : 'bg-gray-100 dark:bg-gray-800 text-gray-400'
           }`}>
             {state === 'listening' ? (
               <>
@@ -410,6 +567,10 @@ export default function VoiceMode({
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
+            ) : state === 'confirming' ? (
+              <svg className="w-4 h-4 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
             ) : (
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4M12 15a3 3 0 003-3V5a3 3 0 00-6 0v7a3 3 0 003 3z" />
@@ -421,6 +582,37 @@ export default function VoiceMode({
             {stateLabel[state]}
           </span>
         </div>
+
+        {/* Workflow confirmation buttons */}
+        {(pendingWorkflow && (state === 'confirming' || state === 'listening' || state === 'speaking')) && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleConfirmWorkflow}
+              className="flex items-center gap-1 px-3 py-1 rounded-lg bg-green-500 hover:bg-green-600 text-white text-xs font-medium transition-colors"
+            >
+              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+              </svg>
+              Yes
+            </button>
+            <button
+              onClick={handleDenyWorkflow}
+              className="flex items-center gap-1 px-3 py-1 rounded-lg bg-gray-400 hover:bg-gray-500 text-white text-xs font-medium transition-colors"
+            >
+              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+              No
+            </button>
+          </div>
+        )}
+
+        {/* Pipeline status badge */}
+        {pipelineStatus && !pendingWorkflow && (
+          <span className="text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 rounded-full">
+            {pipelineStatus}
+          </span>
+        )}
 
         {/* Config button */}
         <div className="relative" ref={configRef}>

@@ -1563,6 +1563,10 @@ export default function ChatPage() {
 
   // ── Voice mode state ──────────────────────────────────────────────────────
   const [voiceModeActive, setVoiceModeActive] = useState(false)
+  const [voiceWorkflowTrigger, setVoiceWorkflowTrigger] = useState<{
+    method_id: string; method_name: string; score: number; is_custom: boolean;
+  } | null>(null)
+  const [voicePipelineId, setVoicePipelineId] = useState<string | null>(null)
 
   // ── Identity wizard state ─────────────────────────────────────────────────
   const [wizardMode, setWizardMode] = useState<WizardMode | null>(null)
@@ -2093,6 +2097,15 @@ export default function ChatPage() {
       const modelName = data.model || ''
       const convId = data.conversation_id || data.modelmesh?.conversation_id || activeConvId
 
+      // Extract workflow trigger metadata for voice mode
+      const wfTrigger = data.modelmesh?.workflow_trigger || null
+      if (voiceModeActive) {
+        setVoiceWorkflowTrigger(wfTrigger)
+        // Detect pipeline ID from "Pipeline ID: `xxx`" in response
+        const pidMatch = fullContent.match(/\*\*Pipeline ID:\*\*\s*`([^`]+)`/)
+        if (pidMatch) setVoicePipelineId(pidMatch[1])
+      }
+
       // Update assistant message
       setMessages(prev => prev.map(m =>
         m.id === assistantId
@@ -2600,6 +2613,8 @@ export default function ChatPage() {
           onTranscript={sendVoiceMessage}
           lastAssistantMessage={lastAssistantMessage}
           loading={loading}
+          workflowTrigger={voiceWorkflowTrigger}
+          activePipelineId={voicePipelineId}
         />
 
         {/* Input bar */}
