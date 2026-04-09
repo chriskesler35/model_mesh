@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.middleware.auth import verify_api_key
+from app.middleware.rbac import require_role
 from app.models.custom_method import CustomMethod
 
 logger = logging.getLogger(__name__)
@@ -291,7 +292,7 @@ async def get_active_prompt():
     return {"method_id": active_id, "stack": [], "prompt": method.get("system_prompt", "")}
 
 
-@router.post("/activate")
+@router.post("/activate", dependencies=[require_role("member")])
 async def activate_method(body: MethodActivate):
     """Activate a single method (clears stack mode)."""
     if body.method_id not in BUILT_IN_METHODS:
@@ -303,7 +304,7 @@ async def activate_method(body: MethodActivate):
     return {"ok": True, "active_method": body.method_id, "active_stack": state["active_stack"]}
 
 
-@router.post("/stack")
+@router.post("/stack", dependencies=[require_role("member")])
 async def set_stack(body: StackUpdate):
     """Set the active method stack (2+ methods run together)."""
     invalid = [mid for mid in body.stack if mid not in BUILT_IN_METHODS]
@@ -324,7 +325,7 @@ async def set_stack(body: StackUpdate):
     }
 
 
-@router.post("/stack/add")
+@router.post("/stack/add", dependencies=[require_role("member")])
 async def add_to_stack(body: MethodActivate):
     """Add a method to the current stack."""
     if body.method_id not in BUILT_IN_METHODS or body.method_id == "standard":
@@ -340,7 +341,7 @@ async def add_to_stack(body: MethodActivate):
     return {"ok": True, "active_stack": stack, "conflicts": warnings}
 
 
-@router.post("/stack/remove")
+@router.post("/stack/remove", dependencies=[require_role("member")])
 async def remove_from_stack(body: MethodActivate):
     """Remove a method from the stack."""
     state = _load_state()
@@ -351,7 +352,7 @@ async def remove_from_stack(body: MethodActivate):
     return {"ok": True, "active_stack": stack}
 
 
-@router.delete("/stack")
+@router.delete("/stack", dependencies=[require_role("member")])
 async def clear_stack():
     """Clear the stack and reset to Standard."""
     state = _load_state()
@@ -391,7 +392,7 @@ async def export_custom_method(method_id: str, db: AsyncSession = Depends(get_db
     )
 
 
-@router.post("/custom/import")
+@router.post("/custom/import", dependencies=[require_role("member")])
 async def import_custom_method(body: MethodImportRequest, db: AsyncSession = Depends(get_db)):
     """Import a custom method from JSON. Warns if a method with the same name exists."""
     method_data = body.method

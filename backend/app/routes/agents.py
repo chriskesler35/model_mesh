@@ -19,6 +19,7 @@ from app.models.agent import Agent, DEFAULT_AGENTS
 from app.models.agent_run import AgentRun
 from app.models import Persona, Model
 from app.middleware.auth import verify_api_key
+from app.middleware.rbac import require_role
 from pydantic import BaseModel
 from typing import Dict, Optional, List
 import logging
@@ -254,7 +255,7 @@ async def list_agents(
     return AgentListResponse(data=data, total=len(data))
 
 
-@router.post("", response_model=AgentResponse)
+@router.post("", response_model=AgentResponse, dependencies=[require_role("member")])
 async def create_agent(agent: AgentCreate, db: AsyncSession = Depends(get_db)):
     from app.models import UserProfile
     result = await db.execute(select(UserProfile).limit(1))
@@ -394,7 +395,7 @@ async def update_agent(agent_id: str, updates: AgentUpdate, db: AsyncSession = D
     return AgentResponse(**d)
 
 
-@router.delete("/{agent_id}")
+@router.delete("/{agent_id}", dependencies=[require_role("admin")])
 async def delete_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
     try:
         result = await db.execute(select(Agent).where(Agent.id == uuid.UUID(agent_id)))
