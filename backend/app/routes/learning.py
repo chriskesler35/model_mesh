@@ -1,16 +1,20 @@
-"""Learning / auto-tuning endpoints — feedback analysis and routing suggestions."""
+"""Learning / auto-tuning endpoints — feedback analysis, routing suggestions, and usage patterns."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
 from app.database import get_db
-from app.middleware.auth import verify_api_key
+from app.middleware.auth import verify_api_key, current_user
 from app.services.learning import (
     analyze_feedback,
     get_pending_suggestions,
     apply_suggestion,
     dismiss_suggestion,
+    detect_usage_patterns,
+    get_pattern_suggestions,
+    set_pattern_tracking,
 )
 
 router = APIRouter(prefix="/v1/learning", tags=["learning"], dependencies=[Depends(verify_api_key)])
@@ -73,4 +77,41 @@ async def dismiss_suggestion_endpoint(
         result = await dismiss_suggestion(db, suggestion_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Usage-pattern endpoints (E12.3)
+# ---------------------------------------------------------------------------
+
+class PatternOptOutBody(BaseModel):
+    enabled: bool
+
+
+@router.get("/patterns")
+async def get_usage_patterns(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return detected usage patterns for the current user."""
+    user = current_user(request)
+    user_id = user["id"]
+    patterns = await detect_usage_patterns(db, user_id)
+    suggestions = await get_pattern_suggestions(db, user_id)
+    return {"patterns": patterns, "suggestions": suggestions}
+
+
+@router.put("/patterns/opt-out")
+async def toggle_pattern_tracking(
+    body: PatternOptOutBody,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle pattern tracking for the current user.
+
+    Send `{"enabled": false}` to opt out, `{"enabled": true}` to opt back in.
+    """
+    user = current_user(request)
+    user_id = user["id"]
+    result = await set_pattern_tracking(db, user_id, body.enabled)
     return result
