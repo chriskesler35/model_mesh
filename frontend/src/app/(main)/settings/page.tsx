@@ -3,6 +3,7 @@
 import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 import PreferencesTab from '@/components/PreferencesTab'
 import ImageSettingsTab from '@/components/ImageSettingsTab'
+import VoiceAudioTab from '@/components/VoiceAudioTab'
 import { RemoteAccessTab } from './remote'
 
 import { useState, useEffect, useCallback } from 'react'
@@ -899,7 +900,7 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true)
   const [profileSaving, setProfileSaving] = useState(false)
   const [profileSaved, setProfileSaved] = useState(false)
-  const [activeTab, setActiveTab] = useState<'identity' | 'profile' | 'memory' | 'preferences' | 'conversations' | 'apikeys' | 'remote' | 'images' | 'server' | 'budget'>('identity')
+  const [activeTab, setActiveTab] = useState<'identity' | 'profile' | 'memory' | 'preferences' | 'voice' | 'conversations' | 'apikeys' | 'remote' | 'images' | 'server' | 'budget'>('identity')
   const [budgetLimit, setBudgetLimit] = useState<string>('')
   const [budgetSaving, setBudgetSaving] = useState(false)
   const [budgetSaved, setBudgetSaved] = useState(false)
@@ -1036,6 +1037,7 @@ export default function SettingsPage() {
             ['profile', 'Profile', 'border-indigo-500 text-indigo-600'],
             ['memory', 'Memory', 'border-indigo-500 text-indigo-600'],
             ['preferences', 'Preferences', 'border-indigo-500 text-indigo-600'],
+            ['voice', '🎙️ Voice & Audio', 'border-violet-500 text-violet-600'],
             ['images', 'Image Generation', 'border-pink-500 text-pink-600'],
             ['conversations', 'Conversations', 'border-indigo-500 text-indigo-600'],
             ['apikeys', 'API Keys', 'border-indigo-500 text-indigo-600'],
@@ -1222,6 +1224,17 @@ export default function SettingsPage() {
       {/* Preferences Tab */}
       {activeTab === 'preferences' && (
         <PreferencesTab />
+      )}
+
+      {/* Voice & Audio Tab */}
+      {activeTab === 'voice' && (
+        <div>
+          <div className="mb-6">
+            <h2 className="text-lg font-semibold text-gray-900">Voice & Audio</h2>
+            <p className="text-sm text-gray-500 mt-1">Configure speech-to-text, text-to-speech, voice selection, and playback.</p>
+          </div>
+          <VoiceAudioTab />
+        </div>
       )}
 
       {/* Conversations Tab */}
