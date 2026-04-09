@@ -521,6 +521,44 @@ async def _save_messages(db, conversation_id: str, user_content: str, assistant_
             await fresh_db.commit()
             logger.info(f"Saved messages for conv {conversation_id[:8]}")
 
+            # Check for @mentions and create notifications
+            try:
+                from app.services.mentions import extract_mentions
+                from app.routes.collaboration import get_user_by_username
+                from app.models.notification import Notification
+                from app.services.ws_manager import manager
+
+                mentioned_usernames = extract_mentions(user_content)
+                for username in mentioned_usernames:
+                    target_user = get_user_by_username(username)
+                    if not target_user:
+                        continue
+                    target_id = target_user.get("id", "")
+                    preview = user_content[:120] + ("…" if len(user_content) > 120 else "")
+                    notif = Notification(
+                        user_id=target_id,
+                        type="mention",
+                        title=f"You were mentioned in a conversation",
+                        message=preview,
+                        conversation_id=conv_str,
+                        message_id=str(user_msg.id),
+                    )
+                    fresh_db.add(notif)
+                    # Push real-time notification via WebSocket
+                    try:
+                        import asyncio as _ws_asyncio
+                        _ws_asyncio.create_task(manager.send_to_user(target_id, {
+                            "type": "notification",
+                            "payload": notif.to_dict(),
+                        }))
+                    except Exception:
+                        pass  # WebSocket push is best-effort
+                if mentioned_usernames:
+                    await fresh_db.commit()
+                    logger.info(f"Created {len(mentioned_usernames)} mention notification(s) in conv {conversation_id[:8]}")
+            except Exception as mention_err:
+                logger.warning(f"Mention processing failed (non-fatal): {mention_err}")
+
             # Write context snapshot — load all messages for this conversation
             try:
                 from sqlalchemy import select as _select

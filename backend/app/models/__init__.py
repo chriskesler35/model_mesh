@@ -21,6 +21,7 @@ from app.models.app_settings import AppSetting
 from app.models.feedback import Feedback
 from app.models.custom_method import CustomMethod
 from app.models.learning_suggestion import LearningSuggestion
+from app.models.notification import Notification
 
 __all__ = [
     "Base", "BaseMixin", "Provider", "Model", "Persona",
@@ -30,4 +31,5 @@ __all__ = [
     "Feedback",
     "CustomMethod",
     "LearningSuggestion",
+    "Notification",
 ]
