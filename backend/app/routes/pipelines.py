@@ -174,7 +174,7 @@ def _format_prior_artifact_for_context(phase_run_dict: dict) -> str:
 
 
 # ─── Phase runner (one phase = one LLM call) ──────────────────────────────────
-async def _run_phase(pipeline_id: str, phase_index: int):
+async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, max_retries: int = 0):
     """Execute a single phase. Persists PhaseRun + artifact. Streams events."""
     from app.models.pipeline import Pipeline, PhaseRun
     from app.services.model_client import ModelClient
@@ -285,6 +285,10 @@ async def _run_phase(pipeline_id: str, phase_index: int):
     model_id = phase_def.get("model") or resolved_model or phase_def.get("default_model") or "claude-sonnet-4-6"
     persona_system_prompt = resolved_system_prompt  # used below when composing the phase system prompt
 
+    # Resolve max_retries from phase_def if not passed explicitly
+    if max_retries == 0:
+        max_retries = phase_def.get("max_retries", 0)
+
     # Create PhaseRun row
     phase_run_id = str(uuid.uuid4())
     started = datetime.utcnow()
@@ -298,6 +302,8 @@ async def _run_phase(pipeline_id: str, phase_index: int):
             model_id=model_id,
             status="running",
             started_at=started,
+            retry_count=retry_count,
+            max_retries=max_retries,
             input_context={"prior_phases": [r["phase_name"] for r in prior_run_dicts]},
         )
         db.add(pr)
@@ -622,37 +628,139 @@ async def _run_phase(pipeline_id: str, phase_index: int):
         existing_raw = artifact.get("raw", "")
         artifact["raw"] = existing_raw + "\n\n## Commands executed:\n" + "\n\n".join(cmd_results_for_context)
 
-    # Persist phase run (awaiting_approval or approved-if-auto)
-    final_status = "approved" if auto_approve else "awaiting_approval"
-    await _db_update_phase(
-        phase_run_id,
-        status=final_status,
-        raw_response=full_response,
-        output_artifact=artifact,
-        completed_at=datetime.utcnow(),
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-    )
+    # ── Auto-retry with feedback: check if this reviewer phase rejected ────────
+    # If the phase has on_failure="retry_with_feedback" and the output contains
+    # a rejection verdict, automatically re-run the upstream phase with
+    # the reviewer's feedback injected as context.
+    auto_retry_triggered = False
+    if phase_def.get("on_failure") == "retry_with_feedback":
+        rejection_verdict = False
+        feedback_text = ""
+        try:
+            artifact_data = artifact.get("data") if artifact.get("type") == "json" else None
+            if artifact_data and isinstance(artifact_data, dict):
+                verdict = str(artifact_data.get("overall_verdict", artifact_data.get("verdict", ""))).lower().strip()
+                if verdict in ("reject", "rejected", "fail", "failed", "needs_changes"):
+                    rejection_verdict = True
+                    # Extract feedback details from the artifact
+                    feedback_parts = []
+                    issues = artifact_data.get("issues", [])
+                    if issues and isinstance(issues, list):
+                        for issue in issues:
+                            if isinstance(issue, dict):
+                                sev = issue.get("severity", "")
+                                desc = issue.get("description", "")
+                                suggestion = issue.get("suggestion", "")
+                                file_ref = issue.get("file", "")
+                                parts = [f"[{sev}]" if sev else ""]
+                                if file_ref:
+                                    parts.append(f"in {file_ref}")
+                                parts.append(desc)
+                                if suggestion:
+                                    parts.append(f"Suggestion: {suggestion}")
+                                feedback_parts.append(" ".join(p for p in parts if p))
+                            elif isinstance(issue, str):
+                                feedback_parts.append(issue)
+                    missing = artifact_data.get("missing_from_spec", [])
+                    if missing:
+                        feedback_parts.append("Missing from spec: " + ", ".join(str(m) for m in missing))
+                    security = artifact_data.get("security_concerns", [])
+                    if security:
+                        feedback_parts.append("Security concerns: " + ", ".join(str(s) for s in security))
+                    gaps = artifact_data.get("gaps", [])
+                    if gaps:
+                        feedback_parts.append("Gaps: " + ", ".join(str(g) for g in gaps))
+                    recommendations = artifact_data.get("recommendations", [])
+                    if recommendations:
+                        feedback_parts.append("Recommendations: " + ", ".join(str(r) for r in recommendations))
 
-    _push(
-        pipeline_id, "phase_completed",
-        phase_index=phase_index,
-        phase_name=phase_name,
-        agent_role=agent_role,
-        phase_run_id=phase_run_id,
-        artifact=artifact,
-        status=final_status,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-    )
+                    feedback_text = "\n".join(feedback_parts) if feedback_parts else f"Reviewer verdict: {verdict}"
+        except Exception as e:
+            logger.warning(f"Failed to parse reviewer output for auto-retry: {e}")
 
-    if auto_approve:
-        # Advance immediately
-        await _advance_to_next(pipeline_id, phase_index)
-    else:
-        await _db_update_pipeline(pipeline_id, status="awaiting_approval")
-        _push(pipeline_id, "awaiting_approval", phase_index=phase_index,
-              message=f"Phase '{phase_name}' complete — awaiting your approval.")
+        if rejection_verdict and feedback_text:
+            # Persist this reviewer run as "rejected" (it produced a rejection verdict)
+            await _db_update_phase(
+                phase_run_id,
+                status="rejected",
+                raw_response=full_response,
+                output_artifact=artifact,
+                completed_at=datetime.utcnow(),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+            _push(
+                pipeline_id, "phase_completed",
+                phase_index=phase_index,
+                phase_name=phase_name,
+                agent_role=agent_role,
+                phase_run_id=phase_run_id,
+                artifact=artifact,
+                status="rejected",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+
+            # Determine the upstream phase to retry (the one right before this reviewer)
+            upstream_index = phase_def.get("retry_target", phase_index - 1)
+            if upstream_index < 0:
+                upstream_index = 0
+
+            # Count existing retries for the upstream phase
+            retry_max = phase_def.get("max_retries", 2)
+            async with AsyncSessionLocal() as db:
+                from sqlalchemy import func as sqlfunc
+                existing_retries = (await db.execute(
+                    select(sqlfunc.count(PhaseRun.id))
+                    .where(PhaseRun.pipeline_id == pipeline_id)
+                    .where(PhaseRun.phase_index == upstream_index)
+                    .where(PhaseRun.retry_count > 0)
+                )).scalar() or 0
+                # The actual retry count is the number of retry runs already done
+                current_retry_count = existing_retries
+
+            auto_retry_triggered = await _retry_upstream_with_feedback(
+                pipeline_id=pipeline_id,
+                reviewer_phase_index=phase_index,
+                upstream_phase_index=upstream_index,
+                feedback_text=feedback_text,
+                retry_count=current_retry_count,
+                max_retries=retry_max,
+            )
+
+    # ── Normal flow (no auto-retry triggered) ─────────────────────────────────
+    if not auto_retry_triggered:
+        # Persist phase run (awaiting_approval or approved-if-auto)
+        final_status = "approved" if auto_approve else "awaiting_approval"
+        await _db_update_phase(
+            phase_run_id,
+            status=final_status,
+            raw_response=full_response,
+            output_artifact=artifact,
+            completed_at=datetime.utcnow(),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+
+        _push(
+            pipeline_id, "phase_completed",
+            phase_index=phase_index,
+            phase_name=phase_name,
+            agent_role=agent_role,
+            phase_run_id=phase_run_id,
+            artifact=artifact,
+            status=final_status,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+
+        if auto_approve:
+            # Advance immediately
+            await _advance_to_next(pipeline_id, phase_index)
+        else:
+            await _db_update_pipeline(pipeline_id, status="awaiting_approval")
+            _push(pipeline_id, "awaiting_approval", phase_index=phase_index,
+                  message=f"Phase '{phase_name}' complete — awaiting your approval.")
 
 
 async def _advance_to_next(pipeline_id: str, current_index: int):
@@ -671,6 +779,106 @@ async def _advance_to_next(pipeline_id: str, current_index: int):
         return
     await _db_update_pipeline(pipeline_id, current_phase_index=next_index, status="running")
     asyncio.create_task(_run_phase(pipeline_id, next_index))
+
+
+async def _retry_upstream_with_feedback(
+    pipeline_id: str,
+    reviewer_phase_index: int,
+    upstream_phase_index: int,
+    feedback_text: str,
+    retry_count: int,
+    max_retries: int,
+) -> bool:
+    """Re-run an upstream phase with reviewer feedback injected.
+
+    Returns True if retry was initiated, False if max_retries exhausted
+    (pipeline pauses for manual approval in that case).
+    """
+    from app.models.pipeline import Pipeline, PhaseRun
+
+    # Check if retries exhausted
+    if retry_count >= max_retries:
+        logger.info(
+            f"Pipeline {pipeline_id}: max retries ({max_retries}) exhausted "
+            f"for phase {upstream_phase_index}. Pausing for manual approval."
+        )
+        await _db_update_pipeline(pipeline_id, status="awaiting_approval")
+        _push(
+            pipeline_id, "phase_retry_exhausted",
+            phase_index=upstream_phase_index,
+            phase_name="",  # filled below
+            retry_count=retry_count,
+            max_retries=max_retries,
+            message=f"Phase has been retried {retry_count} time(s) without passing review. Manual approval required.",
+        )
+        # Update the event with the actual phase name
+        async with AsyncSessionLocal() as db:
+            p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
+            if p and p.phases and upstream_phase_index < len(p.phases):
+                phase_name = p.phases[upstream_phase_index].get("name", f"Phase {upstream_phase_index}")
+                _push(
+                    pipeline_id, "awaiting_approval",
+                    phase_index=upstream_phase_index,
+                    message=f"Phase '{phase_name}' failed review after {retry_count} retries. Awaiting manual approval.",
+                )
+        return False
+
+    # Inject feedback into the upstream phase's system prompt
+    async with AsyncSessionLocal() as db:
+        p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
+        if not p:
+            return False
+
+        phases = list(p.phases or [])
+        if upstream_phase_index >= len(phases):
+            return False
+
+        upstream_phase = phases[upstream_phase_index]
+        phase_name = upstream_phase.get("name", f"Phase {upstream_phase_index}")
+
+        # Add retry feedback block to the upstream phase's system prompt
+        feedback_block = (
+            f"\n\n# Retry attempt {retry_count + 1}/{max_retries} — Reviewer feedback from previous attempt:\n"
+            f"{feedback_text}\n\n"
+            f"Address ALL the reviewer's feedback in this revision. This is retry {retry_count + 1} of {max_retries}."
+        )
+        # Remove any prior retry feedback blocks to avoid accumulation
+        original_prompt = upstream_phase.get("system_prompt", "")
+        # Strip previous retry blocks if present
+        import re as _re
+        original_prompt = _re.sub(
+            r'\n\n# Retry attempt \d+/\d+ — Reviewer feedback from previous attempt:.*?'
+            r'This is retry \d+ of \d+\.',
+            '', original_prompt, flags=re.DOTALL
+        )
+        phases[upstream_phase_index]["system_prompt"] = original_prompt + feedback_block
+
+        # Update pipeline: rewind to upstream phase
+        p.phases = phases
+        p.current_phase_index = upstream_phase_index
+        p.status = "running"
+        await db.commit()
+
+    new_retry = retry_count + 1
+    feedback_summary = feedback_text[:200] + ("..." if len(feedback_text) > 200 else "")
+    _push(
+        pipeline_id, "phase_retry",
+        phase_index=upstream_phase_index,
+        phase_name=phase_name,
+        retry_count=new_retry,
+        max_retries=max_retries,
+        feedback_summary=feedback_summary,
+        message=f"Retrying phase '{phase_name}' with reviewer feedback (attempt {new_retry}/{max_retries}).",
+    )
+
+    logger.info(
+        f"Pipeline {pipeline_id}: retrying phase {upstream_phase_index} ({phase_name}) "
+        f"with feedback — attempt {new_retry}/{max_retries}"
+    )
+
+    # Run the upstream phase again
+    asyncio.create_task(_run_phase(pipeline_id, upstream_phase_index, retry_count=new_retry, max_retries=max_retries))
+    return True
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
