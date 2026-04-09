@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     github_client_id: Optional[str] = None
     github_client_secret: Optional[str] = None
     github_oauth_redirect_url: str = "http://localhost:3001/auth/github/callback"
+
+    # Google OAuth (register at https://console.cloud.google.com/apis/credentials)
+    google_oauth_client_id: Optional[str] = None
+    google_oauth_client_secret: Optional[str] = None
+    google_oauth_redirect_url: str = "http://localhost:3001/auth/google/callback"
     
     # Telegram bot
     telegram_bot_token: Optional[str] = None
