@@ -263,25 +263,25 @@ function ApprovalModal({
   run: PhaseRun
   phase: PhaseDef | undefined
   onClose: () => void
-  onApprove: (feedback?: string) => Promise<void>
-  onReject: (feedback: string) => Promise<void>
-  onSkip: (reason?: string) => Promise<void>
+  onApprove: (feedback?: string, phaseIndex?: number) => Promise<void>
+  onReject: (feedback: string, phaseIndex?: number) => Promise<void>
+  onSkip: (reason?: string, phaseIndex?: number) => Promise<void>
 }) {
   const [feedback, setFeedback] = useState('')
   const [busy, setBusy] = useState<'approve' | 'reject' | 'skip' | null>(null)
 
   const handleApprove = async () => {
     setBusy('approve')
-    try { await onApprove(feedback || undefined); onClose() } finally { setBusy(null) }
+    try { await onApprove(feedback || undefined, run.phase_index); onClose() } finally { setBusy(null) }
   }
   const handleReject = async () => {
     if (!feedback.trim()) { alert('Rejection requires feedback — tell the agent what to fix.'); return }
     setBusy('reject')
-    try { await onReject(feedback); onClose() } finally { setBusy(null) }
+    try { await onReject(feedback, run.phase_index); onClose() } finally { setBusy(null) }
   }
   const handleSkip = async () => {
     setBusy('skip')
-    try { await onSkip(feedback || undefined); onClose() } finally { setBusy(null) }
+    try { await onSkip(feedback || undefined, run.phase_index); onClose() } finally { setBusy(null) }
   }
 
   return (
@@ -499,22 +499,25 @@ export default function PipelinePage() {
     return () => { es.close(); esRef.current = null }
   }, [pipelineId, refetch])
 
-  const approve = async (feedback?: string) => {
-    await fetch(`${API_BASE}/v1/workbench/pipelines/${pipelineId}/approve`, {
+  const approve = async (feedback?: string, phaseIndex?: number) => {
+    const qs = phaseIndex !== undefined ? `?phase_index=${phaseIndex}` : ''
+    await fetch(`${API_BASE}/v1/workbench/pipelines/${pipelineId}/approve${qs}`, {
       method: 'POST', headers: AUTH_HEADERS,
       body: JSON.stringify({ feedback: feedback || null }),
     })
     refetch()
   }
-  const reject = async (feedback: string) => {
-    await fetch(`${API_BASE}/v1/workbench/pipelines/${pipelineId}/reject`, {
+  const reject = async (feedback: string, phaseIndex?: number) => {
+    const qs = phaseIndex !== undefined ? `?phase_index=${phaseIndex}` : ''
+    await fetch(`${API_BASE}/v1/workbench/pipelines/${pipelineId}/reject${qs}`, {
       method: 'POST', headers: AUTH_HEADERS,
       body: JSON.stringify({ feedback }),
     })
     refetch()
   }
-  const skip = async (reason?: string) => {
-    await fetch(`${API_BASE}/v1/workbench/pipelines/${pipelineId}/skip`, {
+  const skip = async (reason?: string, phaseIndex?: number) => {
+    const qs = phaseIndex !== undefined ? `?phase_index=${phaseIndex}` : ''
+    await fetch(`${API_BASE}/v1/workbench/pipelines/${pipelineId}/skip${qs}`, {
       method: 'POST', headers: AUTH_HEADERS,
       body: JSON.stringify({ reason: reason || null }),
     })
@@ -560,6 +563,14 @@ export default function PipelinePage() {
   const statusBadge = STATUS_STYLE[pipeline.status] || STATUS_STYLE.pending
   const totalTokens = phaseRuns.reduce((sum, r) => sum + (r.input_tokens || 0) + (r.output_tokens || 0), 0)
   const currentPhaseRun = runsByIndex[pipeline.current_phase_index]
+
+  // Parallel approval: all phases currently awaiting approval
+  const awaitingRuns = Object.values(runsByIndex).filter(r => r.status === 'awaiting_approval')
+  // Progress: count phases with terminal status
+  const completedCount = Object.values(runsByIndex).filter(r =>
+    r.status === 'approved' || r.status === 'skipped'
+  ).length
+  const totalPhases = pipeline.phases.length
 
   return (
     <div className="space-y-6">
@@ -613,21 +624,55 @@ export default function PipelinePage() {
         </div>
       </div>
 
-      {/* Awaiting-approval banner */}
-      {pipeline.status === 'awaiting_approval' && currentPhaseRun && (
-        <div className="rounded-xl border-2 border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-700 p-4 flex items-center justify-between gap-4">
-          <div>
-            <div className="text-sm font-semibold text-amber-900 dark:text-amber-200">
-              {currentPhaseRun.agent_role} is waiting for your review
-            </div>
-            <div className="text-xs text-amber-700 dark:text-amber-300 mt-0.5">
-              Phase "{currentPhaseRun.phase_name}" complete · review the artifact and approve, reject with feedback, or skip
-            </div>
+      {/* Progress indicator */}
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between text-xs text-gray-600 dark:text-gray-400">
+          <span className="font-semibold">{completedCount} of {totalPhases} phases complete</span>
+          <span>{Math.round((completedCount / totalPhases) * 100)}%</span>
+        </div>
+        <div className="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+          <div
+            className="h-full bg-gradient-to-r from-green-400 to-emerald-500 rounded-full transition-all duration-500"
+            style={{ width: `${(completedCount / totalPhases) * 100}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Awaiting-approval banner — shows ALL phases needing review */}
+      {awaitingRuns.length > 0 && (
+        <div className="rounded-xl border-2 border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-700 p-4 space-y-3">
+          <div className="text-sm font-semibold text-amber-900 dark:text-amber-200">
+            {awaitingRuns.length === 1
+              ? '1 phase awaiting your review'
+              : `${awaitingRuns.length} phases awaiting your review`}
           </div>
-          <button onClick={() => setApprovalRun(currentPhaseRun)}
-            className="px-4 py-2 text-sm font-semibold rounded-lg bg-amber-500 hover:bg-amber-600 text-white">
-            Review now →
-          </button>
+          <div className="space-y-2">
+            {awaitingRuns.map(run => (
+              <div key={run.id} className="flex items-center justify-between gap-3 bg-white dark:bg-gray-800 rounded-lg px-3 py-2 border border-amber-200 dark:border-amber-800">
+                <div className="flex-1 min-w-0">
+                  <span className="text-sm font-medium text-gray-900 dark:text-white">{run.phase_name}</span>
+                  <span className="text-xs text-gray-500 ml-2">({run.agent_role})</span>
+                </div>
+                <div className="flex gap-2 flex-shrink-0">
+                  <button
+                    onClick={() => { skip(undefined, run.phase_index) }}
+                    className="px-2.5 py-1 text-xs font-medium rounded-md text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 border border-gray-300 dark:border-gray-600">
+                    ⏭ Skip
+                  </button>
+                  <button
+                    onClick={() => setApprovalRun(run)}
+                    className="px-2.5 py-1 text-xs font-medium rounded-md bg-amber-500 hover:bg-amber-600 text-white">
+                    👁 Review
+                  </button>
+                  <button
+                    onClick={() => { approve(undefined, run.phase_index) }}
+                    className="px-2.5 py-1 text-xs font-medium rounded-md bg-green-600 hover:bg-green-700 text-white">
+                    ✓ Approve
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
