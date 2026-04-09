@@ -73,6 +73,72 @@ _mp(
     lambda m: {"name": m.group(1).strip()},
 )
 
+# ── Persona command patterns ──────────────────────────────────────────────────
+# Each tuple: (compiled_regex, action, param_extractor_lambda)
+
+_PERSONA_PATTERNS: list[tuple[re.Pattern, str, callable]] = []
+
+
+def _pp(pattern: str, action: str, extractor):
+    """Register a persona command pattern."""
+    _PERSONA_PATTERNS.append((re.compile(pattern, re.IGNORECASE), action, extractor))
+
+
+# "create a persona called '<name>' that <description> using <model>"
+_pp(
+    r"^(?:create|add|new)\s+(?:a\s+)?persona\s+(?:called|named)\s+['\"']?([^'\"]+?)['\"']?(?:\s+(?:that|which|who|to)\s+(.+?))?(?:\s+(?:using|via)\s+(.+?))?\s*$",
+    "create",
+    lambda m: {"name": m.group(1).strip(), "description": (m.group(2) or "").strip(), "model": (m.group(3) or "").strip()},
+)
+
+# "create persona <name>" (simple form)
+_pp(
+    r"^(?:create|add|new)\s+persona\s+([^'\"]+?)\s*$",
+    "create",
+    lambda m: {"name": m.group(1).strip()},
+)
+
+# "update persona <name> to use <model>"
+_pp(
+    r"^(?:update|modify|change|edit)\s+persona\s+['\"]?([^'\"]+?)['\"]?\s+(?:to\s+)?use\s+(.+?)\s*$",
+    "update",
+    lambda m: {"name": m.group(1).strip(), "model": m.group(2).strip()},
+)
+
+# "update persona <name> description/prompt <text>"
+_pp(
+    r"^(?:update|modify|change|edit)\s+persona\s+['\"]?([^'\"]+?)['\"]?\s+(?:description|prompt|system.?prompt)\s+(?:to\s+)?(.+?)\s*$",
+    "update",
+    lambda m: {"name": m.group(1).strip(), "description": m.group(2).strip()},
+)
+
+# "switch to persona <name>" / "use persona <name>"
+_pp(
+    r"^(?:switch\s+(?:to\s+)?|use\s+|activate\s+)persona\s+['\"]?([^'\"]+?)['\"]?\s*$",
+    "switch",
+    lambda m: {"name": m.group(1).strip()},
+)
+
+# "show persona <name>" / "describe persona <name>"
+_pp(
+    r"^(?:show|describe|display|info)\s+persona\s+['\"]?([^'\"]+?)['\"]?\s*$",
+    "show",
+    lambda m: {"name": m.group(1).strip()},
+)
+
+# "list personas" / "show personas"
+_pp(
+    r"^(?:list|show|get|display)\s+(?:my\s+)?personas?\s*$",
+    "list",
+    lambda m: {},
+)
+
+# Slash-command variants
+_pp(r"^/create[-_]?persona\s+(.+?)\s*$", "create", lambda m: {"name": m.group(1).strip()})
+_pp(r"^/(?:list|show)[-_]?personas?\s*$", "list", lambda m: {})
+_pp(r"^/switch[-_]?persona\s+(.+?)\s*$", "switch", lambda m: {"name": m.group(1).strip()})
+_pp(r"^/show[-_]?persona\s+(.+?)\s*$", "show", lambda m: {"name": m.group(1).strip()})
+
 # ── System command patterns ───────────────────────────────────────────────────
 _SYSTEM_PATTERNS: list[tuple[re.Pattern, str, callable]] = []
 
@@ -113,6 +179,14 @@ def parse_chat_command(message: str) -> Optional[dict]:
             logger.info(f"Parsed model command: action={action}, params={params}")
             return {"action": action, "entity_type": "model", "params": params}
 
+    # Try persona patterns
+    for pattern, action, extractor in _PERSONA_PATTERNS:
+        match = pattern.match(text)
+        if match:
+            params = extractor(match)
+            logger.info(f"Parsed persona command: action={action}, params={params}")
+            return {"action": action, "entity_type": "persona", "params": params}
+
     # Try system patterns
     for pattern, action, extractor in _SYSTEM_PATTERNS:
         match = pattern.match(text)
@@ -127,18 +201,33 @@ def format_command_help() -> str:
     """Return help text listing available chat commands."""
     return """**Available Chat Commands:**
 
+**Models:**
 | Command | Description |
 |---------|-------------|
 | `add model <name> from <provider>` | Add a new model |
 | `list models` | Show all active models |
 | `delete model <name>` | Deactivate a model |
 | `switch to model <name>` | Get info on using a model |
+
+**Personas:**
+| Command | Description |
+|---------|-------------|
+| `create persona called '<name>' that <desc> using <model>` | Create a persona |
+| `update persona <name> to use <model>` | Change persona model |
+| `switch to persona <name>` | Activate persona for conversation |
+| `show persona <name>` | Display persona config |
+| `list personas` | Show all personas |
+
+**System:**
+| Command | Description |
+|---------|-------------|
 | `/help` | Show this help |
 | `/status` | System status |
 
 **Examples:**
 - "add model gemini-2.5-pro from google"
 - "list my models"
-- "remove model gpt-3.5-turbo"
-- "switch to model claude-sonnet"
+- "create a persona called 'SQL Expert' that helps with database queries using claude-sonnet"
+- "switch to persona SQL Expert"
+- "show persona SQL Expert"
 """

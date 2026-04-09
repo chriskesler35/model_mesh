@@ -38,6 +38,12 @@ async def dispatch_command(
             command, db, conversation_id=conversation_id
         )
 
+    elif entity_type == "persona":
+        from app.services.chat_commands.persona_commands import execute_persona_command
+        return await execute_persona_command(
+            command, db, conversation_id=conversation_id
+        )
+
     elif entity_type == "system":
         return await _handle_system_command(command)
 
