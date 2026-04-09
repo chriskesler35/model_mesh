@@ -20,6 +20,8 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from fastapi.responses import RedirectResponse
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -96,6 +98,42 @@ async def github_authorize():
     from urllib.parse import urlencode
     url = f"{GITHUB_AUTHORIZE_URL}?{urlencode(params)}"
     return AuthorizeResponse(authorize_url=url, state=state)
+
+
+@router.get("")
+async def github_login():
+    """Redirect the browser to GitHub's OAuth authorization page.
+
+    This is the standard OAuth redirect flow: the user's browser is sent to
+    GitHub, where they approve access, then GitHub redirects back to our
+    callback URL with a ``code`` query parameter.
+    """
+    if not _github_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub OAuth not configured. Set GITHUB_CLIENT_ID and "
+                   "GITHUB_CLIENT_SECRET in .env and restart.",
+        )
+    from urllib.parse import urlencode
+    params = {
+        "client_id": settings.github_client_id,
+        "redirect_uri": settings.github_oauth_redirect_url,
+        "scope": DEFAULT_SCOPES,
+        "state": secrets.token_urlsafe(32),
+    }
+    url = f"{GITHUB_AUTHORIZE_URL}?{urlencode(params)}"
+    return RedirectResponse(url=url)
+
+
+@router.get("/callback")
+async def github_callback_get(code: str, state: Optional[str] = None):
+    """Handle the GitHub OAuth callback (GET with query parameters).
+
+    GitHub redirects back here with ``?code=X&state=Y``. We exchange the
+    code for an access token, fetch the user profile, and return a JWT.
+    """
+    body = CallbackBody(code=code, state=state)
+    return await github_callback(body)
 
 
 class CallbackBody(BaseModel):
