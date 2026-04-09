@@ -1,4 +1,4 @@
-"""Agent runner with iterative tool execution loop.
+"""Agent runner with iterative tool execution loop and memory context.
 
 Runs an agent through multiple iterations:
   1. Send task + context to LLM
@@ -6,6 +6,9 @@ Runs an agent through multiple iterations:
   3. Execute detected tools via command_executor
   4. Feed tool results back as context for next iteration
   5. Repeat until done, max_iterations, or timeout
+
+Memory-enabled agents persist run outputs and inject prior context
+into subsequent runs via AgentMemory.
 
 Uses the existing ModelClient, command_classifier, and command_executor
 infrastructure rather than introducing new abstractions.
@@ -20,13 +23,24 @@ import uuid
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import AsyncSessionLocal
 from app.models import Model, Provider
+from app.models.agent_memory import AgentMemory
 
 logger = logging.getLogger(__name__)
 
+# Default number of prior run outputs to inject as memory context
+DEFAULT_MEMORY_LIMIT = 5
+
+# Maximum characters to store per memory entry (truncated if longer)
+MAX_MEMORY_OUTPUT_LENGTH = 2000
+
 
 class AgentRunner:
-    """Iterative agent execution with tool use."""
+    """Iterative agent execution with tool use and optional memory."""
 
     def __init__(
         self,
@@ -51,6 +65,68 @@ class AgentRunner:
         self.max_iterations = getattr(agent, "max_iterations", 10) or 10
         self.timeout = getattr(agent, "timeout_seconds", 300) or 300
         self.iterations: list[dict] = []
+
+    # ------------------------------------------------------------------
+    # Memory methods
+    # ------------------------------------------------------------------
+
+    async def load_memory(
+        self, agent_id: str, limit: int = DEFAULT_MEMORY_LIMIT
+    ) -> list[dict]:
+        """Load recent memory entries for an agent.
+
+        Returns list of dicts ordered oldest-to-newest for prompt injection.
+        """
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(AgentMemory)
+                .where(AgentMemory.agent_id == agent_id)
+                .order_by(AgentMemory.created_at.desc())
+                .limit(limit)
+            )
+            entries = result.scalars().all()
+
+        return [
+            {
+                "task": e.task,
+                "output": e.output_summary,
+                "created_at": e.created_at.isoformat() if e.created_at else None,
+            }
+            for e in reversed(entries)
+        ]
+
+    async def save_memory(
+        self, agent_id: str, run_id: str, task: str, output: str
+    ) -> AgentMemory:
+        """Save a run output to agent memory (truncated to MAX_MEMORY_OUTPUT_LENGTH)."""
+        summary = output[:MAX_MEMORY_OUTPUT_LENGTH] if len(output) > MAX_MEMORY_OUTPUT_LENGTH else output
+
+        async with AsyncSessionLocal() as session:
+            entry = AgentMemory(
+                agent_id=agent_id,
+                run_id=run_id,
+                task=task,
+                output_summary=summary,
+            )
+            session.add(entry)
+            await session.commit()
+            await session.refresh(entry)
+            return entry
+
+    @staticmethod
+    def format_memory_context(memories: list[dict]) -> str:
+        """Format memory entries for system prompt injection."""
+        if not memories:
+            return ""
+
+        lines = ["## Prior Run Context", ""]
+        for i, mem in enumerate(memories, 1):
+            lines.append(f"### Run {i} ({mem.get('created_at', 'unknown')})")
+            lines.append(f"**Task:** {mem['task']}")
+            lines.append(f"**Output:** {mem['output']}")
+            lines.append("")
+
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -211,8 +287,16 @@ class AgentRunner:
         run_id = str(uuid.uuid4())
         start_time = time.time()
 
-        # Build initial messages
-        messages = [{"role": "system", "content": self._build_system_prompt()}]
+        # Build initial messages (with memory context if enabled)
+        system_prompt = self._build_system_prompt()
+        if getattr(self.agent, "memory_enabled", False):
+            agent_id = str(self.agent.id)
+            memories = await self.load_memory(agent_id)
+            memory_ctx = self.format_memory_context(memories)
+            if memory_ctx:
+                system_prompt = f"{system_prompt}\n\n{memory_ctx}"
+
+        messages = [{"role": "system", "content": system_prompt}]
 
         user_content = task
         if context:
@@ -306,6 +390,13 @@ class AgentRunner:
                 final_output = "Max iterations reached without completion."
 
         duration_ms = int((time.time() - start_time) * 1000)
+
+        # Save to memory if enabled
+        if getattr(self.agent, "memory_enabled", False) and final_output:
+            try:
+                await self.save_memory(str(self.agent.id), run_id, task, final_output)
+            except Exception as e:
+                logger.warning("Failed to save agent memory: %s", e)
 
         return {
             "run_id": run_id,
