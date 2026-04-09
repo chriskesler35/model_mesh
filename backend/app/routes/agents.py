@@ -1,7 +1,9 @@
-"""Agent CRUD endpoints for DevForgeAI."""
+"""Agent CRUD + run endpoints for DevForgeAI."""
 
+import json
 import uuid
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
@@ -9,7 +11,7 @@ from app.models.agent import Agent, DEFAULT_AGENTS
 from app.models import Persona, Model
 from app.middleware.auth import verify_api_key
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Dict, Optional, List
 import logging
 
 logger = logging.getLogger(__name__)
@@ -379,3 +381,262 @@ async def delete_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
     await db.delete(agent)
     await db.commit()
     return {"status": "deleted"}
+
+
+# ─── Run schemas ─────────────────────────────────────────────────────────────
+
+class AgentRunRequest(BaseModel):
+    task: str
+    context: Optional[dict] = None
+    stream: bool = False
+    model_id: Optional[str] = None  # Override agent's model
+
+
+# ─── Run endpoint ────────────────────────────────────────────────────────────
+
+async def _resolve_model_for_run(model_id: str):
+    """Resolve (Model, Provider) ORM objects for a model_id string.
+
+    Reuses the same pattern as workbench._resolve_model but avoids a
+    cross-module import so agents.py stays self-contained.
+    """
+    from app.database import AsyncSessionLocal
+    from app.models.model import Model as ModelORM
+    from app.models.provider import Provider as ProviderORM
+    from app.services.provider_credentials import has_provider_api_key
+
+    async with AsyncSessionLocal() as db:
+        # Exact match
+        result = await db.execute(
+            select(ModelORM, ProviderORM)
+            .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
+            .where(ModelORM.model_id == model_id)
+            .limit(1)
+        )
+        row = result.first()
+        if row:
+            if not has_provider_api_key(row[1].name):
+                logger.error(
+                    "Model '%s' matched but provider '%s' has no credentials",
+                    model_id, row[1].name,
+                )
+                return None, None
+            return row[0], row[1]
+
+        # Fuzzy partial match
+        last_part = model_id.split("/")[-1]
+        result = await db.execute(
+            select(ModelORM, ProviderORM)
+            .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
+            .where(ModelORM.model_id.contains(last_part))
+            .where(ModelORM.is_active == True)
+        )
+        for m, p in result:
+            if has_provider_api_key(p.name):
+                logger.info(
+                    "Model '%s' fuzzy-matched to '%s' via %s",
+                    model_id, m.model_id, p.name,
+                )
+                return m, p
+
+        logger.error("Could not resolve model '%s'", model_id)
+    return None, None
+
+
+async def _resolve_agent_model_id(agent, db: AsyncSession) -> Optional[str]:
+    """Get the effective model_id string for an agent (persona → direct → None)."""
+    # Try persona's primary model first
+    if agent.persona_id:
+        try:
+            persona_result = await db.execute(
+                select(Persona).where(Persona.id == agent.persona_id)
+            )
+            persona = persona_result.scalar_one_or_none()
+            if persona and persona.primary_model_id:
+                model_result = await db.execute(
+                    select(Model).where(Model.id == persona.primary_model_id)
+                )
+                model = model_result.scalar_one_or_none()
+                if model:
+                    return model.model_id
+        except Exception as e:
+            logger.warning("Persona model resolution failed: %s", e)
+
+    # Direct model_id
+    if agent.model_id:
+        try:
+            model_result = await db.execute(
+                select(Model).where(Model.id == agent.model_id)
+            )
+            model = model_result.scalar_one_or_none()
+            if model:
+                return model.model_id
+        except Exception as e:
+            logger.warning("Direct model resolution failed: %s", e)
+
+    return None
+
+
+@router.post("/{agent_id}/run")
+async def run_agent(agent_id: str, body: AgentRunRequest, db: AsyncSession = Depends(get_db)):
+    """Execute an agent's task with iterative tool loop.
+
+    If the agent has tools configured, uses AgentRunner for multi-iteration
+    tool execution.  Otherwise falls back to a single LLM call.
+
+    Supports both streaming (SSE) and synchronous responses via body.stream.
+    """
+    from app.services.agent_runner import AgentRunner
+
+    # ── Look up agent ────────────────────────────────────────────────────
+    agent = None
+    default_data = None
+
+    if agent_id.startswith("default-"):
+        agent_type = agent_id[len("default-"):]
+        default_data = next(
+            (d for d in DEFAULT_AGENTS if d["agent_type"] == agent_type), None
+        )
+        if not default_data:
+            raise HTTPException(status_code=404, detail="Agent not found")
+    else:
+        try:
+            result = await db.execute(
+                select(Agent).where(Agent.id == uuid.UUID(agent_id))
+            )
+        except ValueError:
+            result = await db.execute(
+                select(Agent).where(Agent.name == agent_id)
+            )
+        agent = result.scalar_one_or_none()
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+    # ── Resolve model ────────────────────────────────────────────────────
+    # Priority: body.model_id → agent model → fallback
+    if body.model_id:
+        effective_model_id = body.model_id
+    elif agent:
+        effective_model_id = await _resolve_agent_model_id(agent, db)
+    else:
+        effective_model_id = None
+
+    if not effective_model_id:
+        # Use a sensible default
+        effective_model_id = "claude-sonnet-4-6"
+
+    model_orm, provider_orm = await _resolve_model_for_run(effective_model_id)
+    if not model_orm:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not resolve model '{effective_model_id}'. "
+            "Ensure the model exists and its provider has credentials configured.",
+        )
+
+    # ── Build a lightweight agent-like object for defaults ───────────────
+    if default_data and not agent:
+        # Create a simple namespace so AgentRunner can use getattr
+        class _DefaultAgent:
+            pass
+        agent = _DefaultAgent()
+        agent.system_prompt = default_data["system_prompt"]
+        agent.tools = default_data.get("tools", [])
+        agent.max_iterations = default_data.get("max_iterations", 10)
+        agent.timeout_seconds = default_data.get("timeout_seconds", 300)
+
+    agent_tools = getattr(agent, "tools", []) or []
+
+    # ── Single-shot (no tools) ───────────────────────────────────────────
+    if not agent_tools:
+        from app.services.model_client import ModelClient
+
+        client = ModelClient()
+        system_prompt = getattr(agent, "system_prompt", "") or ""
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": body.task},
+        ]
+        if body.context:
+            messages[-1]["content"] += (
+                f"\n\nAdditional context:\n{json.dumps(body.context, indent=2)}"
+            )
+
+        if body.stream:
+            async def _single_shot_stream():
+                try:
+                    stream = await client.call_model(
+                        model=model_orm,
+                        provider=provider_orm,
+                        messages=messages,
+                        stream=True,
+                        temperature=0.2,
+                        max_tokens=8000,
+                    )
+                    async for chunk in stream:
+                        delta = ""
+                        try:
+                            if hasattr(chunk, "choices") and chunk.choices:
+                                delta = chunk.choices[0].delta.content or ""
+                        except Exception:
+                            pass
+                        if delta:
+                            yield f"data: {json.dumps({'event': 'chunk', 'data': delta})}\n\n"
+                    yield f"data: {json.dumps({'event': 'done'})}\n\n"
+                except Exception as e:
+                    yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
+
+            return StreamingResponse(
+                _single_shot_stream(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            )
+
+        # Synchronous single-shot
+        try:
+            response = await client.call_model(
+                model=model_orm,
+                provider=provider_orm,
+                messages=messages,
+                stream=False,
+                temperature=0.2,
+                max_tokens=8000,
+            )
+            content = ""
+            if hasattr(response, "choices") and response.choices:
+                content = response.choices[0].message.content or ""
+            return {
+                "run_id": str(uuid.uuid4()),
+                "status": "completed",
+                "output": content,
+                "iterations": [],
+                "iteration_count": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "duration_ms": 0,
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ── Multi-iteration tool loop ────────────────────────────────────────
+    runner = AgentRunner(agent, model_orm, provider_orm)
+
+    if body.stream:
+        async def _stream_runner():
+            try:
+                async for event in runner.run_stream(body.task, body.context):
+                    yield f"data: {json.dumps(event)}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
+
+        return StreamingResponse(
+            _stream_runner(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+
+    # Synchronous run
+    try:
+        result = await runner.run(body.task, body.context)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
