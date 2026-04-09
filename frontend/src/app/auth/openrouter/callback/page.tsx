@@ -1,10 +1,10 @@
 'use client'
 
 import { API_BASE, AUTH_HEADERS } from '@/lib/config'
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 
-export default function OpenRouterCallback() {
+function OpenRouterCallbackInner() {
   const searchParams = useSearchParams()
   const [status, setStatus] = useState<'working' | 'success' | 'error'>('working')
   const [message, setMessage] = useState('Exchanging authorization code for API key…')
@@ -93,5 +93,20 @@ export default function OpenRouterCallback() {
         )}
       </div>
     </div>
+  )
+}
+
+export default function OpenRouterCallback() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 px-4">
+        <div className="max-w-md w-full bg-white dark:bg-gray-800 rounded-xl shadow-lg p-8 text-center">
+          <div className="text-5xl mb-4 text-indigo-500">⏳</div>
+          <h1 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">Loading…</h1>
+        </div>
+      </div>
+    }>
+      <OpenRouterCallbackInner />
+    </Suspense>
   )
 }
