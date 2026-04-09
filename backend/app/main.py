@@ -76,6 +76,7 @@ from app.routes.workbench import router as workbench_router
 from app.routes.pipelines import router as pipelines_router
 from app.routes.projects import router as projects_router
 from app.routes.runner import router as runner_router
+from app.routes.custom_methods import router as custom_methods_router
 from app.routes.methods import router as methods_router
 from app.routes.sandbox import router as sandbox_router
 from app.routes.collaboration import router as collab_router, public_router as auth_public_router
@@ -199,6 +200,7 @@ app.include_router(workbench_router)
 app.include_router(pipelines_router)
 app.include_router(projects_router)
 app.include_router(runner_router)
+app.include_router(custom_methods_router)
 app.include_router(methods_router)
 app.include_router(sandbox_router)
 app.include_router(collab_router)

@@ -720,3 +720,34 @@ def evaluate_branch(phase: dict, parent_output: str) -> str:
 
     # No condition matched — use default
     return phase.get("default_phase", "")
+async def get_method_phases_with_custom(method_id: str, db_session) -> List[Dict[str, Any]]:
+    """Get phases for a method, checking custom methods first then built-in.
+
+    Args:
+        method_id: Either a built-in method name ('bmad', 'gsd', 'superpowers')
+                   or a custom method name/ID.
+        db_session: An async SQLAlchemy session.
+
+    Returns:
+        Deep copy of the phase list for the method.
+
+    Raises:
+        KeyError: If method is not found in custom or built-in methods.
+    """
+    import copy
+    from sqlalchemy import select, or_
+    from app.models.custom_method import CustomMethod
+
+    # Check custom methods in DB (by name or ID)
+    result = await db_session.execute(
+        select(CustomMethod).where(
+            or_(CustomMethod.name == method_id, CustomMethod.id == method_id),
+            CustomMethod.is_active == True,
+        )
+    )
+    custom = result.scalar_one_or_none()
+    if custom:
+        return copy.deepcopy(custom.phases)
+
+    # Fall back to built-in
+    return get_phases_for_method(method_id)

@@ -6,7 +6,11 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.database import get_db
 from app.middleware.auth import verify_api_key
+from app.models.custom_method import CustomMethod
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +195,7 @@ class MethodSettingsUpdate(BaseModel):
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 @router.get("/")
-async def list_methods():
+async def list_methods(db: AsyncSession = Depends(get_db)):
     state = _load_state()
     active = state.get("active_method", "standard")
     stack = state.get("active_stack", [])
@@ -201,7 +205,33 @@ async def list_methods():
         entry["is_active"] = (m["id"] == active)
         entry["in_stack"] = m["id"] in stack
         entry["stack_position"] = stack.index(m["id"]) + 1 if m["id"] in stack else None
+        entry["is_custom"] = False
         data.append(entry)
+
+    # Include custom methods from the database
+    result = await db.execute(
+        select(CustomMethod).where(CustomMethod.is_active == True)
+    )
+    custom_methods = result.scalars().all()
+    for cm in custom_methods:
+        entry = {
+            "id": cm.id,
+            "name": cm.name,
+            "tagline": cm.description or "",
+            "icon": "",
+            "color": "teal",
+            "description": cm.description or "",
+            "system_prompt": "",
+            "phases": [p.get("name", "") for p in (cm.phases or [])],
+            "settings": {},
+            "trigger_keywords": cm.trigger_keywords or [],
+            "is_active": (cm.id == active),
+            "in_stack": cm.id in stack,
+            "stack_position": stack.index(cm.id) + 1 if cm.id in stack else None,
+            "is_custom": True,
+        }
+        data.append(entry)
+
     return {
         "data": data,
         "active_method": active,
@@ -317,13 +347,40 @@ async def clear_stack():
 
 
 @router.get("/{method_id}")
-async def get_method(method_id: str):
-    if method_id not in BUILT_IN_METHODS:
-        raise HTTPException(status_code=404, detail="Method not found")
+async def get_method(method_id: str, db: AsyncSession = Depends(get_db)):
     state = _load_state()
     stack = state.get("active_stack", [])
-    m = dict(BUILT_IN_METHODS[method_id])
-    m["is_active"] = (state.get("active_method") == method_id)
-    m["in_stack"] = method_id in stack
-    m["stack_position"] = stack.index(method_id) + 1 if method_id in stack else None
-    return m
+
+    # Check built-in methods first
+    if method_id in BUILT_IN_METHODS:
+        m = dict(BUILT_IN_METHODS[method_id])
+        m["is_active"] = (state.get("active_method") == method_id)
+        m["in_stack"] = method_id in stack
+        m["stack_position"] = stack.index(method_id) + 1 if method_id in stack else None
+        m["is_custom"] = False
+        return m
+
+    # Check custom methods by ID
+    result = await db.execute(
+        select(CustomMethod).where(CustomMethod.id == method_id)
+    )
+    cm = result.scalar_one_or_none()
+    if cm:
+        return {
+            "id": cm.id,
+            "name": cm.name,
+            "tagline": cm.description or "",
+            "icon": "",
+            "color": "teal",
+            "description": cm.description or "",
+            "system_prompt": "",
+            "phases": [p.get("name", "") for p in (cm.phases or [])],
+            "settings": {},
+            "trigger_keywords": cm.trigger_keywords or [],
+            "is_active": (cm.id == state.get("active_method")),
+            "in_stack": cm.id in stack,
+            "stack_position": stack.index(cm.id) + 1 if cm.id in stack else None,
+            "is_custom": True,
+        }
+
+    raise HTTPException(status_code=404, detail="Method not found")
