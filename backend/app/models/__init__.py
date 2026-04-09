@@ -9,6 +9,7 @@ from app.models.conversation import Conversation, Message
 from app.models.request_log import RequestLog
 from app.models.user_profile import UserProfile, MemoryFile, PreferenceTracking, SystemModification
 from app.models.agent import Agent
+from app.models.agent_memory import AgentMemory
 from app.models.task import Task
 from app.models.workbench import WorkbenchSession
 from app.models.pipeline import Pipeline, PhaseRun
@@ -20,5 +21,5 @@ __all__ = [
     "Base", "BaseMixin", "Provider", "Model", "Persona",
     "Conversation", "Message", "RequestLog",
     "UserProfile", "MemoryFile", "PreferenceTracking", "SystemModification",
-    "Agent", "Task", "WorkbenchSession", "Pipeline", "PhaseRun", "CommandExecution",
+    "Agent", "AgentMemory", "Task", "WorkbenchSession", "Pipeline", "PhaseRun", "CommandExecution",
 ]
