@@ -94,6 +94,7 @@ from app.routes.workflows import router as workflows_router
 from app.routes.audio import router as audio_router
 from app.routes.websocket import router as websocket_router
 from app.routes.feedback import router as feedback_router
+from app.routes.websocket import router as websocket_router
 
 
 @asynccontextmanager
@@ -218,6 +219,7 @@ app.include_router(workflows_router)
 app.include_router(audio_router)
 app.include_router(websocket_router)
 app.include_router(feedback_router)
+app.include_router(websocket_router)
 
 
 @app.get("/")

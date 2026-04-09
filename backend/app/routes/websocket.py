@@ -1,4 +1,4 @@
-"""WebSocket endpoint for real-time collaboration."""
+"""WebSocket endpoint for real-time collaboration with presence tracking."""
 
 import asyncio
 import json
@@ -25,13 +25,17 @@ async def websocket_endpoint(
       - subscribe:   { "type": "subscribe",   "channel": "conversation:<uuid>" }
       - unsubscribe: { "type": "unsubscribe", "channel": "conversation:<uuid>" }
       - ping:        { "type": "ping" }
+      - presence:    { "type": "presence", "page": "/chat", "activity": "Viewing /chat" }
 
     Message types (server -> client):
-      - connected:    sent on successful auth, includes online_users list
-      - subscribed:   confirms channel subscription
-      - unsubscribed: confirms channel unsubscription
-      - ping:         server heartbeat (client should reply with { "type": "pong" })
-      - pong:         reply to client ping
+      - connected:        sent on successful auth, includes online_users list
+      - subscribed:       confirms channel subscription
+      - unsubscribed:     confirms channel unsubscription
+      - ping:             server heartbeat (client should reply with { "type": "pong" })
+      - pong:             reply to client ping
+      - presence_update:  another user changed page/activity
+      - user_joined:      a user came online
+      - user_left:        a user went offline
 
     All server messages wrapped in: { "type": str, "payload": obj, "timestamp": str }
     """
@@ -48,12 +52,28 @@ async def websocket_endpoint(
     heartbeat_task = asyncio.create_task(_heartbeat(websocket, user_id))
 
     try:
-        # Send welcome message
+        # Set initial presence
+        manager.update_presence(
+            user_id,
+            username=user.get("username", ""),
+            display_name=user.get("display_name", ""),
+        )
+
+        # Send welcome message with online users list
         await manager.send_to_user(user_id, {
             "type": "connected",
             "payload": {
                 "user_id": user_id,
                 "online_users": manager.get_online_users(),
+            },
+        })
+
+        # Broadcast that this user joined
+        await manager.broadcast_all({
+            "type": "user_joined",
+            "payload": {
+                "user_id": user_id,
+                "username": user.get("username", ""),
             },
         })
 
@@ -70,6 +90,8 @@ async def websocket_endpoint(
             if msg_type == "ping":
                 # Client-initiated ping — reset missed counter and reply
                 manager._missed_pings[id(websocket)] = 0
+                # Also refresh presence last_seen on ping (heartbeat keeps user "alive")
+                manager.update_presence(user_id)
                 await websocket.send_text(json.dumps({
                     "type": "pong",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -78,6 +100,8 @@ async def websocket_endpoint(
             elif msg_type == "pong":
                 # Client responding to server heartbeat ping — reset missed counter
                 manager._missed_pings[id(websocket)] = 0
+                # Refresh presence last_seen
+                manager.update_presence(user_id)
 
             elif msg_type == "subscribe":
                 channel = message.get("channel", "")
@@ -97,11 +121,34 @@ async def websocket_endpoint(
                         "payload": {"channel": channel},
                     })
 
+            elif msg_type == "presence":
+                # Client reports current page/activity
+                page = message.get("page", "")
+                activity = message.get("activity", "")
+                manager.update_presence(user_id, page=page, activity=activity)
+                # Broadcast presence update to all connected users
+                await manager.broadcast_all({
+                    "type": "presence_update",
+                    "payload": {
+                        "user_id": user_id,
+                        "page": page,
+                        "activity": activity,
+                    },
+                })
+
     except WebSocketDisconnect:
         pass
     except Exception as e:
         logger.error(f"WebSocket error for user={user_id}: {e}")
     finally:
+        # Broadcast that this user left (before disconnect cleans up)
+        try:
+            await manager.broadcast_all({
+                "type": "user_left",
+                "payload": {"user_id": user_id},
+            })
+        except Exception:
+            pass
         heartbeat_task.cancel()
         try:
             await heartbeat_task

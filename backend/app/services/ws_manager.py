@@ -1,10 +1,10 @@
 """
 WebSocket connection manager for real-time collaboration.
 
-Tracks connected clients, handles subscriptions, and broadcasts messages.
+Tracks connected clients, handles subscriptions, broadcasts messages,
+and maintains user presence/activity state.
 """
 
-import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class ConnectionManager:
-    """Manages WebSocket connections, subscriptions, and broadcasting."""
+    """Manages WebSocket connections, subscriptions, broadcasting, and presence."""
 
     def __init__(self):
         # user_id -> list of WebSocket connections (user can have multiple tabs)
@@ -26,6 +26,8 @@ class ConnectionManager:
         self._ws_to_user: dict[int, str] = {}
         # websocket id -> missed pings count
         self._missed_pings: dict[int, int] = {}
+        # user_id -> presence info {page, activity, last_seen, username, display_name}
+        self.presence: dict[str, dict] = {}
 
     async def connect(self, websocket: WebSocket, user_id: str):
         """Accept connection and register user."""
@@ -38,7 +40,7 @@ class ConnectionManager:
         logger.info(f"WebSocket connected: user={user_id}, total={self.total_connections}")
 
     def disconnect(self, websocket: WebSocket):
-        """Remove connection and clean up subscriptions."""
+        """Remove connection and clean up subscriptions + presence."""
         ws_id = id(websocket)
         user_id = self._ws_to_user.pop(ws_id, None)
         self._missed_pings.pop(ws_id, None)
@@ -55,7 +57,10 @@ class ConnectionManager:
                 self.channels = {
                     ch: users for ch, users in self.channels.items() if users
                 }
+                # Clean up presence when user fully disconnects
+                self.presence.pop(user_id, None)
         logger.info(f"WebSocket disconnected: user={user_id}, total={self.total_connections}")
+        return user_id
 
     def subscribe(self, user_id: str, channel: str):
         """Subscribe user to a channel."""
@@ -71,6 +76,53 @@ class ConnectionManager:
             if not self.channels[channel]:
                 del self.channels[channel]
         logger.debug(f"User {user_id} unsubscribed from channel {channel}")
+
+    # ─── Presence tracking ───────────────────────────────────────────────────
+
+    def update_presence(
+        self,
+        user_id: str,
+        page: str = "",
+        activity: str = "",
+        username: str = "",
+        display_name: str = "",
+    ):
+        """Update user's presence info (page, activity, last_seen)."""
+        existing = self.presence.get(user_id, {})
+        self.presence[user_id] = {
+            "page": page or existing.get("page", ""),
+            "activity": activity or existing.get("activity", ""),
+            "last_seen": datetime.now(timezone.utc).isoformat(),
+            "username": username or existing.get("username", user_id),
+            "display_name": display_name or existing.get("display_name", ""),
+        }
+
+    def get_presence(self) -> list[dict]:
+        """Return all online users with their presence info, filtering stale entries."""
+        now = datetime.now(timezone.utc)
+        online: list[dict] = []
+        for user_id in list(self.active_connections.keys()):
+            info = self.presence.get(user_id, {})
+            last_seen = info.get("last_seen", "")
+            # Check TTL - 2 minutes (120 seconds)
+            if last_seen:
+                try:
+                    seen = datetime.fromisoformat(last_seen)
+                    if (now - seen).total_seconds() > 120:
+                        continue  # stale — user has active WS but no heartbeat
+                except (ValueError, TypeError):
+                    pass
+            online.append({
+                "user_id": user_id,
+                "username": info.get("username", user_id),
+                "display_name": info.get("display_name", ""),
+                "page": info.get("page", ""),
+                "activity": info.get("activity", ""),
+                "last_seen": last_seen,
+            })
+        return online
+
+    # ─── Messaging ───────────────────────────────────────────────────────────
 
     async def send_to_user(self, user_id: str, message: dict):
         """Send message to all connections of a specific user."""
