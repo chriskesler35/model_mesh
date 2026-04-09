@@ -19,6 +19,7 @@ from app.models.preference import Preference
 from app.models.app_settings import AppSetting
 from app.models.feedback import Feedback
 from app.models.custom_method import CustomMethod
+from app.models.learning_suggestion import LearningSuggestion
 
 __all__ = [
     "Base", "BaseMixin", "Provider", "Model", "Persona",
@@ -27,4 +28,5 @@ __all__ = [
     "Agent", "AgentMemory", "AgentRun", "Task", "WorkbenchSession", "Pipeline", "PhaseRun", "CommandExecution",
     "Feedback",
     "CustomMethod",
+    "LearningSuggestion",
 ]
