@@ -538,14 +538,69 @@ function InlineImage({ src, meta }: { src: string; meta?: Message['image_meta'] 
 }
 
 // ─── Message bubble ───────────────────────────────────────────────────────────
-function MessageBubble({ msg }: { msg: Message }) {
+function MessageBubble({ msg, conversationId }: { msg: Message; conversationId?: string | null }) {
   const [copied, setCopied] = useState(false)
+  const [feedbackRating, setFeedbackRating] = useState<number | null>(null)
+  const [feedbackSent, setFeedbackSent] = useState(false)
+  const [showFeedbackInput, setShowFeedbackInput] = useState(false)
+  const [feedbackText, setFeedbackText] = useState('')
+  const [feedbackSending, setFeedbackSending] = useState(false)
   const isUser = msg.role === 'user'
 
   const copy = () => {
     navigator.clipboard.writeText(msg.content)
     setCopied(true)
     setTimeout(() => setCopied(false), 1500)
+  }
+
+  const submitFeedback = async (rating: number, text?: string) => {
+    if (feedbackSent || feedbackSending) return
+    setFeedbackSending(true)
+    try {
+      await fetch(`${API_BASE}/v1/feedback`, {
+        method: 'POST',
+        headers: { ...AUTH_HEADERS },
+        body: JSON.stringify({
+          message_id: msg.id,
+          conversation_id: conversationId || null,
+          model_id: msg.model || null,
+          rating,
+          feedback_text: text || null,
+        }),
+      })
+      setFeedbackRating(rating)
+      setFeedbackSent(true)
+      setShowFeedbackInput(false)
+    } catch {
+      // silently fail — feedback is non-critical
+    } finally {
+      setFeedbackSending(false)
+    }
+  }
+
+  const handleThumbsUp = () => {
+    if (feedbackSent) return
+    submitFeedback(5)
+  }
+
+  const handleThumbsDown = () => {
+    if (feedbackSent) return
+    setShowFeedbackInput(true)
+  }
+
+  const handleFeedbackSubmit = () => {
+    submitFeedback(1, feedbackText.trim() || undefined)
+  }
+
+  const handleFeedbackKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleFeedbackSubmit()
+    }
+    if (e.key === 'Escape') {
+      setShowFeedbackInput(false)
+      setFeedbackText('')
+    }
   }
 
   return (
@@ -597,7 +652,72 @@ function MessageBubble({ msg }: { msg: Message }) {
           >
             {copied ? '✓ copied' : 'copy'}
           </button>
+
+          {/* Feedback buttons — assistant messages only, not while streaming */}
+          {!isUser && !msg.streaming && (
+            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+              <button
+                onClick={handleThumbsUp}
+                disabled={feedbackSent}
+                title="Good response"
+                className={`p-0.5 rounded text-sm transition-colors ${
+                  feedbackRating === 5
+                    ? 'text-green-500 opacity-100'
+                    : feedbackSent
+                      ? 'text-gray-300 dark:text-gray-600 cursor-default'
+                      : 'text-gray-400 hover:text-green-500 cursor-pointer'
+                }`}
+              >
+                {feedbackRating === 5 ? '\u{1F44D}' : '\u{1F44D}'}
+              </button>
+              <button
+                onClick={handleThumbsDown}
+                disabled={feedbackSent}
+                title="Bad response"
+                className={`p-0.5 rounded text-sm transition-colors ${
+                  feedbackRating === 1
+                    ? 'text-red-500 opacity-100'
+                    : feedbackSent
+                      ? 'text-gray-300 dark:text-gray-600 cursor-default'
+                      : 'text-gray-400 hover:text-red-500 cursor-pointer'
+                }`}
+              >
+                {feedbackRating === 1 ? '\u{1F44E}' : '\u{1F44E}'}
+              </button>
+              {feedbackSent && (
+                <span className="text-xs text-gray-400 ml-1">Thanks!</span>
+              )}
+            </div>
+          )}
         </div>
+
+        {/* Feedback text input (shown on thumbs down) */}
+        {showFeedbackInput && !feedbackSent && (
+          <div className="flex items-center gap-2 mt-1 w-full">
+            <input
+              type="text"
+              value={feedbackText}
+              onChange={e => setFeedbackText(e.target.value)}
+              onKeyDown={handleFeedbackKeyDown}
+              placeholder="What went wrong? (optional, Enter to submit)"
+              autoFocus
+              className="flex-1 text-xs px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+            />
+            <button
+              onClick={handleFeedbackSubmit}
+              disabled={feedbackSending}
+              className="text-xs px-2 py-1.5 rounded-lg bg-red-500 text-white hover:bg-red-600 disabled:opacity-50 transition-colors"
+            >
+              {feedbackSending ? '...' : 'Send'}
+            </button>
+            <button
+              onClick={() => { setShowFeedbackInput(false); setFeedbackText('') }}
+              className="text-xs px-1.5 py-1.5 text-gray-400 hover:text-gray-600"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -2244,7 +2364,7 @@ export default function ChatPage() {
               </div>
             </div>
           ) : (
-            messages.map(msg => <MessageBubble key={msg.id} msg={msg} />)
+            messages.map(msg => <MessageBubble key={msg.id} msg={msg} conversationId={activeConvId} />)
           )}
           <div ref={messagesEndRef} />
         </div>
