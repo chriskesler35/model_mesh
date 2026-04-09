@@ -165,8 +165,18 @@ class MemoryContext:
             return ""
     
     async def inject_context(self, system_prompt: str, persona_name: str = None) -> str:
-        """Inject memory context into a system prompt."""
+        """Inject memory context and style preferences into a system prompt."""
         context = await self.build_context_prompt()
+
+        # Append adaptive style injection (E12.4)
+        try:
+            from app.services.learning import get_style_profile, format_style_injection
+            style = await get_style_profile(self.db, str(self.user_id))
+            style_text = format_style_injection(style)
+            if style_text:
+                context = (context + "\n\n## Response Style\n" + style_text) if context else ("## Response Style\n" + style_text)
+        except Exception as e:
+            logger.debug(f"Could not load style profile: {e}")
         
         if not context:
             return system_prompt

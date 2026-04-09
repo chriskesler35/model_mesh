@@ -15,6 +15,10 @@ from app.services.learning import (
     detect_usage_patterns,
     get_pattern_suggestions,
     set_pattern_tracking,
+    analyze_response_style,
+    get_style_profile,
+    update_style_profile,
+    format_style_injection,
 )
 
 router = APIRouter(prefix="/v1/learning", tags=["learning"], dependencies=[Depends(verify_api_key)])
@@ -115,3 +119,52 @@ async def toggle_pattern_tracking(
     user_id = user["id"]
     result = await set_pattern_tracking(db, user_id, body.enabled)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Adaptive style profile endpoints (E12.4)
+# ---------------------------------------------------------------------------
+
+class StyleOverrideBody(BaseModel):
+    verbosity: Optional[int] = None
+    formality: Optional[int] = None
+    code_style: Optional[str] = None
+    response_length_preference: Optional[str] = None
+    example_preference: Optional[str] = None
+
+
+@router.get("/style")
+async def get_style(
+    request: Request,
+    analyze: bool = Query(default=False, description="Re-analyze before returning"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the user's learned style profile."""
+    user = current_user(request)
+    user_id = user["id"]
+    if analyze:
+        profile = await analyze_response_style(db, user_id)
+    else:
+        profile = await get_style_profile(db, user_id)
+    injection = format_style_injection(profile)
+    return {"style": profile, "injection": injection}
+
+
+@router.patch("/style")
+async def patch_style(
+    body: StyleOverrideBody,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually override style profile dimensions."""
+    user = current_user(request)
+    user_id = user["id"]
+    overrides = body.model_dump(exclude_none=True)
+    if not overrides:
+        raise HTTPException(status_code=400, detail="No style dimensions provided")
+    try:
+        profile = await update_style_profile(db, user_id, overrides)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    injection = format_style_injection(profile)
+    return {"style": profile, "injection": injection}

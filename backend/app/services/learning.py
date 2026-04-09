@@ -4,7 +4,7 @@ import uuid
 import logging
 from datetime import datetime
 from collections import defaultdict
-from sqlalchemy import select, func, case, extract, text
+from sqlalchemy import select, func, case, extract, text, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.feedback import Feedback
@@ -333,3 +333,201 @@ async def get_pattern_suggestions(db: AsyncSession, user_id: str) -> list[dict]:
         })
 
     return suggestions
+
+
+# ---------------------------------------------------------------------------
+# Adaptive style analysis (E12.4)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_STYLE_PROFILE = {
+    "verbosity": 3,          # 1=concise … 5=detailed
+    "formality": 3,          # 1=casual  … 5=professional
+    "code_style": "none",    # "commented" | "minimal" | "none"
+    "response_length_preference": "medium",  # "short" | "medium" | "long"
+    "example_preference": "sometimes",       # "always" | "sometimes" | "never"
+    "sample_count": 0,
+    "last_analyzed": None,
+}
+
+
+async def analyze_response_style(db: AsyncSession, user_id: str) -> dict:
+    """Analyze positively-rated responses for style patterns.
+
+    Samples assistant messages linked to feedback with rating >= 4, then
+    derives verbosity, formality, code presence, and length preferences.
+    """
+    from app.models.conversation import Message
+
+    # Fetch content of assistant messages that received positive feedback
+    stmt = (
+        select(Message.content)
+        .join(Feedback, Feedback.message_id == func.cast(Message.id, String))
+        .where(
+            Feedback.rating >= 4,
+            Message.role == "assistant",
+        )
+        .order_by(Feedback.created_at.desc())
+        .limit(50)
+    )
+    result = await db.execute(stmt)
+    contents = [row[0] for row in result.all() if row[0]]
+
+    if not contents:
+        return dict(_DEFAULT_STYLE_PROFILE)
+
+    # --- Compute dimensions ---
+    lengths = [len(c) for c in contents]
+    avg_len = sum(lengths) / len(lengths)
+
+    # Verbosity (character-length buckets)
+    if avg_len < 300:
+        verbosity = 1
+    elif avg_len < 600:
+        verbosity = 2
+    elif avg_len < 1200:
+        verbosity = 3
+    elif avg_len < 2500:
+        verbosity = 4
+    else:
+        verbosity = 5
+
+    # Length preference label
+    if avg_len < 500:
+        length_pref = "short"
+    elif avg_len < 1500:
+        length_pref = "medium"
+    else:
+        length_pref = "long"
+
+    # Formality heuristic: ratio of informal markers
+    informal_markers = {"hey", "lol", "gonna", "wanna", "yeah", "nah", "ok", "cool", "btw"}
+    formal_markers = {"therefore", "however", "furthermore", "consequently", "regarding", "additionally"}
+    informal_hits = 0
+    formal_hits = 0
+    for c in contents:
+        lower = c.lower()
+        words = set(lower.split())
+        informal_hits += len(words & informal_markers)
+        formal_hits += len(words & formal_markers)
+
+    total_markers = informal_hits + formal_hits or 1
+    formality_ratio = formal_hits / total_markers
+    if formality_ratio > 0.6:
+        formality = 5
+    elif formality_ratio > 0.4:
+        formality = 4
+    elif formality_ratio > 0.2:
+        formality = 3
+    elif informal_hits > formal_hits:
+        formality = 2
+    else:
+        formality = 3
+
+    # Code style: detect code blocks
+    code_block_count = sum(c.count("```") // 2 for c in contents)
+    comment_count = sum(c.count("//") + c.count("# ") for c in contents)
+    if code_block_count == 0:
+        code_style = "none"
+    elif comment_count / max(code_block_count, 1) > 2:
+        code_style = "commented"
+    else:
+        code_style = "minimal"
+
+    # Example preference
+    example_count = sum(
+        1 for c in contents
+        if "example" in c.lower() or "for instance" in c.lower() or "e.g." in c.lower()
+    )
+    example_ratio = example_count / len(contents)
+    if example_ratio > 0.6:
+        example_pref = "always"
+    elif example_ratio > 0.2:
+        example_pref = "sometimes"
+    else:
+        example_pref = "never"
+
+    profile = {
+        "verbosity": verbosity,
+        "formality": formality,
+        "code_style": code_style,
+        "response_length_preference": length_pref,
+        "example_preference": example_pref,
+        "sample_count": len(contents),
+        "last_analyzed": datetime.utcnow().isoformat(),
+    }
+
+    # Persist to user profile preferences
+    result = await db.execute(select(UserProfile).limit(1))
+    up = result.scalars().first()
+    if up:
+        prefs = dict(up.preferences or {})
+        prefs["style_profile"] = profile
+        up.preferences = prefs
+        await db.commit()
+
+    return profile
+
+
+async def get_style_profile(db: AsyncSession, user_id: str) -> dict:
+    """Return the current style profile (from stored preferences or default)."""
+    result = await db.execute(select(UserProfile).limit(1))
+    up = result.scalars().first()
+    if up:
+        prefs = up.preferences or {}
+        stored = prefs.get("style_profile")
+        if stored:
+            return stored
+    return dict(_DEFAULT_STYLE_PROFILE)
+
+
+async def update_style_profile(db: AsyncSession, user_id: str, overrides: dict) -> dict:
+    """Manually override style profile dimensions."""
+    allowed_keys = set(_DEFAULT_STYLE_PROFILE.keys()) - {"sample_count", "last_analyzed"}
+    filtered = {k: v for k, v in overrides.items() if k in allowed_keys}
+    if not filtered:
+        raise ValueError("No valid style dimensions provided")
+
+    current = await get_style_profile(db, user_id)
+    current.update(filtered)
+
+    result = await db.execute(select(UserProfile).limit(1))
+    up = result.scalars().first()
+    if not up:
+        up = UserProfile(name="User", preferences={})
+        db.add(up)
+    prefs = dict(up.preferences or {})
+    prefs["style_profile"] = current
+    up.preferences = prefs
+    await db.commit()
+    await db.refresh(up)
+    return current
+
+
+def format_style_injection(style_profile: dict) -> str:
+    """Format style profile as a string suitable for system prompt injection."""
+    if not style_profile or style_profile.get("sample_count", 0) == 0:
+        return ""
+
+    parts = []
+
+    verbosity = style_profile.get("verbosity", 3)
+    verb_label = {1: "very concise", 2: "concise", 3: "moderate-length", 4: "detailed", 5: "very detailed"}.get(verbosity, "moderate-length")
+    parts.append(f"{verb_label} responses")
+
+    formality = style_profile.get("formality", 3)
+    form_label = {1: "very casual", 2: "casual", 3: "balanced", 4: "professional", 5: "very formal"}.get(formality, "balanced")
+    parts.append(f"{form_label} tone")
+
+    code_style = style_profile.get("code_style", "none")
+    if code_style == "commented":
+        parts.append("code examples with comments")
+    elif code_style == "minimal":
+        parts.append("code examples (minimal comments)")
+
+    example_pref = style_profile.get("example_preference", "sometimes")
+    if example_pref == "always":
+        parts.append("include examples whenever possible")
+    elif example_pref == "never":
+        parts.append("skip examples unless asked")
+
+    return "User prefers " + ", ".join(parts) + "."
