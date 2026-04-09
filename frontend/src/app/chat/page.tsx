@@ -1006,6 +1006,210 @@ function OnboardingOverlay({ aiName, onComplete }: { aiName: string; onComplete:
   return <IdentityWizard mode="firstrun" aiName={aiName} onComplete={onComplete} />
 }
 
+// ─── Microphone (speech-to-text) button ──────────────────────────────────────
+type MicState = 'idle' | 'recording' | 'processing'
+
+function MicrophoneButton({ onTranscript, disabled }: { onTranscript: (text: string) => void; disabled?: boolean }) {
+  const [micState, setMicState] = useState<MicState>('idle')
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const chunksRef = useRef<Blob[]>([])
+  const streamRef = useRef<MediaStream | null>(null)
+  const analyserRef = useRef<AnalyserNode | null>(null)
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  const silenceCheckRef = useRef<number | null>(null)
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopRecording(true)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const stopRecording = useCallback((skipTranscription = false) => {
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current)
+    if (silenceCheckRef.current) cancelAnimationFrame(silenceCheckRef.current)
+    silenceTimerRef.current = null
+    silenceCheckRef.current = null
+
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      if (skipTranscription) {
+        // Remove event listeners to prevent transcription
+        mediaRecorderRef.current.onstop = null
+      }
+      mediaRecorderRef.current.stop()
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop())
+      streamRef.current = null
+    }
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {})
+      audioCtxRef.current = null
+    }
+    analyserRef.current = null
+
+    if (skipTranscription) {
+      setMicState('idle')
+      chunksRef.current = []
+    }
+  }, [])
+
+  const transcribe = useCallback(async (blob: Blob) => {
+    setMicState('processing')
+    try {
+      const formData = new FormData()
+      formData.append('file', blob, 'recording.webm')
+
+      const resp = await fetch(`${API_BASE}/v1/audio/transcribe`, {
+        method: 'POST',
+        headers: { Authorization: AUTH_HEADERS['Authorization'] },
+        body: formData,
+      })
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ detail: resp.statusText }))
+        throw new Error(err.detail || `Transcription failed (${resp.status})`)
+      }
+
+      const data = await resp.json()
+      if (data.text && data.text.trim()) {
+        onTranscript(data.text.trim())
+      }
+    } catch (err: any) {
+      console.error('Transcription error:', err)
+      // Could show a toast here, but we keep it simple
+    } finally {
+      setMicState('idle')
+    }
+  }, [onTranscript])
+
+  const startRecording = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      streamRef.current = stream
+
+      // Set up silence detection via AudioContext analyser
+      const audioCtx = new AudioContext()
+      audioCtxRef.current = audioCtx
+      const source = audioCtx.createMediaStreamSource(stream)
+      const analyser = audioCtx.createAnalyser()
+      analyser.fftSize = 2048
+      analyser.smoothingTimeConstant = 0.8
+      source.connect(analyser)
+      analyserRef.current = analyser
+
+      // Determine supported mime type
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm')
+          ? 'audio/webm'
+          : ''
+
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+      mediaRecorderRef.current = recorder
+      chunksRef.current = []
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data)
+      }
+
+      recorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: mimeType || 'audio/webm' })
+        chunksRef.current = []
+        if (blob.size > 0) {
+          transcribe(blob)
+        } else {
+          setMicState('idle')
+        }
+      }
+
+      recorder.start(250) // collect data every 250ms
+      setMicState('recording')
+
+      // Silence detection: auto-stop after 3s of silence
+      const dataArray = new Uint8Array(analyser.frequencyBinCount)
+      let silenceStart: number | null = null
+      const SILENCE_THRESHOLD = 15 // RMS level below which we consider silence
+      const SILENCE_DURATION = 3000 // ms
+
+      const checkSilence = () => {
+        if (!analyserRef.current) return
+        analyserRef.current.getByteTimeDomainData(dataArray)
+
+        // Calculate RMS
+        let sum = 0
+        for (let i = 0; i < dataArray.length; i++) {
+          const v = (dataArray[i] - 128) / 128
+          sum += v * v
+        }
+        const rms = Math.sqrt(sum / dataArray.length) * 100
+
+        if (rms < SILENCE_THRESHOLD) {
+          if (!silenceStart) silenceStart = Date.now()
+          else if (Date.now() - silenceStart > SILENCE_DURATION) {
+            // 3s of silence detected — stop recording
+            stopRecording()
+            return
+          }
+        } else {
+          silenceStart = null
+        }
+
+        silenceCheckRef.current = requestAnimationFrame(checkSilence)
+      }
+      silenceCheckRef.current = requestAnimationFrame(checkSilence)
+    } catch (err: any) {
+      console.error('Microphone access error:', err)
+      setMicState('idle')
+    }
+  }, [transcribe, stopRecording])
+
+  const handleClick = () => {
+    if (disabled || micState === 'processing') return
+    if (micState === 'idle') {
+      startRecording()
+    } else if (micState === 'recording') {
+      stopRecording()
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      disabled={disabled || micState === 'processing'}
+      title={micState === 'idle' ? 'Voice input (speech-to-text)' : micState === 'recording' ? 'Stop recording' : 'Transcribing...'}
+      className={`flex-shrink-0 p-2.5 rounded-xl border transition-colors ${
+        micState === 'recording'
+          ? 'bg-red-50 dark:bg-red-900/30 border-red-300 dark:border-red-600 text-red-500'
+          : micState === 'processing'
+            ? 'border-orange-300 dark:border-orange-600 text-orange-400'
+            : 'border-gray-200 dark:border-gray-700 text-gray-400 hover:text-orange-500 hover:border-orange-300'
+      } disabled:opacity-50`}
+    >
+      {micState === 'processing' ? (
+        /* Spinner */
+        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+        </svg>
+      ) : (
+        /* Microphone icon with pulsing dot when recording */
+        <span className="relative">
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4M12 15a3 3 0 003-3V5a3 3 0 00-6 0v7a3 3 0 003 3z" />
+          </svg>
+          {micState === 'recording' && (
+            <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+          )}
+        </span>
+      )}
+    </button>
+  )
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function ChatPage() {
   const searchParams = useSearchParams()
@@ -2179,6 +2383,10 @@ export default function ChatPage() {
                     rows={1}
                     className="flex-1 resize-none rounded-xl border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-white px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent disabled:opacity-50 leading-relaxed whitespace-pre-wrap break-words overflow-y-auto"
                     style={{ minHeight: '42px' }}
+                  />
+                  <MicrophoneButton
+                    onTranscript={(text) => setInput(prev => prev ? prev + ' ' + text : text)}
+                    disabled={loading}
                   />
                   <button
                     onClick={sendMessage}
