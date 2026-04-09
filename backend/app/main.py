@@ -78,6 +78,7 @@ from app.routes.projects import router as projects_router
 from app.routes.runner import router as runner_router
 from app.routes.custom_methods import router as custom_methods_router
 from app.routes.methods import router as methods_router
+from app.routes.metrics import router as metrics_router
 from app.routes.sandbox import router as sandbox_router
 from app.routes.collaboration import router as collab_router, public_router as auth_public_router
 from app.routes.github_oauth import router as github_oauth_router
@@ -178,6 +179,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Prometheus request metrics
+from app.middleware.metrics_middleware import MetricsMiddleware
+app.add_middleware(MetricsMiddleware)
+
 # Include routers
 app.include_router(health_router)
 app.include_router(models_router)
@@ -222,6 +227,7 @@ app.include_router(audio_router)
 app.include_router(websocket_router)
 app.include_router(feedback_router)
 app.include_router(websocket_router)
+app.include_router(metrics_router)
 
 
 @app.get("/")
