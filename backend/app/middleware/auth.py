@@ -42,6 +42,38 @@ async def verify_api_key(request: Request, credentials: HTTPAuthorizationCredent
         if payload:
             user = get_user_by_id(payload.get("sub", ""))
             if user and user.get("is_active", True):
+                # If JWT carries a session_id, validate it in Redis
+                session_id = payload.get("sid")
+                if session_id:
+                    try:
+                        from app.redis import get_redis
+                        from app.services.session_manager import SessionManager
+                        from app.config import settings as _cfg
+                        redis = await get_redis()
+                        if redis:
+                            mgr = SessionManager(redis, expiry_hours=_cfg.jwt_expiry_hours)
+                            if not await mgr.validate_session(user["id"], session_id):
+                                # Session was revoked — reject the token
+                                raise HTTPException(
+                                    status_code=401,
+                                    detail={
+                                        "error": {
+                                            "type": "authentication_error",
+                                            "message": "Session has been revoked",
+                                            "code": "session_revoked",
+                                        }
+                                    },
+                                )
+                            # Touch session to update last_active (fire-and-forget)
+                            try:
+                                await mgr.touch_session(user["id"], session_id)
+                            except Exception:
+                                pass  # non-critical
+                    except HTTPException:
+                        raise
+                    except Exception:
+                        pass  # Redis unavailable — allow request
+
                 # Valid JWT for an active user
                 request.state.api_key = token
                 request.state.user = {
@@ -50,8 +82,11 @@ async def verify_api_key(request: Request, credentials: HTTPAuthorizationCredent
                     "display_name": user.get("display_name", user["username"]),
                     "role": user.get("role", "member"),
                     "auth_method": "jwt",
+                    "session_id": session_id,
                 }
                 return token
+    except HTTPException:
+        raise
     except Exception:
         # Fall through to 401
         pass
