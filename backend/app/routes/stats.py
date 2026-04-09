@@ -1,6 +1,7 @@
 """Stats endpoints."""
 
 import math
+import calendar
 from datetime import datetime, timedelta
 from typing import Dict, List
 from fastapi import APIRouter, Depends, Query
@@ -10,6 +11,7 @@ from app.database import get_db
 from app.schemas import CostSummary, UsageSummary, DailyCostEntry, DailyCostSummary, DailyCostResponse
 from app.schemas import CostSummary, UsageSummary, ModelPerformanceSummary
 from app.schemas.stats import ModelPerformanceMetrics, ModelPerformanceHighlights
+from app.schemas.stats import CostForecast, BudgetUpdate
 from app.middleware.auth import verify_api_key
 
 router = APIRouter(prefix="/v1/stats", tags=["stats"], dependencies=[Depends(verify_api_key)])
@@ -351,3 +353,59 @@ async def get_agent_metrics(
         })
 
     return agents
+
+
+# In-memory budget store (single-user local app)
+_budget_limit: float | None = None
+
+
+@router.get("/costs/forecast", response_model=CostForecast)
+async def get_cost_forecast(
+    db: AsyncSession = Depends(get_db)
+):
+    """Calculate projected monthly cost based on current usage rate."""
+    global _budget_limit
+    now = datetime.utcnow()
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    days_elapsed = max((now - month_start).days, 1)  # at least 1 to avoid div/0
+    days_remaining = days_in_month - days_elapsed
+
+    # Total cost for current month
+    result = await db.execute(
+        text("SELECT COALESCE(SUM(estimated_cost), 0) FROM request_logs WHERE created_at >= :start"),
+        {"start": month_start}
+    )
+    actual_cost = float(result.scalar() or 0)
+
+    daily_average = actual_cost / days_elapsed
+    projected_cost = daily_average * days_in_month
+
+    over_budget = False
+    if _budget_limit is not None and _budget_limit > 0:
+        over_budget = projected_cost > _budget_limit
+
+    return CostForecast(
+        actual_cost=round(actual_cost, 6),
+        projected_cost=round(projected_cost, 6),
+        daily_average=round(daily_average, 6),
+        days_elapsed=days_elapsed,
+        days_remaining=days_remaining,
+        days_in_month=days_in_month,
+        budget_limit=_budget_limit,
+        over_budget=over_budget,
+    )
+
+
+@router.patch("/budget")
+async def set_budget(body: BudgetUpdate):
+    """Set or update the monthly budget threshold."""
+    global _budget_limit
+    _budget_limit = body.budget_limit
+    return {"budget_limit": _budget_limit}
+
+
+@router.get("/budget")
+async def get_budget():
+    """Get the current budget threshold."""
+    return {"budget_limit": _budget_limit}

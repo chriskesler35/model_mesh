@@ -46,6 +46,23 @@ class DailyCostResponse(BaseModel):
     """Response for daily cost breakdown endpoint."""
     daily: List[DailyCostEntry]
     summary: DailyCostSummary
+class CostForecast(BaseModel):
+    """Monthly cost forecast response."""
+    actual_cost: float
+    projected_cost: float
+    daily_average: float
+    days_elapsed: int
+    days_remaining: int
+    days_in_month: int
+    budget_limit: Optional[float] = None
+    over_budget: bool = False
+
+
+class BudgetUpdate(BaseModel):
+    """Budget threshold update request."""
+    budget_limit: float
+
+
 class ModelPerformanceMetrics(BaseModel):
     """Per-model performance metrics."""
     model_name: str

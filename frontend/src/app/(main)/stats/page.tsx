@@ -74,6 +74,17 @@ interface ModelPerformanceSummary {
   highlights: ModelPerformanceHighlights
 }
 
+interface CostForecast {
+  actual_cost: number
+  projected_cost: number
+  daily_average: number
+  days_elapsed: number
+  days_remaining: number
+  days_in_month: number
+  budget_limit: number | null
+  over_budget: boolean
+}
+
 type SortKey = keyof Pick<
   ModelPerformanceMetrics,
   'model_name' | 'total_requests' | 'avg_latency_ms' | 'p95_latency_ms' | 'success_rate' | 'avg_tokens_per_request' | 'total_cost'
@@ -559,6 +570,7 @@ export default function StatsPage() {
   const [dailyCosts, setDailyCosts] = useState<DailyCostResponse | null>(null)
   const [feedback, setFeedback] = useState<FeedbackSummary | null>(null)
   const [performance, setPerformance] = useState<ModelPerformanceSummary | null>(null)
+  const [forecast, setForecast] = useState<CostForecast | null>(null)
   const [loading, setLoading] = useState(true)
   const [selectedDays, setSelectedDays] = useState<number>(7)
   const [perfDays, setPerfDays] = useState(7)
@@ -581,6 +593,13 @@ export default function StatsPage() {
         setCosts(costsRes)
         setUsage(usageRes)
         if (feedbackRes) setFeedback(feedbackRes)
+        // Fetch forecast
+        try {
+          const forecastRes = await fetch(`${API_BASE}/v1/stats/costs/forecast`, {
+            headers: { ...AUTH_HEADERS }
+          }).then(r => r.json())
+          setForecast(forecastRes)
+        } catch {}
       } catch (e) {
         console.error('Failed to fetch stats:', e)
       } finally {
@@ -700,6 +719,103 @@ export default function StatsPage() {
           </div>
         </div>
       </div>
+
+      {/* Monthly Cost Forecast */}
+      {forecast && (
+        <div className="mt-8">
+          <h2 className="text-lg font-medium text-gray-900 mb-4">Monthly Cost Forecast</h2>
+
+          {/* Warning banner */}
+          {forecast.over_budget && forecast.budget_limit && (
+            <div className="mb-4 bg-red-50 border border-red-200 rounded-lg p-4 flex items-center gap-3">
+              <span className="text-xl">⚠️</span>
+              <div>
+                <p className="text-sm font-semibold text-red-800">Over Budget Warning</p>
+                <p className="text-sm text-red-700">
+                  Projected cost ({formatCost(forecast.projected_cost)}) exceeds your budget limit ({formatCost(forecast.budget_limit)})
+                </p>
+              </div>
+            </div>
+          )}
+
+          <div className="bg-white shadow sm:rounded-lg p-6">
+            {/* Progress bar */}
+            <div className="mb-4">
+              <div className="flex justify-between text-sm text-gray-600 mb-2">
+                <span>Actual: {formatCost(forecast.actual_cost)}</span>
+                <span>Projected: {formatCost(forecast.projected_cost)}</span>
+                {forecast.budget_limit && <span>Budget: {formatCost(forecast.budget_limit)}</span>}
+              </div>
+              <div className="relative h-6 bg-gray-100 rounded-full overflow-hidden">
+                {/* Budget marker line */}
+                {forecast.budget_limit && forecast.budget_limit > 0 && (
+                  <div
+                    className="absolute top-0 bottom-0 w-0.5 bg-gray-800 z-20"
+                    style={{ left: `${Math.min((forecast.budget_limit / Math.max(forecast.projected_cost, forecast.budget_limit, 0.01)) * 100, 100)}%` }}
+                    title={`Budget: ${formatCost(forecast.budget_limit)}`}
+                  />
+                )}
+                {/* Projected bar (background) */}
+                {(() => {
+                  const maxVal = Math.max(forecast.projected_cost, forecast.budget_limit || 0, 0.01)
+                  const projPct = Math.min((forecast.projected_cost / maxVal) * 100, 100)
+                  const actualPct = Math.min((forecast.actual_cost / maxVal) * 100, 100)
+                  const barColor = forecast.over_budget
+                    ? 'bg-red-400'
+                    : forecast.budget_limit && forecast.projected_cost > forecast.budget_limit * 0.8
+                      ? 'bg-yellow-400'
+                      : 'bg-green-400'
+                  const actualColor = forecast.over_budget
+                    ? 'bg-red-600'
+                    : forecast.budget_limit && forecast.projected_cost > forecast.budget_limit * 0.8
+                      ? 'bg-yellow-600'
+                      : 'bg-green-600'
+                  return (
+                    <>
+                      <div
+                        className={`absolute h-full rounded-full ${barColor} opacity-40`}
+                        style={{ width: `${projPct}%` }}
+                      />
+                      <div
+                        className={`absolute h-full rounded-full ${actualColor}`}
+                        style={{ width: `${actualPct}%` }}
+                      />
+                    </>
+                  )
+                })()}
+              </div>
+              <div className="flex justify-between text-xs text-gray-400 mt-1">
+                <span>{forecast.days_elapsed} days elapsed</span>
+                <span>{forecast.days_remaining} days remaining</span>
+              </div>
+            </div>
+
+            {/* Stats row */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-4 border-t border-gray-100">
+              <div>
+                <p className="text-xs text-gray-500">Daily Average</p>
+                <p className="text-lg font-semibold text-gray-900">{formatCost(forecast.daily_average)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Month to Date</p>
+                <p className="text-lg font-semibold text-gray-900">{formatCost(forecast.actual_cost)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Projected Total</p>
+                <p className={`text-lg font-semibold ${forecast.over_budget ? 'text-red-600' : 'text-gray-900'}`}>
+                  {formatCost(forecast.projected_cost)}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Budget Limit</p>
+                <p className="text-lg font-semibold text-gray-900">
+                  {forecast.budget_limit ? formatCost(forecast.budget_limit) : 'Not set'}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Cost Trend Chart */}
       <div className="mt-8">
