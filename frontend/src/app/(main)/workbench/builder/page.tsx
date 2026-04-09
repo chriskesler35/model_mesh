@@ -20,6 +20,7 @@ interface WorkflowNode {
     maxIterations?: number
     timeout?: number
     artifactType?: string
+    condition?: string
   }
 }
 
@@ -96,6 +97,7 @@ export default function WorkflowBuilderPage() {
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null)
   const [handleDragSource, setHandleDragSource] = useState<string | null>(null)
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null)
+  const [availableModels, setAvailableModels] = useState<string[]>([])
 
   const { addToast } = useToast()
 
@@ -119,6 +121,23 @@ export default function WorkflowBuilderPage() {
           setCustomAgents(agents.filter((a) => !defaultTypes.has(a.agent_type) || !a.id.startsWith('default-')))
         }
       } catch { /* silent — palette still shows defaults */ }
+    })()
+    return () => { cancelled = true }
+  }, [apiHeaders])
+
+  // ------ Fetch available models from API --------------------------------
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(`${getApiBase()}/v1/models`, { headers: apiHeaders() })
+        if (!res.ok) return
+        const body = await res.json()
+        const models: string[] = (body.data ?? body.models ?? [])
+          .map((m: any) => typeof m === 'string' ? m : m.id || m.name)
+          .filter(Boolean)
+        if (!cancelled) setAvailableModels(models)
+      } catch { /* silent — model dropdown shows only Default */ }
     })()
     return () => { cancelled = true }
   }, [apiHeaders])
@@ -427,7 +446,7 @@ export default function WorkflowBuilderPage() {
   const updateNodeConfig = (
     nodeId: string,
     key: string,
-    value: string,
+    value: string | string[] | number,
   ) => {
     setNodes((prev) =>
       prev.map((n) =>
@@ -754,105 +773,175 @@ export default function WorkflowBuilderPage() {
         </div>
 
         {/* -------------------------------------------------------------- */}
-        {/* Right panel: Node properties                                    */}
+        {/* Right panel: Node configuration (slides open on select)         */}
         {/* -------------------------------------------------------------- */}
-        <div className="w-64 border-l border-zinc-800 bg-zinc-900 p-3 overflow-y-auto shrink-0">
-          {selectedNode ? (
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold">Node Properties</h2>
-                <button
-                  onClick={() => handleDeleteNode(selectedNode.id)}
-                  className="text-xs text-red-400 hover:text-red-300 transition-colors"
-                >
-                  Delete
-                </button>
-              </div>
-              <div className="space-y-3">
-                {/* Name */}
-                <div>
-                  <label className="text-xs text-zinc-500 block mb-1">
-                    Name
-                  </label>
-                  <input
-                    value={selectedNode.label}
-                    onChange={(e) =>
-                      updateNodeField(selectedNode.id, 'label', e.target.value)
-                    }
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
+        <div
+          className={`shrink-0 overflow-hidden transition-[width] duration-200 ease-in-out ${
+            selectedNode ? 'w-80' : 'w-0'
+          }`}
+        >
+          <div className="w-80 h-full border-l border-zinc-800 bg-zinc-900 p-4 overflow-y-auto">
+            {selectedNode && (
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-sm font-semibold">Node Configuration</h2>
+                  <button
+                    onClick={() => setSelectedNode(null)}
+                    className="text-zinc-500 hover:text-zinc-300 transition-colors text-lg leading-none"
+                    title="Close panel"
+                  >
+                    &times;
+                  </button>
                 </div>
+                <div className="space-y-4">
+                  {/* Name */}
+                  <div>
+                    <label className="text-xs text-zinc-500 block mb-1">Name</label>
+                    <input
+                      value={selectedNode.label}
+                      onChange={(e) => updateNodeField(selectedNode.id, 'label', e.target.value)}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
 
-                {/* Type (read-only) */}
-                <div>
-                  <label className="text-xs text-zinc-500 block mb-1">
-                    Type
-                  </label>
-                  <div className="text-sm text-zinc-300">
-                    {selectedNode.type}
+                  {/* Agent Type */}
+                  <div>
+                    <label className="text-xs text-zinc-500 block mb-1">Agent Type</label>
+                    <select
+                      value={selectedNode.type}
+                      onChange={(e) => updateNodeField(selectedNode.id, 'type', e.target.value)}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      {AGENT_TYPES.map((a) => (
+                        <option key={a.type} value={a.type}>{a.icon} {a.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Model */}
+                  <div>
+                    <label className="text-xs text-zinc-500 block mb-1">Model</label>
+                    <select
+                      value={selectedNode.config.model || ''}
+                      onChange={(e) => updateNodeConfig(selectedNode.id, 'model', e.target.value)}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value="">Default</option>
+                      {availableModels.map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* System Prompt */}
+                  <div>
+                    <label className="text-xs text-zinc-500 block mb-1">System Prompt</label>
+                    <textarea
+                      value={selectedNode.config.systemPrompt || ''}
+                      onChange={(e) => updateNodeConfig(selectedNode.id, 'systemPrompt', e.target.value)}
+                      rows={4}
+                      placeholder="Custom instructions for this agent…"
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm resize-y focus:outline-none focus:ring-1 focus:ring-blue-500 min-h-[60px]"
+                    />
+                  </div>
+
+                  {/* Tools */}
+                  <div>
+                    <label className="text-xs text-zinc-500 block mb-2">Tools</label>
+                    <div className="space-y-1">
+                      {['web_search', 'code_execution', 'file_ops'].map((tool) => (
+                        <label key={tool} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-zinc-800/50 rounded px-2 py-1 -mx-2 transition-colors">
+                          <input
+                            type="checkbox"
+                            checked={(selectedNode.config.tools || []).includes(tool)}
+                            onChange={(e) => {
+                              const current = selectedNode.config.tools || []
+                              const next = e.target.checked
+                                ? [...current, tool]
+                                : current.filter((t) => t !== tool)
+                              updateNodeConfig(selectedNode.id, 'tools', next)
+                            }}
+                            className="rounded border-zinc-600 bg-zinc-800 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
+                          />
+                          <span className="text-zinc-300">{tool.replace(/_/g, ' ')}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Max Iterations */}
+                  <div>
+                    <label className="text-xs text-zinc-500 block mb-1">Max Iterations</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={selectedNode.config.maxIterations ?? 10}
+                      onChange={(e) => updateNodeConfig(selectedNode.id, 'maxIterations', parseInt(e.target.value) || 1)}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  {/* Timeout */}
+                  <div>
+                    <label className="text-xs text-zinc-500 block mb-1">Timeout (seconds)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={3600}
+                      value={selectedNode.config.timeout ?? 300}
+                      onChange={(e) => updateNodeConfig(selectedNode.id, 'timeout', parseInt(e.target.value) || 1)}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  {/* Artifact Type */}
+                  <div>
+                    <label className="text-xs text-zinc-500 block mb-1">Artifact Type</label>
+                    <div className="flex gap-1">
+                      {(['json', 'code', 'markdown'] as const).map((at) => (
+                        <button
+                          key={at}
+                          onClick={() => updateNodeConfig(selectedNode.id, 'artifactType', at)}
+                          className={`flex-1 px-2 py-1.5 text-xs rounded border transition-colors ${
+                            (selectedNode.config.artifactType || 'markdown') === at
+                              ? 'bg-blue-600 border-blue-500 text-white'
+                              : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:border-zinc-500'
+                          }`}
+                        >
+                          {at.charAt(0).toUpperCase() + at.slice(1)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Condition */}
+                  <div>
+                    <label className="text-xs text-zinc-500 block mb-1">
+                      Condition <span className="text-zinc-600">(optional)</span>
+                    </label>
+                    <textarea
+                      value={selectedNode.config.condition || ''}
+                      onChange={(e) => updateNodeConfig(selectedNode.id, 'condition', e.target.value)}
+                      rows={2}
+                      placeholder="e.g. output.status === 'approved'"
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-xs font-mono resize-y focus:outline-none focus:ring-1 focus:ring-blue-500 min-h-[40px]"
+                    />
+                  </div>
+
+                  {/* Delete */}
+                  <div className="pt-3 border-t border-zinc-800">
+                    <button
+                      onClick={() => handleDeleteNode(selectedNode.id)}
+                      className="w-full px-3 py-1.5 text-sm rounded bg-red-900/30 border border-red-800/50 text-red-400 hover:bg-red-900/50 hover:text-red-300 transition-colors"
+                    >
+                      Delete Node
+                    </button>
                   </div>
                 </div>
-
-                {/* Artifact Type */}
-                <div>
-                  <label className="text-xs text-zinc-500 block mb-1">
-                    Artifact Type
-                  </label>
-                  <select
-                    value={selectedNode.config.artifactType || 'markdown'}
-                    onChange={(e) =>
-                      updateNodeConfig(
-                        selectedNode.id,
-                        'artifactType',
-                        e.target.value,
-                      )
-                    }
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  >
-                    <option value="markdown">Markdown</option>
-                    <option value="json">JSON</option>
-                    <option value="code">Code</option>
-                  </select>
-                </div>
-
-                {/* System Prompt */}
-                <div>
-                  <label className="text-xs text-zinc-500 block mb-1">
-                    System Prompt
-                  </label>
-                  <textarea
-                    value={selectedNode.config.systemPrompt || ''}
-                    onChange={(e) =>
-                      updateNodeConfig(
-                        selectedNode.id,
-                        'systemPrompt',
-                        e.target.value,
-                      )
-                    }
-                    rows={4}
-                    placeholder="Custom system prompt (optional)"
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-sm resize-none focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
               </div>
-            </div>
-          ) : (
-            <div className="text-zinc-600 text-sm">
-              <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-3">
-                Properties
-              </h2>
-              <p>Click a node to view and edit its properties.</p>
-              <div className="mt-4 space-y-2 text-xs">
-                <div>
-                  <span className="text-zinc-400">Nodes:</span> {nodes.length}
-                </div>
-                <div>
-                  <span className="text-zinc-400">Connections:</span>{' '}
-                  {edges.length}
-                </div>
-              </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       </div>
 
