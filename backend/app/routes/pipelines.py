@@ -209,6 +209,56 @@ async def _run_phase(pipeline_id: str, phase_index: int):
 
     phase_def = phases[phase_index]
     phase_name = phase_def["name"]
+
+    # ── Handle branch phases — no LLM call, just routing ───────────────────
+    if phase_def.get("phase_type") == "branch":
+        from app.services.phase_templates import evaluate_branch
+
+        # Get parent output from the most recent prior run
+        parent_output = ""
+        if prior_run_dicts:
+            last = prior_run_dicts[-1]
+            artifact = last.get("output_artifact") or {}
+            if artifact.get("type") == "json" and artifact.get("data") is not None:
+                parent_output = json.dumps(artifact["data"])
+            elif artifact.get("raw"):
+                parent_output = artifact["raw"]
+
+        target = evaluate_branch(phase_def, parent_output)
+
+        # Create PhaseRun as instantly completed (no LLM, no tokens)
+        run_id = str(uuid.uuid4())
+        now = datetime.utcnow()
+        async with AsyncSessionLocal() as db:
+            pr = PhaseRun(
+                id=run_id,
+                pipeline_id=pipeline_id,
+                phase_index=phase_index,
+                phase_name=phase_name,
+                agent_role="branch",
+                model_id=None,
+                status="approved",
+                started_at=now,
+                completed_at=now,
+                input_context={
+                    "branch_target": target,
+                    "parent_output_preview": (parent_output or "")[:200],
+                },
+                output_artifact={"type": "branch", "target": target},
+            )
+            db.add(pr)
+            await db.commit()
+
+        _push(pipeline_id, "phase_branch",
+              phase_index=phase_index,
+              phase_name=phase_name,
+              target=target)
+
+        logger.info(f"Pipeline {pipeline_id}: branch phase '{phase_name}' routed to '{target}'")
+
+        await _advance_to_next(pipeline_id, phase_index)
+        return
+
     agent_role = phase_def["role"]
 
     # Filter prior runs to only those from declared dependencies

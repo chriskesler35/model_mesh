@@ -544,6 +544,24 @@ def _resolve_field(data: Any, field_path: str) -> Any:
     for part in parts:
         if isinstance(current, dict) and part in current:
             current = current[part]
+
+# ─── Condition / branch evaluation helpers ───────────────────────────────────
+
+def _resolve_field(data: Any, field_path: str) -> Any:
+    """Resolve a dotted field path against a dict/nested-dict.
+
+    Examples:
+        _resolve_field({"a": {"b": 1}}, "a.b") -> 1
+        _resolve_field({"x": "hello"}, "x")    -> "hello"
+        _resolve_field({}, "missing")           -> None
+    """
+    if not field_path or not isinstance(data, dict):
+        return None
+    parts = field_path.split(".")
+    current = data
+    for part in parts:
+        if isinstance(current, dict):
+            current = current.get(part)
         else:
             return None
     return current
@@ -622,3 +640,83 @@ def validate_phase_dag(phases: List[Dict[str, Any]]) -> List[str]:
             dfs(n)
 
     return errors
+
+    """Evaluate a single condition operator.
+
+    Supported operators:
+        equals, not_equals, contains, not_contains,
+        greater_than, less_than, exists, not_exists,
+        in, not_in
+    """
+    op = (operator or "equals").lower().strip()
+
+    if op == "exists":
+        return actual is not None
+    if op == "not_exists":
+        return actual is None
+
+    # Coerce to strings for text comparisons when types differ
+    if op == "equals":
+        return str(actual).lower() == str(expected).lower() if actual is not None else expected is None
+    if op == "not_equals":
+        return str(actual).lower() != str(expected).lower() if actual is not None else expected is not None
+    if op == "contains":
+        return str(expected).lower() in str(actual).lower() if actual is not None else False
+    if op == "not_contains":
+        return str(expected).lower() not in str(actual).lower() if actual is not None else True
+
+    # Numeric comparisons
+    if op in ("greater_than", "less_than"):
+        try:
+            a_num = float(actual) if actual is not None else 0
+            e_num = float(expected) if expected is not None else 0
+            return a_num > e_num if op == "greater_than" else a_num < e_num
+        except (ValueError, TypeError):
+            return False
+
+    # List membership
+    if op == "in":
+        if isinstance(expected, list):
+            return actual in expected
+        return str(actual).lower() in str(expected).lower() if actual is not None else False
+    if op == "not_in":
+        if isinstance(expected, list):
+            return actual not in expected
+        return str(actual).lower() not in str(expected).lower() if actual is not None else True
+
+    # Unknown operator — default to false
+    return False
+
+
+def evaluate_branch(phase: dict, parent_output: str) -> str:
+    """Evaluate a branch phase and return the name of the target phase to execute.
+
+    A branch phase has:
+      - branches: [{"condition": {"field": "...", "operator": "...", "value": "..."}, "target_phase": "name"}, ...]
+      - default_phase: "name" (fallback if no condition matches)
+
+    Evaluates conditions in order. First match wins.
+    Returns the target phase name.
+    """
+    import json as _json
+
+    branches = phase.get("branches", [])
+
+    # Try to parse parent output as JSON
+    try:
+        output_data = _json.loads(parent_output) if parent_output else {}
+    except (_json.JSONDecodeError, TypeError):
+        output_data = {"_raw": parent_output or ""}
+
+    for branch in branches:
+        condition = branch.get("condition", {})
+        field = condition.get("field", "")
+        operator = condition.get("operator", "equals")
+        expected = condition.get("value")
+
+        actual = _resolve_field(output_data, field)
+        if _evaluate_operator(actual, operator, expected):
+            return branch["target_phase"]
+
+    # No condition matched — use default
+    return phase.get("default_phase", "")
