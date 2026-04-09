@@ -30,6 +30,7 @@ BMAD_PHASES: List[Dict[str, Any]] = [
         "role": "Business Analyst",
         "default_model": _FAST_MODEL,
         "artifact_type": "json",
+        "depends_on": [],
         "system_prompt": """You are a Business Analyst. Your job is to clarify the user's request into a concrete, actionable brief.
 
 Do NOT write code. Do NOT design architecture. Just understand WHAT the user wants and WHY.
@@ -52,6 +53,7 @@ Be concise. 3-6 items per list. If the request is vague, make the most reasonabl
         "role": "Product Manager",
         "default_model": _FAST_MODEL,
         "artifact_type": "json",
+        "depends_on": ["Analyst"],
         "system_prompt": """You are a Product Manager. You take the Analyst's brief and convert it into a prioritized work plan.
 
 Read the prior Analyst artifact carefully. Do NOT re-do analysis. Do NOT write code.
@@ -75,6 +77,7 @@ Keep MVP minimal — 3-5 items max. Cut aggressively. Better to ship small and i
         "role": "Software Architect",
         "default_model": _REASONING_MODEL,
         "artifact_type": "json",
+        "depends_on": ["PM"],
         "system_prompt": """You are a Software Architect. You design the technical approach given the PM's work plan.
 
 Read the Analyst + PM artifacts. Focus on MVP scope only. Do NOT write implementation code.
@@ -102,6 +105,7 @@ Prefer boring, proven tech. If a simpler design works, use it."""
         "role": "Software Engineer",
         "default_model": _CODER_MODEL,
         "artifact_type": "code",
+        "depends_on": ["Architect"],
         "system_prompt": """You are a Software Engineer. You implement the Architect's design.
 
 Read all prior artifacts (Analyst, PM, Architect). Follow the architecture exactly. Build ONLY what's in MVP scope.
@@ -133,6 +137,7 @@ Rules:
         "role": "Code Reviewer",
         "default_model": _REVIEW_MODEL,
         "artifact_type": "json",
+        "depends_on": ["Coder"],
         "system_prompt": """You are a Senior Code Reviewer. Critique the Coder's output against the Architect's design.
 
 Read the Architect artifact and the Coder's files. Do NOT rewrite the code. Flag issues for the Coder to fix.
@@ -156,6 +161,7 @@ Be honest. If the code is good, say so (short strengths list, empty issues). If 
         "role": "QA Engineer",
         "default_model": _FAST_MODEL,
         "artifact_type": "json",
+        "depends_on": ["Coder"],
         "system_prompt": """You are a QA Engineer. Define test scenarios for the implemented system based on success criteria.
 
 Read the Analyst's success_criteria and the Coder's files. Do NOT write test code — describe scenarios.
@@ -182,6 +188,7 @@ GSD_PHASES: List[Dict[str, Any]] = [
         "role": "Rapid Prototyper",
         "default_model": _CODER_MODEL,
         "artifact_type": "code",
+        "depends_on": [],
         "system_prompt": """You are a Rapid Prototyper in GSD (Get Shit Done) mode. Ship working code fast.
 
 Priorities: (1) working > perfect, (2) bias to action, (3) no over-engineering, (4) skip preamble.
@@ -211,6 +218,7 @@ Rules:
         "role": "Smoke Tester",
         "default_model": _FAST_MODEL,
         "artifact_type": "json",
+        "depends_on": ["Coder"],
         "system_prompt": """You are a Smoke Tester. Verify the Coder's prototype works end-to-end.
 
 Read the Coder's files. Don't fix bugs — report them. Keep it quick and focused on "does this basically work?"
@@ -235,6 +243,7 @@ Be pragmatic. Ship it if it basically works."""
         "role": "Release Engineer",
         "default_model": _FAST_MODEL,
         "artifact_type": "md",
+        "depends_on": ["Tester"],
         "system_prompt": """You are a Release Engineer. Package the prototype for release.
 
 Read all prior artifacts. Produce a markdown release doc that a user can actually follow.
@@ -259,6 +268,7 @@ SUPERPOWERS_PHASES: List[Dict[str, Any]] = [
         "role": "Research Analyst",
         "default_model": _REASONING_MODEL,
         "artifact_type": "md",
+        "depends_on": [],
         "system_prompt": """You are a Research Analyst. Gather and organize context before any solution design.
 
 Decompose the user's task into sub-problems. For each sub-problem, surface: what's known, what's unknown, what conventions or patterns apply, what prior art exists.
@@ -287,6 +297,7 @@ Be explicit about confidence. Flag uncertainty clearly."""
         "role": "Solution Planner",
         "default_model": _REASONING_MODEL,
         "artifact_type": "json",
+        "depends_on": ["Researcher"],
         "system_prompt": """You are a Solution Planner. Turn the Researcher's findings into a concrete execution plan.
 
 Read the Research doc. Convert it into parallel + sequential work streams the Executor can follow.
@@ -310,6 +321,7 @@ Maximize parallelism where dependencies allow. Keep tasks small and verifiable."
         "role": "Implementation Executor",
         "default_model": _CODER_MODEL,
         "artifact_type": "code",
+        "depends_on": ["Planner"],
         "system_prompt": """You are an Implementation Executor. Execute the Planner's workstreams.
 
 Read the Research + Plan artifacts. Implement the plan completely. Flag any deviations from the plan explicitly.
@@ -342,6 +354,7 @@ Rules:
         "role": "Solution Validator",
         "default_model": _REVIEW_MODEL,
         "artifact_type": "json",
+        "depends_on": ["Executor"],
         "system_prompt": """You are a Solution Validator. Check the Executor's work against the plan's success criteria.
 
 Read ALL prior artifacts (Research, Plan, Executor code). Do NOT rewrite code. Produce a validation report.
@@ -388,3 +401,80 @@ def get_phases_for_method(method_id: str) -> List[Dict[str, Any]]:
 def list_supported_methods() -> List[str]:
     """Methods that support pipeline runs."""
     return list(METHOD_PHASE_TEMPLATES.keys())
+
+
+def get_ready_phases(
+    phases: List[Dict[str, Any]],
+    completed: set[str],
+) -> List[Dict[str, Any]]:
+    """Return phases whose dependencies are all satisfied.
+
+    A phase is "ready" when every name in its ``depends_on`` list appears in
+    *completed*.  Phases with an empty (or missing) ``depends_on`` are ready
+    immediately once no other constraint blocks them.
+
+    Args:
+        phases: The full ordered phase list (each dict must have ``"name"``
+                and optionally ``"depends_on"``).
+        completed: Set of phase names that have finished (status in
+                   completed / approved / skipped).
+
+    Returns:
+        List of phase dicts whose deps are fully met, in their original order.
+    """
+    ready: List[Dict[str, Any]] = []
+    for phase in phases:
+        name = phase["name"]
+        if name in completed:
+            continue  # already done
+        deps = phase.get("depends_on") or []
+        if all(d in completed for d in deps):
+            ready.append(phase)
+    return ready
+
+
+def validate_phase_dag(phases: List[Dict[str, Any]]) -> List[str]:
+    """Validate the dependency graph defined by ``depends_on`` fields.
+
+    Checks:
+      1. Every dependency name actually exists in the phase list.
+      2. There are no circular dependencies.
+
+    Returns:
+        A list of error strings.  Empty list means the DAG is valid.
+    """
+    errors: List[str] = []
+    names = {p["name"] for p in phases}
+
+    # Check all referenced deps exist
+    for phase in phases:
+        for dep in phase.get("depends_on") or []:
+            if dep not in names:
+                errors.append(
+                    f"Phase '{phase['name']}' depends on '{dep}' which does not exist"
+                )
+
+    # Cycle detection via DFS
+    adj: Dict[str, List[str]] = {p["name"]: list(p.get("depends_on") or []) for p in phases}
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: Dict[str, int] = {n: WHITE for n in names}
+
+    def dfs(node: str) -> bool:
+        """Return True if a cycle is found."""
+        color[node] = GRAY
+        for dep in adj.get(node, []):
+            if dep not in color:
+                continue  # unknown dep — already flagged above
+            if color[dep] == GRAY:
+                errors.append(f"Circular dependency detected involving '{node}' and '{dep}'")
+                return True
+            if color[dep] == WHITE and dfs(dep):
+                return True
+        color[node] = BLACK
+        return False
+
+    for n in names:
+        if color[n] == WHITE:
+            dfs(n)
+
+    return errors

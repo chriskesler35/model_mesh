@@ -191,14 +191,15 @@ async def _run_phase(pipeline_id: str, phase_index: int):
         initial_task = p.initial_task
         auto_approve = p.auto_approve
 
-        # Load all prior phase runs for context
-        prior_runs = (await db.execute(
+        # Load phase runs from dependency phases only (not all prior phases).
+        # This ensures each phase gets context specifically from the phases
+        # it declared in depends_on, enabling correct parallel execution.
+        all_prior_runs = (await db.execute(
             select(PhaseRun)
             .where(PhaseRun.pipeline_id == pipeline_id)
-            .where(PhaseRun.status.in_(("approved", "skipped")))
+            .where(PhaseRun.status.in_(("approved", "skipped", "completed")))
             .order_by(PhaseRun.phase_index)
         )).scalars().all()
-        prior_run_dicts = [r.to_dict() for r in prior_runs]
 
     if phase_index >= len(phases):
         logger.info(f"Pipeline {pipeline_id}: all phases complete")
@@ -209,6 +210,22 @@ async def _run_phase(pipeline_id: str, phase_index: int):
     phase_def = phases[phase_index]
     phase_name = phase_def["name"]
     agent_role = phase_def["role"]
+
+    # Filter prior runs to only those from declared dependencies
+    depends_on = set(phase_def.get("depends_on") or [])
+    if depends_on:
+        prior_run_dicts = [
+            r.to_dict() for r in all_prior_runs
+            if r.phase_name in depends_on
+        ]
+    else:
+        # No explicit deps — for phases with empty depends_on (root phases),
+        # no prior context is injected.  For legacy phases without the field,
+        # fall back to all prior runs so existing behaviour is preserved.
+        if "depends_on" in phase_def:
+            prior_run_dicts = []
+        else:
+            prior_run_dicts = [r.to_dict() for r in all_prior_runs]
 
     # Model resolution chain (highest priority wins):
     #   1. Per-phase user override (phase_def["model"] from model_overrides)
@@ -298,7 +315,10 @@ async def _run_phase(pipeline_id: str, phase_index: int):
             model_id=model_id,
             status="running",
             started_at=started,
-            input_context={"prior_phases": [r["phase_name"] for r in prior_run_dicts]},
+            input_context={
+                "prior_phases": [r["phase_name"] for r in prior_run_dicts],
+                "depends_on": list(depends_on),
+            },
         )
         db.add(pr)
         await db.commit()
@@ -321,9 +341,10 @@ async def _run_phase(pipeline_id: str, phase_index: int):
                f"Check backend logs for details, or pick a different model for this phase.")
         logger.error(msg)
         await _db_update_phase(phase_run_id, status="failed", completed_at=datetime.utcnow())
-        await _db_update_pipeline(pipeline_id, status="failed", completed_at=datetime.utcnow())
         _push(pipeline_id, "phase_failed", phase_index=phase_index, error=msg)
-        _push(pipeline_id, "pipeline_done", message="Pipeline failed.", status="failed")
+        # Don't kill the entire pipeline — let _advance_to_next decide if
+        # other branches can continue or if the pipeline is fully blocked.
+        await _advance_to_next(pipeline_id)
         return
 
     # Build messages: identity + persona prompt + phase system prompt + initial task + prior artifacts
@@ -490,9 +511,10 @@ async def _run_phase(pipeline_id: str, phase_index: int):
             input_tokens=input_tokens,
             output_tokens=output_tokens,
         )
-        await _db_update_pipeline(pipeline_id, status="failed", completed_at=datetime.utcnow())
         _push(pipeline_id, "phase_failed", phase_index=phase_index, error=llm_error)
-        _push(pipeline_id, "pipeline_done", message="Pipeline failed.", status="failed")
+        # Let _advance_to_next decide pipeline-level status — other parallel
+        # branches may still be running or runnable.
+        await _advance_to_next(pipeline_id)
         return
 
     # Extract structured artifact
@@ -647,30 +669,122 @@ async def _run_phase(pipeline_id: str, phase_index: int):
     )
 
     if auto_approve:
-        # Advance immediately
-        await _advance_to_next(pipeline_id, phase_index)
+        # Advance immediately — launch any phases whose deps are now met
+        await _advance_to_next(pipeline_id)
     else:
         await _db_update_pipeline(pipeline_id, status="awaiting_approval")
         _push(pipeline_id, "awaiting_approval", phase_index=phase_index,
               message=f"Phase '{phase_name}' complete — awaiting your approval.")
 
 
-async def _advance_to_next(pipeline_id: str, current_index: int):
-    """Move to the next phase. If at end, complete the pipeline."""
-    from app.models.pipeline import Pipeline
+async def _advance_to_next(pipeline_id: str, _current_index: int = -1):
+    """Advance pipeline by launching all phases whose dependencies are met.
+
+    Uses the dependency graph (``depends_on`` on each phase) instead of a
+    simple sequential index.  All phases whose deps are fully satisfied are
+    launched concurrently via ``asyncio.create_task``.
+
+    The ``_current_index`` parameter is accepted for backward-compat with
+    existing call-sites but is **not used** for scheduling decisions.
+    """
+    from app.models.pipeline import Pipeline, PhaseRun
+    from app.services.phase_templates import get_ready_phases
+
     async with AsyncSessionLocal() as db:
-        p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
+        p = (await db.execute(
+            select(Pipeline).where(Pipeline.id == pipeline_id)
+        )).scalar_one_or_none()
         if not p:
             return
-        total = len(p.phases or [])
-    next_index = current_index + 1
-    if next_index >= total:
-        await _db_update_pipeline(pipeline_id, status="completed", completed_at=datetime.utcnow(),
-                                  current_phase_index=current_index)
-        _push(pipeline_id, "pipeline_done", message="All phases complete.", status="completed")
+        phases = p.phases or []
+        if not phases:
+            await _db_update_pipeline(
+                pipeline_id, status="completed", completed_at=datetime.utcnow()
+            )
+            _push(pipeline_id, "pipeline_done",
+                  message="No phases to run.", status="completed")
+            return
+
+        # Gather status of every PhaseRun for this pipeline
+        phase_runs = (await db.execute(
+            select(PhaseRun)
+            .where(PhaseRun.pipeline_id == pipeline_id)
+            .order_by(PhaseRun.phase_index)
+        )).scalars().all()
+
+    # Classify runs by status
+    completed_names: set[str] = set()
+    running_names: set[str] = set()
+    failed_names: set[str] = set()
+    for run in phase_runs:
+        if run.status in ("completed", "skipped", "approved"):
+            completed_names.add(run.phase_name)
+        elif run.status in ("running", "awaiting_approval"):
+            running_names.add(run.phase_name)
+        elif run.status == "failed":
+            failed_names.add(run.phase_name)
+
+    # Determine which phases are ready to launch
+    ready = get_ready_phases(phases, completed_names)
+    # Filter out phases that are already running or completed
+    ready = [ph for ph in ready
+             if ph["name"] not in running_names
+             and ph["name"] not in completed_names]
+
+    all_phase_names = {ph["name"] for ph in phases}
+
+    if not ready and not running_names:
+        # Nothing running and nothing to launch — pipeline is done (or stuck
+        # because of failures blocking downstream).
+        if completed_names | failed_names >= all_phase_names:
+            # Every phase has a terminal status
+            final_status = "completed" if not failed_names else "failed"
+            # Update current_phase_index to the highest completed index for display
+            max_idx = max(
+                (i for i, ph in enumerate(phases) if ph["name"] in completed_names),
+                default=len(phases) - 1,
+            )
+            await _db_update_pipeline(
+                pipeline_id,
+                status=final_status,
+                completed_at=datetime.utcnow(),
+                current_phase_index=max_idx,
+            )
+            if final_status == "completed":
+                _push(pipeline_id, "pipeline_done",
+                      message="All phases complete.", status="completed")
+            else:
+                _push(pipeline_id, "pipeline_done",
+                      message="Pipeline finished with failures.", status="failed")
+        else:
+            # Some phases still pending but nothing can run — blocked by
+            # failed dependencies.  Mark as failed so users can retry.
+            await _db_update_pipeline(
+                pipeline_id, status="failed", completed_at=datetime.utcnow()
+            )
+            _push(pipeline_id, "pipeline_done",
+                  message="Pipeline blocked — upstream phase(s) failed.",
+                  status="failed")
         return
-    await _db_update_pipeline(pipeline_id, current_phase_index=next_index, status="running")
-    asyncio.create_task(_run_phase(pipeline_id, next_index))
+
+    if not ready:
+        # Phases are still running; nothing new to launch yet — just wait.
+        return
+
+    # Launch all ready phases concurrently
+    # Update current_phase_index to the lowest ready index (for display)
+    first_ready_idx = next(
+        i for i, ph in enumerate(phases) if ph["name"] == ready[0]["name"]
+    )
+    await _db_update_pipeline(
+        pipeline_id, current_phase_index=first_ready_idx, status="running"
+    )
+
+    for phase in ready:
+        phase_index = next(
+            i for i, ph in enumerate(phases) if ph["name"] == phase["name"]
+        )
+        asyncio.create_task(_run_phase(pipeline_id, phase_index))
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -765,6 +879,7 @@ async def preview_phases(method_id: str):
                 "role": p["role"],
                 "default_model": p["default_model"],
                 "artifact_type": p["artifact_type"],
+                "depends_on": p.get("depends_on", []),
                 **chain_info(p["name"]),
                 # Back-compat for existing frontend code
                 "persona_model": None,  # replaced by resolved_model
@@ -779,7 +894,7 @@ async def create_pipeline(body: PipelineCreate, db: AsyncSession = Depends(get_d
     """Create and start a multi-agent pipeline attached to a workbench session."""
     from app.models.pipeline import Pipeline
     from app.models.workbench import WorkbenchSession
-    from app.services.phase_templates import get_phases_for_method, list_supported_methods
+    from app.services.phase_templates import get_phases_for_method, list_supported_methods, validate_phase_dag
 
     # Resolve method — if "stack" or "active", use the currently-active method
     # stack from the Methods page. The primary (first) method in the stack
@@ -818,6 +933,14 @@ async def create_pipeline(body: PipelineCreate, db: AsyncSession = Depends(get_d
             status_code=400,
             detail=f"Method '{effective_method_id}' does not support pipelines. "
                    f"Supported: {list_supported_methods()}"
+        )
+
+    # Validate phase dependency DAG
+    dag_errors = validate_phase_dag(template_phases)
+    if dag_errors:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid phase dependency graph: {'; '.join(dag_errors)}"
         )
 
     # Validate session
@@ -877,8 +1000,8 @@ async def create_pipeline(body: PipelineCreate, db: AsyncSession = Depends(get_d
           phases=[{"name": p["name"], "role": p["role"], "model": p.get("model")} for p in template_phases],
           auto_approve=body.auto_approve)
 
-    # Kick off phase 0
-    asyncio.create_task(_run_phase(pipeline_id, 0))
+    # Kick off all root phases (phases with no dependencies)
+    await _advance_to_next(pipeline_id)
 
     return pipeline.to_dict()
 
@@ -911,92 +1034,132 @@ async def get_pipeline(pipeline_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{pipeline_id}/approve", dependencies=[Depends(verify_api_key)])
-async def approve_phase(pipeline_id: str, body: PipelineApprove, db: AsyncSession = Depends(get_db)):
-    """Approve the current phase and advance to the next."""
+async def approve_phase(
+    pipeline_id: str,
+    body: PipelineApprove,
+    phase_index: Optional[int] = None,
+    phase_run_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Approve a phase and advance the pipeline.
+
+    With parallel execution multiple phases may be awaiting approval
+    simultaneously.  Use ``phase_index`` or ``phase_run_id`` query params to
+    target a specific phase; if omitted, falls back to the first
+    awaiting_approval run found (backward-compat).
+    """
     from app.models.pipeline import Pipeline, PhaseRun
     p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Pipeline not found")
-    if p.status != "awaiting_approval":
-        raise HTTPException(status_code=409,
-                            detail=f"Pipeline is not awaiting approval (status={p.status})")
 
-    # Find the awaiting_approval run at current index
-    pr = (await db.execute(
+    # Build query for the awaiting_approval PhaseRun
+    q = (
         select(PhaseRun)
         .where(PhaseRun.pipeline_id == pipeline_id)
-        .where(PhaseRun.phase_index == p.current_phase_index)
         .where(PhaseRun.status == "awaiting_approval")
-        .order_by(desc(PhaseRun.created_at))
-        .limit(1)
-    )).scalar_one_or_none()
+    )
+    if phase_run_id:
+        q = q.where(PhaseRun.id == phase_run_id)
+    elif phase_index is not None:
+        q = q.where(PhaseRun.phase_index == phase_index)
+    else:
+        # Backward-compat: try current_phase_index first, then any
+        q = q.order_by(PhaseRun.phase_index)
+    q = q.order_by(desc(PhaseRun.created_at)).limit(1)
+
+    pr = (await db.execute(q)).scalar_one_or_none()
     if not pr:
         raise HTTPException(status_code=404, detail="No phase awaiting approval")
 
+    approved_index = pr.phase_index
     pr.status = "approved"
     if body.feedback:
         pr.user_feedback = body.feedback
     await db.commit()
 
-    _push(pipeline_id, "phase_approved", phase_index=p.current_phase_index, feedback=body.feedback)
+    _push(pipeline_id, "phase_approved", phase_index=approved_index, feedback=body.feedback)
 
-    # Advance to next phase
-    await _advance_to_next(pipeline_id, p.current_phase_index)
+    # Advance — launch any phases whose deps are now met
+    await _advance_to_next(pipeline_id)
 
-    return {"ok": True, "advanced_to": p.current_phase_index + 1}
+    return {"ok": True, "approved_phase": approved_index}
 
 
 @router.post("/{pipeline_id}/reject", dependencies=[Depends(verify_api_key)])
-async def reject_phase(pipeline_id: str, body: PipelineReject, db: AsyncSession = Depends(get_db)):
-    """Reject the current phase with feedback — re-runs the same phase."""
+async def reject_phase(
+    pipeline_id: str,
+    body: PipelineReject,
+    phase_index: Optional[int] = None,
+    phase_run_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Reject a phase with feedback — re-runs the same phase.
+
+    Supports ``phase_index`` or ``phase_run_id`` query params to target a
+    specific phase when multiple are awaiting approval in parallel.
+    """
     from app.models.pipeline import Pipeline, PhaseRun
     p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Pipeline not found")
-    if p.status != "awaiting_approval":
-        raise HTTPException(status_code=409,
-                            detail=f"Pipeline is not awaiting approval (status={p.status})")
 
-    pr = (await db.execute(
+    q = (
         select(PhaseRun)
         .where(PhaseRun.pipeline_id == pipeline_id)
-        .where(PhaseRun.phase_index == p.current_phase_index)
         .where(PhaseRun.status == "awaiting_approval")
-        .order_by(desc(PhaseRun.created_at))
-        .limit(1)
-    )).scalar_one_or_none()
+    )
+    if phase_run_id:
+        q = q.where(PhaseRun.id == phase_run_id)
+    elif phase_index is not None:
+        q = q.where(PhaseRun.phase_index == phase_index)
+    else:
+        q = q.order_by(PhaseRun.phase_index)
+    q = q.order_by(desc(PhaseRun.created_at)).limit(1)
+
+    pr = (await db.execute(q)).scalar_one_or_none()
     if not pr:
         raise HTTPException(status_code=404, detail="No phase awaiting approval")
 
+    rejected_index = pr.phase_index
     pr.status = "rejected"
     pr.user_feedback = body.feedback
     await db.commit()
 
-    _push(pipeline_id, "phase_rejected", phase_index=p.current_phase_index, feedback=body.feedback)
+    _push(pipeline_id, "phase_rejected", phase_index=rejected_index, feedback=body.feedback)
 
     # Bake the rejection feedback into the phase's system prompt for the re-run
-    # We do this by mutating the pipeline.phases entry for this index in-place.
     try:
         phases = list(p.phases or [])
-        if 0 <= p.current_phase_index < len(phases):
-            original = phases[p.current_phase_index].get("system_prompt", "")
+        if 0 <= rejected_index < len(phases):
+            original = phases[rejected_index].get("system_prompt", "")
             feedback_block = (f"\n\n# User rejected your previous attempt — feedback:\n"
                               f"{body.feedback}\n\nAddress this feedback in your next attempt.")
             if feedback_block not in original:
-                phases[p.current_phase_index]["system_prompt"] = original + feedback_block
+                phases[rejected_index]["system_prompt"] = original + feedback_block
             await _db_update_pipeline(pipeline_id, phases=phases, status="running")
     except Exception as e:
         logger.warning(f"Could not inject rejection feedback: {e}")
 
     # Re-run the same phase
-    asyncio.create_task(_run_phase(pipeline_id, p.current_phase_index))
+    asyncio.create_task(_run_phase(pipeline_id, rejected_index))
 
-    return {"ok": True, "re_running_phase": p.current_phase_index}
+    return {"ok": True, "re_running_phase": rejected_index}
 
 
 @router.post("/{pipeline_id}/skip", dependencies=[Depends(verify_api_key)])
-async def skip_phase(pipeline_id: str, body: PipelineSkip, db: AsyncSession = Depends(get_db)):
-    """Skip the current phase and advance."""
+async def skip_phase(
+    pipeline_id: str,
+    body: PipelineSkip,
+    phase_index: Optional[int] = None,
+    phase_run_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Skip a phase and advance the pipeline.
+
+    Supports ``phase_index`` or ``phase_run_id`` query params to target a
+    specific phase when multiple are running in parallel.
+    """
     from app.models.pipeline import Pipeline, PhaseRun
     p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
     if not p:
@@ -1005,30 +1168,46 @@ async def skip_phase(pipeline_id: str, body: PipelineSkip, db: AsyncSession = De
         raise HTTPException(status_code=409,
                             detail=f"Pipeline cannot skip from status={p.status}")
 
-    # Mark current phase run (if any) as skipped
-    pr = (await db.execute(
+    # Find the phase run to skip
+    q = (
         select(PhaseRun)
         .where(PhaseRun.pipeline_id == pipeline_id)
-        .where(PhaseRun.phase_index == p.current_phase_index)
-        .order_by(desc(PhaseRun.created_at))
-        .limit(1)
-    )).scalar_one_or_none()
+        .where(PhaseRun.status.in_(("running", "awaiting_approval")))
+    )
+    if phase_run_id:
+        q = q.where(PhaseRun.id == phase_run_id)
+    elif phase_index is not None:
+        q = q.where(PhaseRun.phase_index == phase_index)
+    else:
+        q = q.order_by(PhaseRun.phase_index)
+    q = q.order_by(desc(PhaseRun.created_at)).limit(1)
+
+    pr = (await db.execute(q)).scalar_one_or_none()
+    skipped_index = pr.phase_index if pr else (phase_index or p.current_phase_index)
     if pr:
         pr.status = "skipped"
         if body.reason:
             pr.user_feedback = body.reason
         await db.commit()
 
-    _push(pipeline_id, "phase_skipped", phase_index=p.current_phase_index, reason=body.reason)
+    _push(pipeline_id, "phase_skipped", phase_index=skipped_index, reason=body.reason)
 
-    await _advance_to_next(pipeline_id, p.current_phase_index)
-    return {"ok": True, "skipped_phase": p.current_phase_index}
+    await _advance_to_next(pipeline_id)
+    return {"ok": True, "skipped_phase": skipped_index}
 
 
 @router.post("/{pipeline_id}/retry", dependencies=[Depends(verify_api_key)])
-async def retry_phase(pipeline_id: str, db: AsyncSession = Depends(get_db)):
-    """Retry a failed phase (or the current phase if pipeline failed mid-run)."""
-    from app.models.pipeline import Pipeline
+async def retry_phase(
+    pipeline_id: str,
+    phase_index: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Retry failed phase(s).
+
+    If ``phase_index`` is given, retry that specific phase.  Otherwise retry
+    all failed phases whose dependencies are met (enables parallel retry).
+    """
+    from app.models.pipeline import Pipeline, PhaseRun
     p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Pipeline not found")
@@ -1036,13 +1215,38 @@ async def retry_phase(pipeline_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=409,
                             detail=f"Can only retry from failed/cancelled (status={p.status})")
 
-    # Reset pipeline status and re-run current phase
+    # Reset pipeline status
     await _db_update_pipeline(pipeline_id, status="running", completed_at=None)
-    _push(pipeline_id, "pipeline_retry", phase_index=p.current_phase_index,
-          message=f"Retrying phase {p.current_phase_index}")
 
-    asyncio.create_task(_run_phase(pipeline_id, p.current_phase_index))
-    return {"ok": True, "retrying_phase": p.current_phase_index}
+    if phase_index is not None:
+        # Retry a single specific phase
+        _push(pipeline_id, "pipeline_retry", phase_index=phase_index,
+              message=f"Retrying phase {phase_index}")
+        asyncio.create_task(_run_phase(pipeline_id, phase_index))
+        return {"ok": True, "retrying_phase": phase_index}
+
+    # Retry all failed phases whose deps are met — let _advance_to_next
+    # figure it out after we clear the failed PhaseRun records so they
+    # don't block re-evaluation.
+    failed_runs = (await db.execute(
+        select(PhaseRun)
+        .where(PhaseRun.pipeline_id == pipeline_id)
+        .where(PhaseRun.status == "failed")
+    )).scalars().all()
+
+    retried_indices = []
+    for fr in failed_runs:
+        # Delete the failed run so _advance_to_next sees the phase as
+        # pending and will re-launch it if deps are met.
+        await db.delete(fr)
+        retried_indices.append(fr.phase_index)
+    await db.commit()
+
+    _push(pipeline_id, "pipeline_retry", phase_index=retried_indices[0] if retried_indices else 0,
+          message=f"Retrying failed phases: {retried_indices}")
+
+    await _advance_to_next(pipeline_id)
+    return {"ok": True, "retrying_phases": retried_indices}
 
 
 @router.post("/{pipeline_id}/cancel", dependencies=[Depends(verify_api_key)])
