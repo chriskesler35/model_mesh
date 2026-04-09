@@ -29,7 +29,11 @@ async def chat_completions(
     memory = Depends(get_memory)
 ):
     """OpenAI-compatible chat completions endpoint."""
-    
+
+    # TODO: integrate chat_command_parser.parse_chat_command() here (E11.2-E11.4)
+    # Extract last user message, run through parser. If result is not None,
+    # dispatch to command handler instead of continuing to LLM routing below.
+
     # 1. Resolve persona
     resolver = PersonaResolver(db)
     persona, primary_model, fallback_model = await resolver.resolve(request.model)
