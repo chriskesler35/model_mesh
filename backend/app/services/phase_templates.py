@@ -165,7 +165,7 @@ Be honest. If the code is good, say so (short strengths list, empty issues). If 
         "role": "QA Engineer",
         "default_model": _FAST_MODEL,
         "artifact_type": "json",
-        "depends_on": ["Reviewer"],
+        "depends_on": ["Coder"],
         "system_prompt": """You are a QA Engineer. Define test scenarios for the implemented system based on success criteria.
 
 Read the Analyst's success_criteria and the Coder's files. Do NOT write test code — describe scenarios.
@@ -444,12 +444,25 @@ def get_ready_phases(
     """Return phases whose dependencies are all satisfied.
 
     A phase is "ready" when every name in its ``depends_on`` list appears in
-    *completed* and the phase itself is not yet completed.
+    *completed*.  Phases with an empty (or missing) ``depends_on`` are ready
+    immediately once no other constraint blocks them.
+
+    Args:
+        phases: The full ordered phase list (each dict must have ``"name"``
+                and optionally ``"depends_on"``).
+        completed: Set of phase names that have finished (status in
+                   completed / approved / skipped).
+
+    Returns:
+        List of phase dicts whose deps are fully met, in their original order.
     """
     ready: List[Dict[str, Any]] = []
     for phase in phases:
-        deps = set(phase.get("depends_on", []))
-        if deps.issubset(completed) and phase["name"] not in completed:
+        name = phase["name"]
+        if name in completed:
+            continue  # already done
+        deps = phase.get("depends_on") or []
+        if all(d in completed for d in deps):
             ready.append(phase)
     return ready
 
@@ -563,3 +576,49 @@ def _evaluate_operator(actual: Any, operator: str, expected: Any) -> bool:
     # Unknown operator -- default to False (safe)
     logger.warning("Unknown condition operator: %s", operator)
     return False
+
+def validate_phase_dag(phases: List[Dict[str, Any]]) -> List[str]:
+    """Validate the dependency graph defined by ``depends_on`` fields.
+
+    Checks:
+      1. Every dependency name actually exists in the phase list.
+      2. There are no circular dependencies.
+
+    Returns:
+        A list of error strings.  Empty list means the DAG is valid.
+    """
+    errors: List[str] = []
+    names = {p["name"] for p in phases}
+
+    # Check all referenced deps exist
+    for phase in phases:
+        for dep in phase.get("depends_on") or []:
+            if dep not in names:
+                errors.append(
+                    f"Phase '{phase['name']}' depends on '{dep}' which does not exist"
+                )
+
+    # Cycle detection via DFS
+    adj: Dict[str, List[str]] = {p["name"]: list(p.get("depends_on") or []) for p in phases}
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: Dict[str, int] = {n: WHITE for n in names}
+
+    def dfs(node: str) -> bool:
+        """Return True if a cycle is found."""
+        color[node] = GRAY
+        for dep in adj.get(node, []):
+            if dep not in color:
+                continue  # unknown dep — already flagged above
+            if color[dep] == GRAY:
+                errors.append(f"Circular dependency detected involving '{node}' and '{dep}'")
+                return True
+            if color[dep] == WHITE and dfs(dep):
+                return True
+        color[node] = BLACK
+        return False
+
+    for n in names:
+        if color[n] == WHITE:
+            dfs(n)
+
+    return errors
