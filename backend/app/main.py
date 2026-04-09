@@ -80,6 +80,7 @@ from app.routes.methods import router as methods_router
 from app.routes.sandbox import router as sandbox_router
 from app.routes.collaboration import router as collab_router, public_router as auth_public_router
 from app.routes.github_oauth import router as github_oauth_router
+from app.routes.oauth_generic import router as oauth_generic_router
 from app.routes.shares import router as shares_router, public_router as shares_public_router
 from app.routes.hardware import router as hardware_router
 from app.routes.api_keys import router as api_keys_router
@@ -199,6 +200,7 @@ app.include_router(sandbox_router)
 app.include_router(collab_router)
 app.include_router(auth_public_router)
 app.include_router(github_oauth_router)
+app.include_router(oauth_generic_router)
 app.include_router(shares_router)
 app.include_router(shares_public_router)
 app.include_router(hardware_router)
