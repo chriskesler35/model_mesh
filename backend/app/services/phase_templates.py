@@ -11,7 +11,11 @@ Artifact types:
   - "code" : file blocks (FILE: path ... ```lang ... ```)
 """
 
-from typing import Dict, List, Any
+import json
+import logging
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # Default model hints — kept generic so the resolver can fuzzy-match against
@@ -448,3 +452,114 @@ def get_ready_phases(
         if deps.issubset(completed) and phase["name"] not in completed:
             ready.append(phase)
     return ready
+
+
+# ─── Phase condition evaluation ──────────────────────────────────────────────
+
+def evaluate_phase_conditions(phase: Dict[str, Any], parent_output: Optional[str]) -> bool:
+    """Evaluate whether a phase's conditions are met based on parent output.
+
+    A phase may define an optional ``conditions`` list, where each entry is::
+
+        {"field": "some.path", "operator": "equals", "value": "expected"}
+
+    All conditions are joined with AND logic -- every condition must pass for
+    the phase to execute.  If ``conditions`` is absent or empty the phase
+    always executes (backward compatible).
+
+    Supported operators: equals, not_equals, contains, gt, lt, exists,
+    not_exists.
+
+    Args:
+        phase: Phase dict with optional ``conditions`` key.
+        parent_output: Raw output string from the parent phase.  Will be
+            parsed as JSON; if parsing fails only ``exists`` and ``contains``
+            operators work (the raw string is placed under ``_raw``).
+
+    Returns:
+        ``True`` if all conditions pass (or no conditions defined).
+    """
+    conditions = phase.get("conditions")
+    if not conditions:
+        return True  # No conditions = always execute
+
+    # Try to parse parent output as JSON
+    try:
+        output_data = json.loads(parent_output) if parent_output else {}
+    except (json.JSONDecodeError, TypeError):
+        # If output isn't JSON, stash the raw string so operators can still
+        # attempt evaluation against it.
+        output_data = {"_raw": parent_output or ""}
+
+    for condition in conditions:
+        field = condition.get("field", "")
+        operator = condition.get("operator", "equals")
+        expected = condition.get("value")
+
+        # Navigate nested fields with dot notation (e.g., "verdict.status")
+        actual = _resolve_field(output_data, field)
+
+        if not _evaluate_operator(actual, operator, expected):
+            logger.info(
+                "Phase condition not met: field=%s operator=%s expected=%s actual=%s",
+                field, operator, expected, actual,
+            )
+            return False
+
+    return True
+
+
+def format_condition_reason(condition: Dict[str, Any]) -> str:
+    """Return a human-readable reason string for a failed condition."""
+    field = condition.get("field", "?")
+    operator = condition.get("operator", "equals")
+    value = condition.get("value", "")
+    return f"Condition not met: {field} {operator} {value!r}"
+
+
+def _resolve_field(data: Any, field_path: str) -> Any:
+    """Resolve a dot-notation field path in a dict.
+
+    Returns ``None`` if the path cannot be resolved.
+    """
+    if not field_path:
+        return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    parts = field_path.split(".")
+    current: Any = data
+    for part in parts:
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+        else:
+            return None
+    return current
+
+
+def _evaluate_operator(actual: Any, operator: str, expected: Any) -> bool:
+    """Evaluate a single condition operator against *actual* and *expected* values."""
+    if operator == "exists":
+        return actual is not None
+    if operator == "not_exists":
+        return actual is None
+    if actual is None:
+        return False
+    if operator == "equals":
+        return str(actual).lower() == str(expected).lower()
+    if operator == "not_equals":
+        return str(actual).lower() != str(expected).lower()
+    if operator == "contains":
+        return str(expected).lower() in str(actual).lower()
+    if operator == "gt":
+        try:
+            return float(actual) > float(expected)
+        except (ValueError, TypeError):
+            return False
+    if operator == "lt":
+        try:
+            return float(actual) < float(expected)
+        except (ValueError, TypeError):
+            return False
+    # Unknown operator -- default to False (safe)
+    logger.warning("Unknown condition operator: %s", operator)
+    return False
