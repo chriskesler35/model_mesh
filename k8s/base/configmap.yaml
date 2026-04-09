@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: devforgeai-config
+  namespace: devforgeai
+  labels:
+    app.kubernetes.io/part-of: devforgeai
+data:
+  DATABASE_URL: "postgresql+asyncpg://modelmesh:modelmesh@postgres:5432/modelmesh"
+  REDIS_URL: "redis://:devforgeai-redis@redis:6379"
+  OLLAMA_BASE_URL: "http://ollama:11434"
+  NEXT_PUBLIC_API_URL: "http://backend:18800"
+  INTERNAL_API_URL: "http://backend:18800"
