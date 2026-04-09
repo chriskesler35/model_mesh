@@ -304,3 +304,47 @@ async def get_model_performance(
         period_start=start_date,
         period_end=datetime.utcnow(),
     )
+
+
+@router.get("/agents")
+async def get_agent_metrics(
+    days: int = Query(7, ge=1, le=90),
+    db: AsyncSession = Depends(get_db)
+):
+    """Per-agent efficiency metrics aggregated from pipeline phase runs."""
+    start_date = datetime.utcnow() - timedelta(days=days)
+
+    result = await db.execute(text("""
+        SELECT
+            agent_role,
+            COUNT(*) as total_runs,
+            SUM(CASE WHEN status IN ('approved', 'completed') THEN 1 ELSE 0 END) as success_count,
+            AVG(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) as avg_tokens,
+            AVG(
+                CASE WHEN started_at IS NOT NULL AND completed_at IS NOT NULL
+                THEN (julianday(completed_at) - julianday(started_at)) * 86400000
+                ELSE NULL END
+            ) as avg_duration_ms,
+            SUM(retry_count) as total_retries
+        FROM workbench_phase_runs
+        WHERE created_at >= :start
+        GROUP BY agent_role
+        ORDER BY total_runs DESC
+    """), {"start": start_date})
+
+    rows = result.fetchall()
+    agents = []
+    for row in rows:
+        total_runs = int(row[1])
+        success_count = int(row[2])
+        total_retries = int(row[5] or 0)
+        agents.append({
+            "agent_role": row[0],
+            "total_runs": total_runs,
+            "success_rate": round(success_count / total_runs, 4) if total_runs > 0 else 0.0,
+            "avg_tokens": round(float(row[3] or 0), 0),
+            "avg_duration_ms": round(float(row[4] or 0), 1),
+            "retry_rate": round(total_retries / total_runs, 4) if total_runs > 0 else 0.0,
+        })
+
+    return agents
