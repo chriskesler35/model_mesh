@@ -68,6 +68,7 @@ from app.routes.system import router as system_router
 from app.routes.providers import router as providers_router
 from app.routes.images import router as images_router, public_router as images_public_router
 from app.routes.agents import router as agents_router
+from app.routes.conversations import share_router
 from app.routes.model_lookup import router as model_lookup_router
 from app.routes.remote import router as remote_router
 from app.routes.telegram_bot import router as telegram_router
@@ -190,6 +191,7 @@ app.include_router(models_router)
 app.include_router(models_crud_router)
 app.include_router(personas_router)
 app.include_router(conversations_router)
+app.include_router(share_router)
 app.include_router(chat_router)
 app.include_router(stats_router)
 app.include_router(user_router)

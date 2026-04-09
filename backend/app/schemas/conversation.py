@@ -1,6 +1,6 @@
 """Conversation schemas."""
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
 from pydantic import BaseModel, UUID4
 from datetime import datetime
 
@@ -72,3 +72,41 @@ class MessageList(BaseModel):
     limit: int
     offset: int
     has_more: bool
+
+
+# ─── Share schemas ────────────────────────────────────────────────────────────
+
+class ShareCreate(BaseModel):
+    """Schema for creating a conversation share."""
+    shared_with_user_id: str
+    permission: Literal["read", "write"] = "read"
+
+
+class ShareResponse(BaseModel):
+    """Schema for share response."""
+    id: UUID4
+    conversation_id: UUID4
+    shared_with_user_id: str
+    permission: str
+    token: str
+    created_at: datetime
+    revoked_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class SharedConversationResponse(BaseModel):
+    """A conversation that was shared with the current user."""
+    share_id: UUID4
+    conversation_id: UUID4
+    permission: str
+    token: str
+    shared_at: datetime
+    conversation: ConversationResponse
+
+
+class SharedConversationList(BaseModel):
+    """List of conversations shared with the current user."""
+    data: list[SharedConversationResponse]
+    total: int

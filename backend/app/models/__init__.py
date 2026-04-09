@@ -6,6 +6,7 @@ from app.models.provider import Provider
 from app.models.model import Model
 from app.models.persona import Persona
 from app.models.conversation import Conversation, Message
+from app.models.conversation_share import ConversationShare
 from app.models.request_log import RequestLog
 from app.models.user_profile import UserProfile, MemoryFile, PreferenceTracking, SystemModification
 from app.models.agent import Agent
@@ -23,7 +24,7 @@ from app.models.learning_suggestion import LearningSuggestion
 
 __all__ = [
     "Base", "BaseMixin", "Provider", "Model", "Persona",
-    "Conversation", "Message", "RequestLog",
+    "Conversation", "Message", "ConversationShare", "RequestLog",
     "UserProfile", "MemoryFile", "PreferenceTracking", "SystemModification",
     "Agent", "AgentMemory", "AgentRun", "Task", "WorkbenchSession", "Pipeline", "PhaseRun", "CommandExecution",
     "Feedback",

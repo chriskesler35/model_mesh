@@ -1,16 +1,17 @@
 """Conversation endpoints."""
 
+import secrets
 from typing import Optional
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel as PydanticBaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_
 import uuid
 from app.database import get_db
-from app.models import Conversation, Message
+from app.models import Conversation, Message, ConversationShare
 from app.schemas import ConversationCreate, ConversationResponse, ConversationList, MessageResponse, MessageList
-from app.schemas.conversation import ConversationUpdate
+from app.schemas.conversation import ConversationUpdate, ShareCreate, ShareResponse, SharedConversationResponse, SharedConversationList
 from app.middleware.auth import verify_api_key
 import logging
 
@@ -263,4 +264,120 @@ async def add_message(
     return MessageResponse.model_validate(msg)
 
 
+# ─── Share endpoints ──────────────────────────────────────────────────────────
 
+@router.get("/shared", response_model=SharedConversationList)
+async def list_shared_conversations(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """List conversations shared with the current user."""
+    current_user_id = request.state.user.get("id", "owner")
+
+    query = (
+        select(ConversationShare)
+        .where(
+            ConversationShare.shared_with_user_id == current_user_id,
+            ConversationShare.revoked_at.is_(None),
+        )
+        .order_by(ConversationShare.created_at.desc())
+    )
+    result = await db.execute(query)
+    shares = result.scalars().all()
+
+    items = []
+    for share in shares:
+        conv = await db.get(Conversation, share.conversation_id)
+        if conv is None:
+            continue
+        items.append(SharedConversationResponse(
+            share_id=share.id,
+            conversation_id=share.conversation_id,
+            permission=share.permission,
+            token=share.token,
+            shared_at=share.created_at,
+            conversation=ConversationResponse.model_validate(conv),
+        ))
+
+    return SharedConversationList(data=items, total=len(items))
+
+
+@router.post("/{conversation_id}/share", response_model=ShareResponse)
+async def create_share(
+    conversation_id: str,
+    body: ShareCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Share a conversation — generates a share token with permissions."""
+    conv_uuid = _parse_uuid(conversation_id)
+    conv = await db.get(Conversation, conv_uuid)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    share = ConversationShare(
+        conversation_id=conv_uuid,
+        shared_with_user_id=body.shared_with_user_id,
+        permission=body.permission,
+        token=secrets.token_urlsafe(32),
+    )
+    db.add(share)
+    await db.commit()
+    await db.refresh(share)
+
+    logger.info(f"Shared conversation {conv_uuid} with user {body.shared_with_user_id} (perm={body.permission})")
+    return ShareResponse.model_validate(share)
+
+
+@router.delete("/{conversation_id}/share/{share_id}")
+async def revoke_share(
+    conversation_id: str,
+    share_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Revoke a conversation share."""
+    conv_uuid = _parse_uuid(conversation_id)
+    share_uuid = _parse_uuid(share_id)
+
+    result = await db.execute(
+        select(ConversationShare).where(
+            ConversationShare.id == share_uuid,
+            ConversationShare.conversation_id == conv_uuid,
+        )
+    )
+    share = result.scalar_one_or_none()
+    if not share:
+        raise HTTPException(status_code=404, detail="Share not found")
+
+    share.revoked_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    logger.info(f"Revoked share {share_id} for conversation {conversation_id}")
+    return {"status": "revoked", "id": share_id}
+
+
+# ─── Share token resolution (separate router, no /v1/conversations prefix) ────
+
+share_router = APIRouter(prefix="/v1/share", tags=["conversations"], dependencies=[Depends(verify_api_key)])
+
+
+@share_router.get("/{token}", response_model=ConversationResponse)
+async def resolve_share_token(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Resolve a share token to its conversation."""
+    result = await db.execute(
+        select(ConversationShare).where(
+            ConversationShare.token == token,
+            ConversationShare.revoked_at.is_(None),
+        )
+    )
+    share = result.scalar_one_or_none()
+    if not share:
+        raise HTTPException(status_code=404, detail="Invalid or revoked share link")
+
+    conv = await db.get(Conversation, share.conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    return ConversationResponse.model_validate(conv)
