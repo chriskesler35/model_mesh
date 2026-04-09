@@ -44,6 +44,12 @@ async def dispatch_command(
             command, db, conversation_id=conversation_id
         )
 
+    elif entity_type == "workflow":
+        from app.services.chat_commands.workflow_commands import handle_confirm_workflow
+        return await handle_confirm_workflow(
+            command.get("params", {}), db, conversation_id=conversation_id
+        )
+
     elif entity_type == "system":
         return await _handle_system_command(command)
 

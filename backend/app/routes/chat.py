@@ -72,6 +72,77 @@ async def chat_completions(
                 },
             }
 
+        # No explicit command matched — check for workflow triggers
+        from app.services.chat_commands.workflow_commands import (
+            detect_workflow_trigger,
+            handle_workflow_trigger,
+            handle_suggest_pipeline,
+        )
+        trigger_match = await detect_workflow_trigger(last_user_msg, db)
+        if trigger_match:
+            conv_id = request.conversation_id or str(uuid.uuid4())
+            suggestion = await handle_workflow_trigger(
+                last_user_msg, trigger_match, db, conversation_id=conv_id,
+            )
+            return {
+                "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                "object": "chat.completion",
+                "conversation_id": conv_id,
+                "model": "system",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": suggestion,
+                    },
+                    "finish_reason": "stop",
+                }],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+                "modelmesh": {
+                    "persona_used": "system",
+                    "actual_model": "workflow_detector",
+                    "estimated_cost": 0.0,
+                    "provider": "system",
+                    "workflow_trigger": trigger_match,
+                },
+            }
+
+        # No trigger match — check if it's complex enough to suggest a pipeline
+        pipeline_suggestion = await handle_suggest_pipeline(
+            last_user_msg, db, conversation_id=request.conversation_id,
+        )
+        if pipeline_suggestion:
+            conv_id = request.conversation_id or str(uuid.uuid4())
+            return {
+                "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                "object": "chat.completion",
+                "conversation_id": conv_id,
+                "model": "system",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": pipeline_suggestion,
+                    },
+                    "finish_reason": "stop",
+                }],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+                "modelmesh": {
+                    "persona_used": "system",
+                    "actual_model": "workflow_detector",
+                    "estimated_cost": 0.0,
+                    "provider": "system",
+                },
+            }
+
     # 1. Resolve persona
     resolver = PersonaResolver(db)
     persona, primary_model, fallback_model = await resolver.resolve(request.model)
