@@ -173,6 +173,106 @@ def _format_prior_artifact_for_context(phase_run_dict: dict) -> str:
         return f"{header}\n{artifact.get('content', '')[:3000]}"
 
 
+# ─── Parallel context merging (E2.4) ──────────────────────────────────────────
+# Default context limit in characters (~100k chars ≈ ~25k tokens)
+DEFAULT_CONTEXT_CHAR_LIMIT = 100_000
+
+
+def _merge_parent_contexts(
+    pipeline_phases: List[dict],
+    phase_name: str,
+    prior_run_dicts: List[dict],
+) -> str:
+    """Merge artifacts from all parent phases into a single context block.
+
+    Detects artifact types and applies type-appropriate merge strategies:
+    - JSON artifacts → merged into a single JSON object keyed by phase name
+    - Code artifacts → concatenated with file-boundary markers
+    - Text/md artifacts → concatenated with section headers
+    - Mixed types → each rendered with its own strategy, then concatenated
+    """
+    if not prior_run_dicts:
+        return ""
+
+    # Classify artifacts by type
+    json_parts: Dict[str, Any] = {}
+    code_parts: List[str] = []
+    text_parts: List[str] = []
+
+    for prd in prior_run_dicts:
+        pname = prd.get("phase_name", "unknown")
+        artifact = prd.get("output_artifact") or {}
+        atype = artifact.get("type")
+
+        if atype == "json":
+            data = artifact.get("data")
+            if data is not None:
+                json_parts[pname] = data
+            else:
+                # Fallback: treat raw text as text artifact
+                raw = artifact.get("raw", "")
+                if raw:
+                    text_parts.append(f"## Output from {pname}\n{raw[:3000]}")
+        elif atype == "code":
+            files = artifact.get("files", []) or []
+            if files:
+                section = [f"## Output from {pname}"]
+                for f in files:
+                    path = f.get("path", "unknown")
+                    content = f.get("content", "")
+                    section.append(
+                        f"### FILE: {path}\n```\n{content}\n```"
+                    )
+                code_parts.append("\n\n".join(section))
+            else:
+                text_parts.append(f"## Output from {pname}\n(no files generated)")
+        else:
+            # md / text / unknown
+            content = artifact.get("content") or artifact.get("raw", "")
+            text_parts.append(f"## Output from {pname}\n{content[:3000]}")
+
+    # Assemble merged context
+    sections: List[str] = []
+
+    if json_parts:
+        merged_json = json.dumps(json_parts, indent=2)
+        sections.append(
+            f"## Merged JSON from parent phases\n```json\n{merged_json}\n```"
+        )
+
+    if code_parts:
+        sections.extend(code_parts)
+
+    if text_parts:
+        sections.extend(text_parts)
+
+    return "\n\n---\n\n".join(sections)
+
+
+def _validate_context_size(
+    context: str,
+    limit: int = DEFAULT_CONTEXT_CHAR_LIMIT,
+) -> str:
+    """Validate and truncate merged context if it exceeds the character limit.
+
+    Returns the context (possibly truncated) with a warning header if trimmed.
+    """
+    if len(context) <= limit:
+        return context
+
+    truncated = context[:limit]
+    # Try to cut at the last section boundary to keep output coherent
+    last_sep = truncated.rfind("\n\n---\n\n")
+    if last_sep > limit // 2:
+        truncated = truncated[:last_sep]
+
+    warning = (
+        f"⚠️ Parent context was truncated from {len(context):,} to "
+        f"{len(truncated):,} characters (limit: {limit:,}).\n\n"
+    )
+    return warning + truncated
+
+
 # ─── Phase runner (one phase = one LLM call) ──────────────────────────────────
 async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, max_retries: int = 0):
     """Execute a single phase. Persists PhaseRun + artifact. Streams events."""
@@ -477,12 +577,17 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
         except Exception as e:
             logger.debug(f"Snapshot read failed: {e}")
 
-    # Build user message: task + project snapshot + all prior phase artifacts
+    # Build user message: task + project snapshot + merged parent artifacts
     user_parts = [f"# Original task\n{initial_task}"]
     if project_snapshot:
         user_parts.append(project_snapshot)
-    for prd in prior_run_dicts:
-        user_parts.append(_format_prior_artifact_for_context(prd))
+
+    # Merge parent phase contexts (E2.4)
+    merged_context = _merge_parent_contexts(phases, phase_name, prior_run_dicts)
+    if merged_context:
+        merged_context = _validate_context_size(merged_context)
+        user_parts.append(merged_context)
+
     user_parts.append(f"# Your turn: {phase_name}\nProduce your artifact per the instructions in your system prompt.")
     user_message = "\n\n---\n\n".join(user_parts)
 
