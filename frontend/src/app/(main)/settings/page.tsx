@@ -159,12 +159,12 @@ function ApiKeysTab() {
     // Generate PKCE code verifier (random 64-char string) + challenge (SHA-256)
     const randomBytes = new Uint8Array(48)
     crypto.getRandomValues(randomBytes)
-    const codeVerifier = btoa(String.fromCharCode(...randomBytes))
+    const codeVerifier = btoa(String.fromCharCode.apply(null, Array.from(randomBytes)))
       .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
 
     const encoder = new TextEncoder()
     const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(codeVerifier))
-    const codeChallenge = btoa(String.fromCharCode(...new Uint8Array(hashBuffer)))
+    const codeChallenge = btoa(String.fromCharCode.apply(null, Array.from(new Uint8Array(hashBuffer))))
       .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
 
     sessionStorage.setItem('openrouter_pkce_verifier', codeVerifier)

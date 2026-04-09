@@ -1,10 +1,7 @@
 'use client'
 
 import { API_BASE, AUTH_HEADERS } from '@/lib/config'
-import { useState, useEffect, useRef, useCallback } from 'react'
-
-// --- Existing interfaces ---
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 
 interface CostSummary {
   total_cost: number
@@ -130,83 +127,6 @@ function CostLineChart({ data }: { data: DailyCostEntry[] }) {
     return (
       <div className="flex items-center justify-center h-64 text-gray-400 text-sm">
         No daily cost data available
-function formatLatency(ms: number): string {
-  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`
-  return `${Math.round(ms)}ms`
-}
-
-/* ------------------------------------------------------------------ */
-/*  Model Performance Table (sortable) + Latency Bar Chart            */
-/* ------------------------------------------------------------------ */
-
-function ModelPerformanceSection({ performance }: { performance: ModelPerformanceSummary }) {
-  const [sortKey, setSortKey] = useState<SortKey>('total_requests')
-  const [sortAsc, setSortAsc] = useState(false)
-
-  const handleSort = useCallback((key: SortKey) => {
-    if (key === sortKey) {
-      setSortAsc(prev => !prev)
-    } else {
-      setSortKey(key)
-      // Default descending for numbers, ascending for names
-      setSortAsc(key === 'model_name')
-    }
-  }, [sortKey])
-
-  const sorted = useMemo(() => {
-    const list = [...performance.models]
-    list.sort((a, b) => {
-      const av = a[sortKey]
-      const bv = b[sortKey]
-      if (typeof av === 'string' && typeof bv === 'string') {
-        return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av)
-      }
-      const diff = (av as number) - (bv as number)
-      return sortAsc ? diff : -diff
-    })
-    return list
-  }, [performance.models, sortKey, sortAsc])
-
-  const { highlights } = performance
-
-  // Badge helper — returns a label if the model matches a highlight
-  function badge(m: ModelPerformanceMetrics): { label: string; color: string } | null {
-    const name = m.display_name || m.model_name
-    if (name === highlights.fastest) return { label: 'Fastest', color: 'bg-blue-100 text-blue-800' }
-    if (name === highlights.cheapest) return { label: 'Cheapest', color: 'bg-green-100 text-green-800' }
-    if (name === highlights.most_reliable) return { label: 'Most Reliable', color: 'bg-purple-100 text-purple-800' }
-    return null
-  }
-
-  // Column header with sort indicator
-  function SortHeader({ label, field, align }: { label: string; field: SortKey; align?: string }) {
-    const active = sortKey === field
-    return (
-      <th
-        onClick={() => handleSort(field)}
-        className={`px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-gray-700 ${align === 'right' ? 'text-right' : 'text-left'}`}
-      >
-        <span className="inline-flex items-center gap-1">
-          {label}
-          {active && <span className="text-gray-800">{sortAsc ? '\u25B2' : '\u25BC'}</span>}
-        </span>
-      </th>
-    )
-  }
-
-  // Bar chart: max latency determines 100% width
-  const maxLatency = useMemo(
-    () => Math.max(...performance.models.map(m => m.avg_latency_ms), 1),
-    [performance.models]
-  )
-
-  if (performance.models.length === 0) {
-    return (
-      <div className="mt-8">
-        <h2 className="text-lg font-medium text-gray-900 mb-4">Model Performance Comparison</h2>
-        <div className="bg-white shadow sm:rounded-lg px-6 py-4 text-sm text-gray-500 text-center">
-          No performance data available yet
-        </div>
       </div>
     )
   }
@@ -420,9 +340,87 @@ function ChangeIndicator({ changePct }: { changePct: number | null }) {
   )
 }
 
-// --- Main Page ---
+function formatLatency(ms: number): string {
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.round(ms)}ms`
+}
 
-const TIME_RANGE_OPTIONS = [7, 14, 30] as const
+/* ------------------------------------------------------------------ */
+/*  Model Performance Table (sortable) + Latency Bar Chart            */
+/* ------------------------------------------------------------------ */
+
+function ModelPerformanceSection({ performance }: { performance: ModelPerformanceSummary }) {
+  const [sortKey, setSortKey] = useState<SortKey>('total_requests')
+  const [sortAsc, setSortAsc] = useState(false)
+
+  const handleSort = useCallback((key: SortKey) => {
+    if (key === sortKey) {
+      setSortAsc(prev => !prev)
+    } else {
+      setSortKey(key)
+      // Default descending for numbers, ascending for names
+      setSortAsc(key === 'model_name')
+    }
+  }, [sortKey])
+
+  const sorted = useMemo(() => {
+    const list = [...performance.models]
+    list.sort((a, b) => {
+      const av = a[sortKey]
+      const bv = b[sortKey]
+      if (typeof av === 'string' && typeof bv === 'string') {
+        return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av)
+      }
+      const diff = (av as number) - (bv as number)
+      return sortAsc ? diff : -diff
+    })
+    return list
+  }, [performance.models, sortKey, sortAsc])
+
+  const { highlights } = performance
+
+  // Badge helper — returns a label if the model matches a highlight
+  function badge(m: ModelPerformanceMetrics): { label: string; color: string } | null {
+    const name = m.display_name || m.model_name
+    if (name === highlights.fastest) return { label: 'Fastest', color: 'bg-blue-100 text-blue-800' }
+    if (name === highlights.cheapest) return { label: 'Cheapest', color: 'bg-green-100 text-green-800' }
+    if (name === highlights.most_reliable) return { label: 'Most Reliable', color: 'bg-purple-100 text-purple-800' }
+    return null
+  }
+
+  // Column header with sort indicator
+  function SortHeader({ label, field, align }: { label: string; field: SortKey; align?: string }) {
+    const active = sortKey === field
+    return (
+      <th
+        onClick={() => handleSort(field)}
+        className={`px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-gray-700 ${align === 'right' ? 'text-right' : 'text-left'}`}
+      >
+        <span className="inline-flex items-center gap-1">
+          {label}
+          {active && <span className="text-gray-800">{sortAsc ? '\u25B2' : '\u25BC'}</span>}
+        </span>
+      </th>
+    )
+  }
+
+  // Bar chart: max latency determines 100% width
+  const maxLatency = useMemo(
+    () => Math.max(...performance.models.map(m => m.avg_latency_ms), 1),
+    [performance.models]
+  )
+
+  if (performance.models.length === 0) {
+    return (
+      <div className="mt-8">
+        <h2 className="text-lg font-medium text-gray-900 mb-4">Model Performance Comparison</h2>
+        <div className="bg-white shadow sm:rounded-lg px-6 py-4 text-sm text-gray-500 text-center">
+          No performance data available yet
+        </div>
+      </div>
+    )
+  }
+
   return (
     <>
       {/* Highlights bar */}
@@ -553,17 +551,16 @@ const TIME_RANGE_OPTIONS = [7, 14, 30] as const
 /*  Main Page                                                          */
 /* ------------------------------------------------------------------ */
 
+const TIME_RANGE_OPTIONS = [7, 14, 30] as const
+
 export default function StatsPage() {
   const [costs, setCosts] = useState<CostSummary | null>(null)
   const [usage, setUsage] = useState<UsageSummary | null>(null)
   const [dailyCosts, setDailyCosts] = useState<DailyCostResponse | null>(null)
   const [feedback, setFeedback] = useState<FeedbackSummary | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [selectedDays, setSelectedDays] = useState<number>(7)
-
-  // Fetch summary stats (once)
   const [performance, setPerformance] = useState<ModelPerformanceSummary | null>(null)
   const [loading, setLoading] = useState(true)
+  const [selectedDays, setSelectedDays] = useState<number>(7)
   const [perfDays, setPerfDays] = useState(7)
 
   // Fetch core stats once

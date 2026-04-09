@@ -215,7 +215,7 @@ function buildTurnsFromHistory(messages: Array<{role: string; content: string}>,
       const roleMatch = msg.content.match(/^\s*ROLE:\s*([A-Za-z][A-Za-z ]{0,30})/)
       if (roleMatch) current.role = roleMatch[1].trim()
       // Extract file paths from FILE: lines
-      const fileMatches = msg.content.matchAll(/^FILE:\s*(\S+)/gm)
+      const fileMatches = Array.from(msg.content.matchAll(/^FILE:\s*(\S+)/gm))
       for (const fm of fileMatches) current.filesTouched.push(fm[1])
       // Strip ROLE: line + FILE: blocks for the reply summary
       let reply = msg.content

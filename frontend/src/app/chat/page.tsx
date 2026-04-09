@@ -887,6 +887,7 @@ function MessageBubble({ msg, conversationId }: { msg: Message; conversationId?:
                 <span className="text-xs text-gray-400 ml-1">Thanks!</span>
               )}
             </div>
+          )}
           {/* TTS listen button — assistant messages only, not while streaming */}
           {!isUser && !msg.streaming && msg.content && (
             <SpeakerButton text={msg.content} />
@@ -1712,7 +1713,7 @@ export default function ChatPage() {
   const [comfyStatus, setComfyStatus] = useState<'online' | 'offline' | 'checking'>('checking')
 
   // Track pending image tasks: taskId → assistantMessageId
-  const pendingImageTasksRef = useRef<Map<string, string>>(new Map())
+  const pendingImageTasksRef = useRef<Map<string, string | { msgId: string; startedAt: number }>>(new Map())
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -2281,8 +2282,9 @@ export default function ChatPage() {
       
       // Poll immediately after task submission (for fast providers that complete within 3s)
       setTimeout(() => {
-        const msgId = pendingImageTasksRef.current.get(taskId)
-        if (!msgId) return
+        const rawVal = pendingImageTasksRef.current.get(taskId)
+        if (!rawVal) return
+        const msgId = typeof rawVal === 'string' ? rawVal : rawVal.msgId
         fetch(`${API_BASE}/v1/tasks/${taskId}`, { headers: AUTH_HEADERS })
           .then(r => r.ok ? r.json() : null)
           .then(task => {
