@@ -1680,6 +1680,72 @@ async def delete_pipeline(pipeline_id: str, db: AsyncSession = Depends(get_db)):
     return {"ok": True, "deleted_phase_runs": len(runs)}
 
 
+# ─── Save pipeline as method template ─────────────────────────────────────────
+
+class SaveAsTemplateRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+    include_system_prompts: bool = False
+
+
+@router.post("/{pipeline_id}/save-as-template", dependencies=[Depends(verify_api_key)])
+async def save_pipeline_as_template(
+    pipeline_id: str,
+    body: SaveAsTemplateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Convert a completed pipeline's phase config into a reusable custom method template."""
+    from app.models.pipeline import Pipeline
+    from app.models.custom_method import CustomMethod
+
+    p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
+    if not p:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+    if p.status != "completed":
+        raise HTTPException(status_code=400, detail="Only completed pipelines can be saved as templates")
+
+    # Check for duplicate name
+    existing = await db.execute(select(CustomMethod).where(CustomMethod.name == body.name))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail=f"A method named '{body.name}' already exists")
+
+    # Convert pipeline phases to method template phases
+    template_phases = []
+    for phase in (p.phases or []):
+        template_phase: Dict[str, Any] = {
+            "name": phase.get("name", ""),
+            "role": phase.get("role", ""),
+            "artifact_type": phase.get("artifact_type", "md"),
+        }
+        # Preserve model overrides as defaults
+        model = phase.get("model") or phase.get("default_model")
+        if model:
+            template_phase["default_model"] = model
+        # Optionally include system prompts
+        if body.include_system_prompts and phase.get("system_prompt"):
+            template_phase["system_prompt"] = phase["system_prompt"]
+        # Preserve depends_on if present
+        if phase.get("depends_on"):
+            template_phase["depends_on"] = phase["depends_on"]
+        # Preserve conditions if present
+        if phase.get("conditions"):
+            template_phase["conditions"] = phase["conditions"]
+
+        template_phases.append(template_phase)
+
+    new_method = CustomMethod(
+        name=body.name,
+        description=body.description or f"Template created from pipeline run",
+        phases=template_phases,
+        is_active=True,
+    )
+    db.add(new_method)
+    await db.commit()
+    await db.refresh(new_method)
+
+    return {"ok": True, "method": new_method.to_dict(), "source_pipeline_id": pipeline_id}
+
+
 @router.get("/{pipeline_id}/stream")
 async def stream_pipeline(pipeline_id: str, request: Request):
     """SSE stream — no auth (EventSource limitation)."""

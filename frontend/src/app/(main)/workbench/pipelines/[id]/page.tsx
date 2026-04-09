@@ -338,6 +338,91 @@ function ApprovalModal({
   )
 }
 
+// ─── Save as Template Dialog ──────────────────────────────────────────────────
+function SaveAsTemplateDialog({ pipelineId, onClose }: { pipelineId: string; onClose: () => void }) {
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [includeSystemPrompts, setIncludeSystemPrompts] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [success, setSuccess] = useState(false)
+
+  const handleSave = async () => {
+    if (!name.trim()) return
+    setSaving(true)
+    setError(null)
+    try {
+      const res = await fetch(`${API_BASE}/v1/workbench/pipelines/${pipelineId}/save-as-template`, {
+        method: 'POST',
+        headers: AUTH_HEADERS,
+        body: JSON.stringify({ name: name.trim(), description: description.trim() || null, include_system_prompts: includeSystemPrompts }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.detail || `HTTP ${res.status}`)
+      }
+      setSuccess(true)
+      setTimeout(onClose, 1500)
+    } catch (e: any) {
+      setError(e.message || 'Failed to save template')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={onClose}>
+      <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+        <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-800">
+          <h2 className="text-base font-semibold text-gray-900 dark:text-white">Save as Method Template</h2>
+          <p className="text-xs text-gray-500 mt-0.5">Create a reusable method from this pipeline&apos;s configuration</p>
+        </div>
+        <div className="px-6 py-4 space-y-4">
+          {success ? (
+            <div className="text-center py-4">
+              <div className="text-3xl mb-2">✅</div>
+              <div className="text-sm font-semibold text-green-700 dark:text-green-400">Template saved!</div>
+            </div>
+          ) : (
+            <>
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-gray-500 mb-1">Template Name *</label>
+                <input type="text" value={name} onChange={e => setName(e.target.value)} maxLength={200}
+                  placeholder="e.g. My Custom Pipeline"
+                  className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-gray-500 mb-1">Description</label>
+                <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2}
+                  placeholder="What this template is good for..."
+                  className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 resize-none" />
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={includeSystemPrompts} onChange={e => setIncludeSystemPrompts(e.target.checked)}
+                  className="rounded border-gray-300 text-teal-600 focus:ring-teal-400" />
+                <span className="text-sm text-gray-700 dark:text-gray-300">Include system prompts from this run</span>
+              </label>
+              {error && <div className="text-xs text-red-600 bg-red-50 dark:bg-red-900/20 px-3 py-2 rounded-lg">{error}</div>}
+            </>
+          )}
+        </div>
+        {!success && (
+          <div className="px-6 py-4 border-t border-gray-200 dark:border-gray-800 flex gap-3 justify-end">
+            <button onClick={onClose} disabled={saving}
+              className="px-4 py-2 text-sm font-medium rounded-lg text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-40">
+              Cancel
+            </button>
+            <button onClick={handleSave} disabled={saving || !name.trim()}
+              className="px-4 py-2 text-sm font-medium rounded-lg bg-teal-500 hover:bg-teal-600 text-white disabled:opacity-40">
+              {saving ? 'Saving…' : 'Save Template'}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function PipelinePage() {
   const params = useParams()
@@ -349,6 +434,7 @@ export default function PipelinePage() {
   const [loading, setLoading] = useState(true)
   const [approvalRun, setApprovalRun] = useState<PhaseRun | null>(null)
   const [viewArtifactRun, setViewArtifactRun] = useState<PhaseRun | null>(null)
+  const [showSaveTemplate, setShowSaveTemplate] = useState(false)
 
   // Escape closes the read-only artifact modal
   useEffect(() => {
@@ -502,6 +588,12 @@ export default function PipelinePage() {
           </div>
         </div>
         <div className="flex gap-2 flex-shrink-0">
+          {pipeline.status === 'completed' && (
+            <button onClick={() => setShowSaveTemplate(true)}
+              className="px-3 py-1.5 text-xs font-medium rounded-lg bg-teal-500 hover:bg-teal-600 text-white">
+              💾 Save as Template
+            </button>
+          )}
           {(pipeline.status === 'failed' || pipeline.status === 'cancelled') && (
             <button onClick={retryPipeline}
               className="px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-500 hover:bg-indigo-600 text-white">
@@ -592,6 +684,12 @@ export default function PipelinePage() {
           </div>
         </div>
       )}
+
+      {/* Save as Template dialog */}
+      {showSaveTemplate && <SaveAsTemplateDialog
+        pipelineId={pipelineId}
+        onClose={() => setShowSaveTemplate(false)}
+      />}
     </div>
   )
 }
