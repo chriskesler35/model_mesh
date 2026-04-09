@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import AsyncSessionLocal
 from app.models import Model, Provider
 from app.models.agent_memory import AgentMemory
+from app.models.agent_run import AgentRun
 
 logger = logging.getLogger(__name__)
 
@@ -398,9 +399,31 @@ class AgentRunner:
             except Exception as e:
                 logger.warning("Failed to save agent memory: %s", e)
 
+        status = "completed" if final_output and "Error" not in final_output else "failed"
+
+        # Persist AgentRun record
+        try:
+            agent_id = str(self.agent.id)
+            async with AsyncSessionLocal() as session:
+                agent_run = AgentRun(
+                    id=uuid.UUID(run_id),
+                    agent_id=uuid.UUID(agent_id),
+                    task=task,
+                    status=status,
+                    output=final_output,
+                    tool_log=self.iterations,
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    duration_ms=duration_ms,
+                )
+                session.add(agent_run)
+                await session.commit()
+        except Exception as e:
+            logger.warning("Failed to persist AgentRun: %s", e)
+
         return {
             "run_id": run_id,
-            "status": "completed" if final_output and "Error" not in final_output else "failed",
+            "status": status,
             "output": final_output,
             "iterations": self.iterations,
             "iteration_count": len(self.iterations),

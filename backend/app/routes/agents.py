@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from app.database import get_db, AsyncSessionLocal
 from app.models.agent import Agent, DEFAULT_AGENTS
+from app.models.agent_run import AgentRun
 from app.models import Persona, Model
 from app.middleware.auth import verify_api_key
 from pydantic import BaseModel
@@ -664,3 +665,46 @@ async def run_agent(agent_id: str, body: AgentRunRequest, db: AsyncSession = Dep
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── Run History endpoints ───────────────────────────────────────────────────
+
+@router.get("/{agent_id}/runs")
+async def list_agent_runs(
+    agent_id: str,
+    skip: int = 0,
+    limit: int = 50,
+    status: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return paginated list of past runs for an agent."""
+    try:
+        agent_uuid = uuid.UUID(agent_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid agent_id format")
+
+    query = select(AgentRun).where(AgentRun.agent_id == agent_uuid)
+    if status:
+        query = query.where(AgentRun.status == status)
+    query = query.order_by(AgentRun.created_at.desc()).offset(skip).limit(limit)
+
+    result = await db.execute(query)
+    runs = result.scalars().all()
+    return {"data": [r.to_dict(truncate_output=True) for r in runs], "total": len(runs)}
+
+
+@router.get("/{agent_id}/runs/{run_id}")
+async def get_agent_run(agent_id: str, run_id: str, db: AsyncSession = Depends(get_db)):
+    """Return full detail of a single run including tool call logs."""
+    try:
+        run_uuid = uuid.UUID(run_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid run_id format")
+
+    result = await db.execute(
+        select(AgentRun).where(AgentRun.id == run_uuid, AgentRun.agent_id == uuid.UUID(agent_id))
+    )
+    run = result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run.to_dict(truncate_output=False)
