@@ -1,8 +1,9 @@
 'use client'
 
 import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+import { useState, useEffect, useRef, useCallback } from 'react'
 
-import { useState, useEffect } from 'react'
+// --- Existing interfaces ---
 
 interface CostSummary {
   total_cost: number
@@ -18,6 +19,29 @@ interface UsageSummary {
   by_model: Record<string, { requests: number; input_tokens: number; output_tokens: number }>
 }
 
+// --- New interfaces for daily cost trend ---
+
+interface DailyCostEntry {
+  date: string
+  total_cost: number
+  total_requests: number
+  input_tokens: number
+  output_tokens: number
+}
+
+interface DailyCostSummary {
+  total_cost: number
+  daily_average: number
+  change_pct: number | null
+}
+
+interface DailyCostResponse {
+  daily: DailyCostEntry[]
+  summary: DailyCostSummary
+}
+
+// --- Helpers ---
+
 function formatNumber(num: number): string {
   if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`
   if (num >= 1000) return `${(num / 1000).toFixed(1)}K`
@@ -30,11 +54,267 @@ function formatCost(cost: number): string {
   return `$${cost.toFixed(2)}`
 }
 
+function formatDate(dateStr: string): string {
+  const d = new Date(dateStr + 'T00:00:00')
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
+// --- SVG Line Chart Component ---
+
+interface ChartTooltip {
+  x: number
+  y: number
+  date: string
+  cost: number
+}
+
+function CostLineChart({ data }: { data: DailyCostEntry[] }) {
+  const svgRef = useRef<SVGSVGElement>(null)
+  const [tooltip, setTooltip] = useState<ChartTooltip | null>(null)
+  const [dimensions, setDimensions] = useState({ width: 700, height: 300 })
+
+  const updateDimensions = useCallback(() => {
+    if (svgRef.current?.parentElement) {
+      const parentWidth = svgRef.current.parentElement.clientWidth
+      setDimensions({ width: Math.max(parentWidth - 32, 300), height: 300 })
+    }
+  }, [])
+
+  useEffect(() => {
+    updateDimensions()
+    window.addEventListener('resize', updateDimensions)
+    return () => window.removeEventListener('resize', updateDimensions)
+  }, [updateDimensions])
+
+  if (data.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-64 text-gray-400 text-sm">
+        No daily cost data available
+      </div>
+    )
+  }
+
+  const padding = { top: 20, right: 20, bottom: 40, left: 60 }
+  const chartWidth = dimensions.width - padding.left - padding.right
+  const chartHeight = dimensions.height - padding.top - padding.bottom
+
+  const costs = data.map(d => d.total_cost)
+  const maxCost = Math.max(...costs, 0.01) // minimum scale so chart renders
+  const minCost = 0
+
+  // Compute scales
+  const xScale = (i: number) => padding.left + (i / Math.max(data.length - 1, 1)) * chartWidth
+  const yScale = (v: number) => padding.top + chartHeight - ((v - minCost) / (maxCost - minCost)) * chartHeight
+
+  // Build polyline path
+  const points = data.map((d, i) => `${xScale(i)},${yScale(d.total_cost)}`).join(' ')
+
+  // Build area path (filled under the line)
+  const areaPath = [
+    `M ${xScale(0)},${yScale(data[0].total_cost)}`,
+    ...data.slice(1).map((d, i) => `L ${xScale(i + 1)},${yScale(d.total_cost)}`),
+    `L ${xScale(data.length - 1)},${padding.top + chartHeight}`,
+    `L ${xScale(0)},${padding.top + chartHeight}`,
+    'Z'
+  ].join(' ')
+
+  // Y-axis ticks (5 ticks)
+  const yTicks = Array.from({ length: 5 }, (_, i) => {
+    const val = minCost + ((maxCost - minCost) * i) / 4
+    return { val, y: yScale(val) }
+  })
+
+  // X-axis labels -- show ~6-8 labels max
+  const labelInterval = Math.max(1, Math.ceil(data.length / 7))
+  const xLabels = data
+    .map((d, i) => ({ label: formatDate(d.date), x: xScale(i), i }))
+    .filter((_, i) => i % labelInterval === 0 || i === data.length - 1)
+
+  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!svgRef.current || data.length === 0) return
+    const rect = svgRef.current.getBoundingClientRect()
+    const mouseX = e.clientX - rect.left
+
+    // Find nearest data point
+    let nearestIdx = 0
+    let nearestDist = Infinity
+    for (let i = 0; i < data.length; i++) {
+      const dist = Math.abs(xScale(i) - mouseX)
+      if (dist < nearestDist) {
+        nearestDist = dist
+        nearestIdx = i
+      }
+    }
+
+    if (nearestDist < 40) {
+      setTooltip({
+        x: xScale(nearestIdx),
+        y: yScale(data[nearestIdx].total_cost),
+        date: data[nearestIdx].date,
+        cost: data[nearestIdx].total_cost,
+      })
+    } else {
+      setTooltip(null)
+    }
+  }
+
+  return (
+    <div className="relative">
+      <svg
+        ref={svgRef}
+        width={dimensions.width}
+        height={dimensions.height}
+        className="overflow-visible"
+        onMouseMove={handleMouseMove}
+        onMouseLeave={() => setTooltip(null)}
+      >
+        {/* Grid lines */}
+        {yTicks.map((tick, i) => (
+          <line
+            key={i}
+            x1={padding.left}
+            y1={tick.y}
+            x2={padding.left + chartWidth}
+            y2={tick.y}
+            stroke="#e5e7eb"
+            strokeWidth={1}
+          />
+        ))}
+
+        {/* Y-axis labels */}
+        {yTicks.map((tick, i) => (
+          <text
+            key={i}
+            x={padding.left - 8}
+            y={tick.y + 4}
+            textAnchor="end"
+            className="fill-gray-500"
+            fontSize={11}
+          >
+            {formatCost(tick.val)}
+          </text>
+        ))}
+
+        {/* X-axis labels */}
+        {xLabels.map((lbl, i) => (
+          <text
+            key={i}
+            x={lbl.x}
+            y={padding.top + chartHeight + 24}
+            textAnchor="middle"
+            className="fill-gray-500"
+            fontSize={11}
+          >
+            {lbl.label}
+          </text>
+        ))}
+
+        {/* Area fill */}
+        <path d={areaPath} fill="url(#costGradient)" opacity={0.3} />
+
+        {/* Gradient definition */}
+        <defs>
+          <linearGradient id="costGradient" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.4} />
+            <stop offset="100%" stopColor="#3b82f6" stopOpacity={0} />
+          </linearGradient>
+        </defs>
+
+        {/* Line */}
+        <polyline
+          points={points}
+          fill="none"
+          stroke="#3b82f6"
+          strokeWidth={2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+
+        {/* Data points */}
+        {data.map((d, i) => (
+          <circle
+            key={i}
+            cx={xScale(i)}
+            cy={yScale(d.total_cost)}
+            r={3}
+            fill="#3b82f6"
+            stroke="white"
+            strokeWidth={1.5}
+          />
+        ))}
+
+        {/* Tooltip crosshair and dot */}
+        {tooltip && (
+          <>
+            <line
+              x1={tooltip.x}
+              y1={padding.top}
+              x2={tooltip.x}
+              y2={padding.top + chartHeight}
+              stroke="#9ca3af"
+              strokeDasharray="4 2"
+              strokeWidth={1}
+            />
+            <circle
+              cx={tooltip.x}
+              cy={tooltip.y}
+              r={5}
+              fill="#2563eb"
+              stroke="white"
+              strokeWidth={2}
+            />
+          </>
+        )}
+      </svg>
+
+      {/* Tooltip box */}
+      {tooltip && (
+        <div
+          className="absolute bg-gray-900 text-white text-xs rounded px-3 py-2 pointer-events-none shadow-lg"
+          style={{
+            left: tooltip.x,
+            top: tooltip.y - 48,
+            transform: 'translateX(-50%)',
+          }}
+        >
+          <div className="font-medium">{formatDate(tooltip.date)}</div>
+          <div className="text-blue-300">{formatCost(tooltip.cost)}</div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// --- Change Indicator ---
+
+function ChangeIndicator({ changePct }: { changePct: number | null }) {
+  if (changePct === null) {
+    return <span className="text-sm text-gray-400">N/A (no prior data)</span>
+  }
+  const isPositive = changePct > 0
+  const isZero = changePct === 0
+  const color = isZero ? 'text-gray-500' : isPositive ? 'text-red-600' : 'text-green-600'
+  const arrow = isZero ? '' : isPositive ? '\u2191' : '\u2193'
+
+  return (
+    <span className={`text-sm font-medium ${color}`}>
+      {arrow} {Math.abs(changePct).toFixed(1)}%
+    </span>
+  )
+}
+
+// --- Main Page ---
+
+const TIME_RANGE_OPTIONS = [7, 14, 30] as const
+
 export default function StatsPage() {
   const [costs, setCosts] = useState<CostSummary | null>(null)
   const [usage, setUsage] = useState<UsageSummary | null>(null)
+  const [dailyCosts, setDailyCosts] = useState<DailyCostResponse | null>(null)
   const [loading, setLoading] = useState(true)
+  const [selectedDays, setSelectedDays] = useState<number>(7)
 
+  // Fetch summary stats (once)
   useEffect(() => {
     async function fetchStats() {
       try {
@@ -56,6 +336,22 @@ export default function StatsPage() {
     }
     fetchStats()
   }, [])
+
+  // Fetch daily cost trend (when selectedDays changes)
+  useEffect(() => {
+    async function fetchDailyCosts() {
+      try {
+        const res = await fetch(`${API_BASE}/v1/stats/costs/daily?days=${selectedDays}`, {
+          headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
+        })
+        const data: DailyCostResponse = await res.json()
+        setDailyCosts(data)
+      } catch (e) {
+        console.error('Failed to fetch daily costs:', e)
+      }
+    }
+    fetchDailyCosts()
+  }, [selectedDays])
 
   if (loading) {
     return (
@@ -133,6 +429,82 @@ export default function StatsPage() {
             </dd>
           </div>
         </div>
+      </div>
+
+      {/* Cost Trend Chart */}
+      <div className="mt-8">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-medium text-gray-900">Cost Trend</h2>
+          <div className="flex rounded-md shadow-sm">
+            {TIME_RANGE_OPTIONS.map((days) => (
+              <button
+                key={days}
+                onClick={() => setSelectedDays(days)}
+                className={`px-3 py-1.5 text-sm font-medium border ${
+                  selectedDays === days
+                    ? 'bg-blue-600 text-white border-blue-600 z-10'
+                    : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                } ${
+                  days === 7 ? 'rounded-l-md' : ''
+                } ${
+                  days === 30 ? 'rounded-r-md' : ''
+                } ${
+                  days !== 7 ? '-ml-px' : ''
+                }`}
+              >
+                {days}d
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="bg-white shadow rounded-lg p-4">
+          {dailyCosts ? (
+            <CostLineChart data={dailyCosts.daily} />
+          ) : (
+            <div className="flex items-center justify-center h-64 text-gray-400 text-sm">
+              Loading chart...
+            </div>
+          )}
+        </div>
+
+        {/* Trend Summary Cards */}
+        {dailyCosts && (
+          <div className="grid grid-cols-1 gap-5 sm:grid-cols-3 mt-4">
+            <div className="bg-white overflow-hidden shadow rounded-lg">
+              <div className="px-4 py-5 sm:p-6">
+                <dt className="text-sm font-medium text-gray-500 truncate">
+                  Period Total
+                </dt>
+                <dd className="mt-1 text-2xl font-semibold text-gray-900">
+                  {formatCost(dailyCosts.summary.total_cost)}
+                </dd>
+              </div>
+            </div>
+
+            <div className="bg-white overflow-hidden shadow rounded-lg">
+              <div className="px-4 py-5 sm:p-6">
+                <dt className="text-sm font-medium text-gray-500 truncate">
+                  Daily Average
+                </dt>
+                <dd className="mt-1 text-2xl font-semibold text-gray-900">
+                  {formatCost(dailyCosts.summary.daily_average)}
+                </dd>
+              </div>
+            </div>
+
+            <div className="bg-white overflow-hidden shadow rounded-lg">
+              <div className="px-4 py-5 sm:p-6">
+                <dt className="text-sm font-medium text-gray-500 truncate">
+                  vs Prior Period
+                </dt>
+                <dd className="mt-1 text-2xl font-semibold text-gray-900">
+                  <ChangeIndicator changePct={dailyCosts.summary.change_pct} />
+                </dd>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Cost by Model */}

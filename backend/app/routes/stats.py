@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from app.database import get_db
-from app.schemas import CostSummary, UsageSummary
+from app.schemas import CostSummary, UsageSummary, DailyCostEntry, DailyCostSummary, DailyCostResponse
 from app.middleware.auth import verify_api_key
 
 router = APIRouter(prefix="/v1/stats", tags=["stats"], dependencies=[Depends(verify_api_key)])
@@ -138,4 +138,67 @@ async def get_usage(
         by_provider=by_provider,
         period_start=start_date,
         period_end=datetime.utcnow()
+    )
+
+
+@router.get("/costs/daily", response_model=DailyCostResponse)
+async def get_daily_costs(
+    days: int = Query(default=7, ge=1, le=90),
+    db: AsyncSession = Depends(get_db)
+):
+    """Return daily cost breakdown for the last N days."""
+    now = datetime.utcnow()
+    current_start = now - timedelta(days=days)
+    prior_start = current_start - timedelta(days=days)
+
+    # Daily breakdown for the current period
+    result = await db.execute(text("""
+        SELECT
+            DATE(created_at) as day,
+            COALESCE(SUM(estimated_cost), 0) as total_cost,
+            COUNT(*) as total_requests,
+            COALESCE(SUM(input_tokens), 0) as input_tokens,
+            COALESCE(SUM(output_tokens), 0) as output_tokens
+        FROM request_logs
+        WHERE created_at >= :start
+        GROUP BY DATE(created_at)
+        ORDER BY day ASC
+    """), {"start": current_start})
+
+    rows = result.fetchall()
+    daily = [
+        DailyCostEntry(
+            date=str(row[0]),
+            total_cost=round(float(row[1]), 6),
+            total_requests=int(row[2]),
+            input_tokens=int(row[3]),
+            output_tokens=int(row[4]),
+        )
+        for row in rows
+    ]
+
+    # Current period total
+    current_total = sum(entry.total_cost for entry in daily)
+
+    # Prior period total for change calculation
+    result = await db.execute(
+        text("SELECT COALESCE(SUM(estimated_cost), 0) FROM request_logs WHERE created_at >= :start AND created_at < :end"),
+        {"start": prior_start, "end": current_start}
+    )
+    prior_total = float(result.scalar() or 0)
+
+    # Calculate percentage change
+    change_pct = None
+    if prior_total > 0:
+        change_pct = round(((current_total - prior_total) / prior_total) * 100, 1)
+
+    daily_average = round(current_total / days, 6) if days > 0 else 0
+
+    return DailyCostResponse(
+        daily=daily,
+        summary=DailyCostSummary(
+            total_cost=round(current_total, 6),
+            daily_average=daily_average,
+            change_pct=change_pct,
+        )
     )
