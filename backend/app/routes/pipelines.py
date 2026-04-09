@@ -765,6 +765,7 @@ async def preview_phases(method_id: str):
                 "role": p["role"],
                 "default_model": p["default_model"],
                 "artifact_type": p["artifact_type"],
+                "depends_on": p.get("depends_on", []),
                 **chain_info(p["name"]),
                 # Back-compat for existing frontend code
                 "persona_model": None,  # replaced by resolved_model
@@ -779,7 +780,7 @@ async def create_pipeline(body: PipelineCreate, db: AsyncSession = Depends(get_d
     """Create and start a multi-agent pipeline attached to a workbench session."""
     from app.models.pipeline import Pipeline
     from app.models.workbench import WorkbenchSession
-    from app.services.phase_templates import get_phases_for_method, list_supported_methods
+    from app.services.phase_templates import get_phases_for_method, list_supported_methods, validate_phase_dag
 
     # Resolve method — if "stack" or "active", use the currently-active method
     # stack from the Methods page. The primary (first) method in the stack
@@ -819,6 +820,12 @@ async def create_pipeline(body: PipelineCreate, db: AsyncSession = Depends(get_d
             detail=f"Method '{effective_method_id}' does not support pipelines. "
                    f"Supported: {list_supported_methods()}"
         )
+
+    # Validate phase dependency graph (no circular deps)
+    try:
+        validate_phase_dag(template_phases)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     # Validate session
     session = (await db.execute(
