@@ -67,6 +67,28 @@ jobs:
           REDIS_URL: redis://localhost:6379
         run: cd backend && python -m pytest tests/ -v --tb=short || true
 
+      - name: Test migrations (fresh DB)
+        env:
+          DATABASE_URL: postgresql+asyncpg://modelmesh:modelmesh@localhost:5432/modelmesh
+        run: |
+          cd backend
+          # Drop and recreate the database to test migrations from scratch
+          PGPASSWORD=modelmesh psql -h localhost -U modelmesh -d postgres \
+            -c "DROP DATABASE IF EXISTS modelmesh_migrate_test;"
+          PGPASSWORD=modelmesh psql -h localhost -U modelmesh -d postgres \
+            -c "CREATE DATABASE modelmesh_migrate_test;"
+          # Run full migration chain against fresh database
+          ALEMBIC_DB_URL="postgresql://modelmesh:modelmesh@localhost:5432/modelmesh_migrate_test"
+          alembic -x sqlalchemy.url="${ALEMBIC_DB_URL}" upgrade head
+          echo "Migration chain: OK"
+          # Verify downgrade works
+          alembic -x sqlalchemy.url="${ALEMBIC_DB_URL}" downgrade -1
+          alembic -x sqlalchemy.url="${ALEMBIC_DB_URL}" upgrade head
+          echo "Downgrade/upgrade cycle: OK"
+          # Cleanup
+          PGPASSWORD=modelmesh psql -h localhost -U modelmesh -d postgres \
+            -c "DROP DATABASE IF EXISTS modelmesh_migrate_test;"
+
       # -- Frontend setup ------------------------------------------------------
       - uses: actions/setup-node@v4
         with:

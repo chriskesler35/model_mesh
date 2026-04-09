@@ -1,0 +1,77 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+  namespace: devforgeai
+  labels:
+    app.kubernetes.io/name: db-migrate
+    app.kubernetes.io/component: migration
+    app.kubernetes.io/part-of: devforgeai
+  annotations:
+    # Helm pre-upgrade hook — runs migrations before rolling out new pods
+    helm.sh/hook: pre-upgrade,pre-install
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: db-migrate
+        app.kubernetes.io/component: migration
+        app.kubernetes.io/part-of: devforgeai
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for postgres to be ready..."
+              until nc -z postgres 5432; do
+                echo "Postgres not ready, sleeping 2s..."
+                sleep 2
+              done
+              echo "Postgres is ready."
+      containers:
+        - name: migrate
+          image: devforgeai/backend:latest
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "Running Alembic migrations..."
+              cd /app
+              alembic upgrade head
+              echo "Migrations complete."
+              echo "Running seed script..."
+              python -c "
+              import asyncio
+              from app.database import async_session
+              from app.seed import seed_database
+              async def run():
+                  async with async_session() as session:
+                      await seed_database(session)
+              asyncio.run(run())
+              "
+              echo "Seed complete."
+          envFrom:
+            - configMapRef:
+                name: devforgeai-config
+            - secretRef:
+                name: devforgeai-secrets
+          env:
+            # Alembic needs a sync driver URL for migrations
+            - name: ALEMBIC_DATABASE_URL
+              value: "postgresql://modelmesh:$(POSTGRES_PASSWORD)@postgres:5432/modelmesh"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi

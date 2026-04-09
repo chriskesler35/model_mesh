@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.models.provider import Provider
 from app.models.model import Model
 from app.models.persona import Persona
+from app.models.agent import Agent, DEFAULT_AGENTS
 from app.models.user_profile import UserProfile
 import logging
 
@@ -176,5 +177,23 @@ async def seed_database(db: AsyncSession):
         )
         db.add(persona)
     
+    # Create built-in agents
+    for a in DEFAULT_AGENTS:
+        agent = Agent(
+            id=uuid.uuid4(),
+            name=a["name"],
+            agent_type=a["agent_type"],
+            description=a.get("description", ""),
+            system_prompt=a["system_prompt"],
+            tools=a.get("tools", []),
+            max_iterations=a.get("max_iterations", 10),
+            timeout_seconds=a.get("timeout_seconds", 300),
+            is_active=True,
+        )
+        db.add(agent)
+
     await db.commit()
-    logger.info(f"Seeded {len(DEFAULT_PROVIDERS)} providers, {len(DEFAULT_MODELS)} models, {len(DEFAULT_PERSONAS)} personas")
+    logger.info(
+        f"Seeded {len(DEFAULT_PROVIDERS)} providers, {len(DEFAULT_MODELS)} models, "
+        f"{len(DEFAULT_PERSONAS)} personas, {len(DEFAULT_AGENTS)} agents"
+    )
