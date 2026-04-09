@@ -29,7 +29,49 @@ async def chat_completions(
     memory = Depends(get_memory)
 ):
     """OpenAI-compatible chat completions endpoint."""
-    
+
+    # 0. Check for chat commands (model management, help, etc.)
+    last_user_msg = next(
+        (m.content for m in reversed(request.messages) if m.role == "user"),
+        None,
+    )
+    if last_user_msg:
+        from app.services.chat_command_parser import parse_chat_command
+        parsed_command = parse_chat_command(last_user_msg)
+        if parsed_command:
+            from app.services.chat_commands.dispatcher import dispatch_command
+            # Generate a conversation_id if needed
+            conv_id = request.conversation_id or str(uuid.uuid4())
+            command_response = await dispatch_command(
+                parsed_command, db, conversation_id=conv_id,
+            )
+            logger.info(f"Chat command handled: {parsed_command['action']} {parsed_command['entity_type']}")
+            return {
+                "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                "object": "chat.completion",
+                "conversation_id": conv_id,
+                "model": "system",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": command_response,
+                    },
+                    "finish_reason": "stop",
+                }],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+                "modelmesh": {
+                    "persona_used": "system",
+                    "actual_model": "command_executor",
+                    "estimated_cost": 0.0,
+                    "provider": "system",
+                },
+            }
+
     # 1. Resolve persona
     resolver = PersonaResolver(db)
     persona, primary_model, fallback_model = await resolver.resolve(request.model)
