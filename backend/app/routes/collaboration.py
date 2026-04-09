@@ -187,6 +187,14 @@ async def get_audit_log(limit: int = 50, resource_type: Optional[str] = None, us
     return {"data": log, "total": len(log)}
 
 
+# ─── Presence ────────────────────────────────────────────────────────────────
+@router.get("/presence")
+async def get_presence():
+    """Get currently online users and their activities (REST fallback for WebSocket presence)."""
+    from app.services.ws_manager import manager
+    return {"online": manager.get_presence()}
+
+
 # ─── Session handoff ──────────────────────────────────────────────────────────
 @router.post("/handoff")
 async def handoff_session(body: SessionHandoff):
