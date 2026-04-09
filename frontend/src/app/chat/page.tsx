@@ -1,6 +1,7 @@
 'use client'
 
 import { API_BASE, API_KEY, AUTH_HEADERS } from '@/lib/config'
+import VoiceMode, { VoiceModeToggle } from '@/components/VoiceMode'
 
 import { useState, useEffect, useRef, useCallback, Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
@@ -1560,6 +1561,9 @@ export default function ChatPage() {
   const [userExists, setUserExists] = useState(true)   // assume true until checked
   const [aiName, setAiName] = useState('Aria')
 
+  // ── Voice mode state ──────────────────────────────────────────────────────
+  const [voiceModeActive, setVoiceModeActive] = useState(false)
+
   // ── Identity wizard state ─────────────────────────────────────────────────
   const [wizardMode, setWizardMode] = useState<WizardMode | null>(null)
 
@@ -2024,10 +2028,10 @@ export default function ChatPage() {
     return null
   }
 
-  const sendMessage = async () => {
-    if (!input.trim() || loading) return
-    const text = input.trim()
-    setInput('')
+  const sendMessage = async (directText?: string) => {
+    const text = directText?.trim() || input.trim()
+    if (!text || loading) return
+    if (!directText) setInput('')
 
     // Intercept slash commands before sending to AI
     if (text.startsWith('/')) {
@@ -2153,6 +2157,18 @@ export default function ChatPage() {
       textareaRef.current?.focus()
     }
   }
+
+  // ─── Voice mode: send transcribed text directly ─────────────────────────
+  const sendVoiceMessage = useCallback((text: string) => {
+    if (!text.trim()) return
+    sendMessage(text.trim())
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // ─── Track last assistant message for voice mode TTS ────────────────────
+  const lastAssistantMessage = messages.length > 0
+    ? [...messages].reverse().find(m => m.role === 'assistant' && !m.streaming && m.content && !m.content.startsWith('Error:'))?.content ?? null
+    : null
 
   const generateImage = async (overridePrompt?: string) => {
     const prompt = (overridePrompt ?? imagePrompt).trim()
@@ -2465,6 +2481,10 @@ export default function ChatPage() {
                 {activeModelName}
               </span>
             )}
+            <VoiceModeToggle
+              active={voiceModeActive}
+              onToggle={() => setVoiceModeActive(p => !p)}
+            />
             {activeConv?.keep_forever && (
               <span title="Kept forever" className="text-xs">♾️</span>
             )}
@@ -2572,6 +2592,15 @@ export default function ChatPage() {
           )}
           <div ref={messagesEndRef} />
         </div>
+
+        {/* Voice Mode bar */}
+        <VoiceMode
+          active={voiceModeActive}
+          onToggle={() => setVoiceModeActive(false)}
+          onTranscript={sendVoiceMessage}
+          lastAssistantMessage={lastAssistantMessage}
+          loading={loading}
+        />
 
         {/* Input bar */}
         <div className="flex-shrink-0 bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700 px-4 pt-3 pb-4 rounded-b-xl">
@@ -2713,7 +2742,7 @@ export default function ChatPage() {
                     disabled={loading}
                   />
                   <button
-                    onClick={sendMessage}
+                    onClick={() => sendMessage()}
                     disabled={loading || !input.trim()}
                     className="flex-shrink-0 px-4 py-2.5 bg-orange-500 hover:bg-orange-600 disabled:bg-gray-200 dark:disabled:bg-gray-700 text-white disabled:text-gray-400 rounded-xl font-medium text-sm transition-colors"
                   >
