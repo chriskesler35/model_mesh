@@ -1,16 +1,22 @@
 """Agent CRUD endpoints for DevForgeAI."""
 
 import uuid
+import time
+import json
+import logging
+from datetime import datetime
+from typing import Optional, List, Dict, Any, AsyncGenerator
+
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from app.database import get_db
+from pydantic import BaseModel
+
+from app.database import get_db, AsyncSessionLocal
 from app.models.agent import Agent, DEFAULT_AGENTS
 from app.models import Persona, Model
 from app.middleware.auth import verify_api_key
-from pydantic import BaseModel
-from typing import Optional, List
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +165,22 @@ class AgentResponse(BaseModel):
 class AgentListResponse(BaseModel):
     data: List[AgentResponse]
     total: int
+
+
+class AgentRunRequest(BaseModel):
+    task: str
+    context: Optional[dict] = None
+    stream: Optional[bool] = False
+
+
+class AgentRunResponse(BaseModel):
+    run_id: str
+    agent_id: str
+    status: str  # "completed", "failed", "timeout"
+    output: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    duration_ms: int = 0
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -379,3 +401,383 @@ async def delete_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
     await db.delete(agent)
     await db.commit()
     return {"status": "deleted"}
+
+
+# ─── Agent Run ───────────────────────────────────────────────────────────────
+
+
+async def _resolve_model_for_run(model_id: str):
+    """Resolve Model + Provider ORM objects from a model UUID string.
+
+    Re-uses the same resolution logic as pipeline phase execution.
+    Returns (Model, Provider) or (None, None) if not found / no credentials.
+    """
+    from app.routes.workbench import _resolve_model
+    return await _resolve_model(model_id)
+
+
+async def _execute_agent_llm(
+    agent: Agent,
+    resolved: dict,
+    task: str,
+    context: Optional[dict],
+    run_id: str,
+) -> Dict[str, Any]:
+    """Run the LLM call for an agent and return result dict.
+
+    This is the core execution function shared by both streaming and
+    non-streaming paths (non-streaming collects the full response;
+    streaming yields chunks then finalises).
+    """
+    from app.services.model_client import ModelClient
+
+    model_id = resolved["resolved_model_id"]
+    if not model_id:
+        return {
+            "run_id": run_id,
+            "status": "failed",
+            "output": "No model resolved for this agent. Assign a model directly or via a persona.",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "duration_ms": 0,
+        }
+
+    model_orm, provider_orm = await _resolve_model_for_run(model_id)
+    if not model_orm or not provider_orm:
+        return {
+            "run_id": run_id,
+            "status": "failed",
+            "output": (
+                f"Could not resolve model '{model_id}'. "
+                "The model may not exist or its provider has no API key configured."
+            ),
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "duration_ms": 0,
+        }
+
+    # Build messages
+    system_prompt = resolved.get("effective_system_prompt") or agent.system_prompt or ""
+    user_message = task
+    if context:
+        user_message = f"{task}\n\n# Additional context\n```json\n{json.dumps(context, indent=2)}\n```"
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+
+    client = ModelClient()
+    full_response = ""
+    input_tokens = 0
+    output_tokens = 0
+    llm_success = True
+    llm_error = None
+    started = time.time()
+
+    try:
+        stream = await client.call_model(
+            model=model_orm,
+            provider=provider_orm,
+            messages=messages,
+            stream=True,
+            temperature=0.3,
+            max_tokens=16000,
+        )
+
+        async for chunk in stream:
+            delta = ""
+            try:
+                if hasattr(chunk, "choices") and chunk.choices:
+                    delta = chunk.choices[0].delta.content or ""
+                elif isinstance(chunk, dict):
+                    delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+            except Exception:
+                pass
+
+            # Extract token usage from streaming chunks (provider-dependent)
+            try:
+                usage = None
+                if hasattr(chunk, "usage") and chunk.usage:
+                    usage = chunk.usage
+                elif isinstance(chunk, dict) and chunk.get("usage"):
+                    usage = chunk["usage"]
+                if usage:
+                    input_tokens = (
+                        getattr(usage, "prompt_tokens", 0)
+                        or (usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0)
+                    )
+                    output_tokens = (
+                        getattr(usage, "completion_tokens", 0)
+                        or (usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0)
+                    )
+            except Exception:
+                pass
+
+            if delta:
+                full_response += delta
+
+    except Exception as e:
+        logger.error(f"LLM call failed for agent run {run_id}: {e}")
+        llm_success = False
+        llm_error = str(e)
+
+    duration_ms = int((time.time() - started) * 1000)
+
+    # Estimate tokens if the provider didn't report them
+    if input_tokens == 0:
+        input_tokens = client.estimate_tokens(messages, model_orm)
+    if output_tokens == 0 and full_response:
+        try:
+            import tiktoken
+            enc = tiktoken.get_encoding("cl100k_base")
+            output_tokens = len(enc.encode(full_response))
+        except Exception:
+            output_tokens = len(full_response) // 4
+
+    # Write request_log for cost tracking
+    try:
+        from app.models.request_log import RequestLog
+        estimated_cost = client.estimate_cost(input_tokens, output_tokens, model_orm)
+        async with AsyncSessionLocal() as db:
+            log = RequestLog(
+                model_id=str(model_orm.id),
+                provider_id=str(provider_orm.id),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                latency_ms=duration_ms,
+                estimated_cost=estimated_cost,
+                success=llm_success,
+                error_message=llm_error,
+            )
+            db.add(log)
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"request_log write failed for agent run {run_id}: {e}")
+
+    return {
+        "run_id": run_id,
+        "status": "completed" if llm_success else "failed",
+        "output": full_response if llm_success else (llm_error or "Unknown error"),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "duration_ms": duration_ms,
+    }
+
+
+async def _stream_agent_run(
+    agent: Agent,
+    resolved: dict,
+    task: str,
+    context: Optional[dict],
+    run_id: str,
+    agent_id: str,
+) -> AsyncGenerator[str, None]:
+    """SSE generator for streaming agent run output.
+
+    Emits events:
+      - data: {"type": "chunk", "content": "..."}
+      - data: {"type": "done", ...full AgentRunResponse...}
+      - data: {"type": "error", "message": "..."}
+    """
+    from app.services.model_client import ModelClient
+
+    model_id = resolved["resolved_model_id"]
+    if not model_id:
+        yield f"data: {json.dumps({'type': 'error', 'message': 'No model resolved for this agent.'})}\n\n"
+        return
+
+    model_orm, provider_orm = await _resolve_model_for_run(model_id)
+    if not model_orm or not provider_orm:
+        yield f"data: {json.dumps({'type': 'error', 'message': f'Could not resolve model {model_id}.'})}\n\n"
+        return
+
+    system_prompt = resolved.get("effective_system_prompt") or agent.system_prompt or ""
+    user_message = task
+    if context:
+        user_message = f"{task}\n\n# Additional context\n```json\n{json.dumps(context, indent=2)}\n```"
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+
+    client = ModelClient()
+    full_response = ""
+    input_tokens = 0
+    output_tokens = 0
+    llm_success = True
+    llm_error = None
+    started = time.time()
+
+    try:
+        stream = await client.call_model(
+            model=model_orm,
+            provider=provider_orm,
+            messages=messages,
+            stream=True,
+            temperature=0.3,
+            max_tokens=16000,
+        )
+
+        async for chunk in stream:
+            delta = ""
+            try:
+                if hasattr(chunk, "choices") and chunk.choices:
+                    delta = chunk.choices[0].delta.content or ""
+                elif isinstance(chunk, dict):
+                    delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+            except Exception:
+                pass
+
+            try:
+                usage = None
+                if hasattr(chunk, "usage") and chunk.usage:
+                    usage = chunk.usage
+                elif isinstance(chunk, dict) and chunk.get("usage"):
+                    usage = chunk["usage"]
+                if usage:
+                    input_tokens = (
+                        getattr(usage, "prompt_tokens", 0)
+                        or (usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0)
+                    )
+                    output_tokens = (
+                        getattr(usage, "completion_tokens", 0)
+                        or (usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0)
+                    )
+            except Exception:
+                pass
+
+            if delta:
+                full_response += delta
+                yield f"data: {json.dumps({'type': 'chunk', 'content': delta})}\n\n"
+
+    except Exception as e:
+        logger.error(f"LLM streaming call failed for agent run {run_id}: {e}")
+        llm_success = False
+        llm_error = str(e)
+        yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    duration_ms = int((time.time() - started) * 1000)
+
+    # Estimate tokens if the provider didn't report them
+    if input_tokens == 0:
+        input_tokens = client.estimate_tokens(messages, model_orm)
+    if output_tokens == 0 and full_response:
+        try:
+            import tiktoken
+            enc = tiktoken.get_encoding("cl100k_base")
+            output_tokens = len(enc.encode(full_response))
+        except Exception:
+            output_tokens = len(full_response) // 4
+
+    # Write request_log for cost tracking
+    try:
+        from app.models.request_log import RequestLog
+        estimated_cost = client.estimate_cost(input_tokens, output_tokens, model_orm)
+        async with AsyncSessionLocal() as db:
+            log = RequestLog(
+                model_id=str(model_orm.id),
+                provider_id=str(provider_orm.id),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                latency_ms=duration_ms,
+                estimated_cost=estimated_cost,
+                success=llm_success,
+                error_message=llm_error,
+            )
+            db.add(log)
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"request_log write failed for agent run {run_id}: {e}")
+
+    # Final "done" event with full result payload
+    done_payload = {
+        "type": "done",
+        "run_id": run_id,
+        "agent_id": agent_id,
+        "status": "completed" if llm_success else "failed",
+        "output": full_response if llm_success else (llm_error or "Unknown error"),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "duration_ms": duration_ms,
+    }
+    yield f"data: {json.dumps(done_payload)}\n\n"
+
+
+@router.post("/{agent_id}/run", response_model=AgentRunResponse)
+async def run_agent(
+    agent_id: str,
+    body: AgentRunRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Execute a single agent directly with a task.
+
+    Resolves the agent's model (via persona or direct assignment), calls the
+    LLM, logs the request for cost tracking, and returns the result.
+
+    If ``stream: true`` is set in the request body, returns an SSE event
+    stream instead of a JSON response.
+    """
+    # Validate task is non-empty
+    if not body.task or not body.task.strip():
+        raise HTTPException(status_code=422, detail="Task must not be empty")
+
+    # Look up agent (same pattern as GET /{agent_id})
+    agent: Optional[Agent] = None
+    if agent_id.startswith("default-"):
+        raise HTTPException(
+            status_code=422,
+            detail="Cannot run a default agent template. Create an agent first (POST /v1/agents).",
+        )
+
+    try:
+        result = await db.execute(select(Agent).where(Agent.id == uuid.UUID(agent_id)))
+    except ValueError:
+        result = await db.execute(select(Agent).where(Agent.name == agent_id))
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Resolve model + effective system prompt
+    resolved = await _resolve_agent_model(agent, db)
+
+    run_id = str(uuid.uuid4())
+
+    # Streaming path
+    if body.stream:
+        return StreamingResponse(
+            _stream_agent_run(
+                agent=agent,
+                resolved=resolved,
+                task=body.task.strip(),
+                context=body.context,
+                run_id=run_id,
+                agent_id=str(agent.id),
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # Non-streaming path
+    result = await _execute_agent_llm(
+        agent=agent,
+        resolved=resolved,
+        task=body.task.strip(),
+        context=body.context,
+        run_id=run_id,
+    )
+
+    return AgentRunResponse(
+        run_id=result["run_id"],
+        agent_id=str(agent.id),
+        status=result["status"],
+        output=result["output"],
+        input_tokens=result["input_tokens"],
+        output_tokens=result["output_tokens"],
+        duration_ms=result["duration_ms"],
+    )
