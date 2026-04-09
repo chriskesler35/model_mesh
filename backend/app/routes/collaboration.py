@@ -13,6 +13,8 @@ from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from app.middleware.auth import verify_api_key
+from app.redis import get_redis
+from app.services.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/collab", tags=["collaboration"], dependencies=[Depends(verify_api_key)])
@@ -275,8 +277,8 @@ async def delete_workspace(ws_id: str):
 
 
 # ─── JWT Auth ─────────────────────────────────────────────────────────────────
-def _create_jwt(user: dict) -> str:
-    """Create a signed JWT for a user."""
+def _create_jwt(user: dict, session_id: Optional[str] = None) -> str:
+    """Create a signed JWT for a user, optionally embedding session_id."""
     from datetime import timedelta
     now = datetime.now(timezone.utc)
     payload = {
@@ -286,6 +288,8 @@ def _create_jwt(user: dict) -> str:
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(hours=settings.jwt_expiry_hours)).timestamp()),
     }
+    if session_id:
+        payload["sid"] = session_id
     return pyjwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
@@ -329,10 +333,11 @@ class LoginResponse(BaseModel):
     token: str
     expires_in_seconds: int
     user: Dict[str, Any]
+    session_id: Optional[str] = None
 
 
 @public_router.post("/login", response_model=LoginResponse)
-async def login(body: LoginRequest):
+async def login(body: LoginRequest, request: Request):
     """Authenticate with username/password, return a JWT."""
     user = get_user_by_username(body.username)
     if not user or not user.get("is_active", True):
@@ -354,7 +359,16 @@ async def login(body: LoginRequest):
         users[user["id"]]["last_active"] = _now()
         _save(_USERS_FILE, users)
 
-    token = _create_jwt(user)
+    # Create session in Redis (if available)
+    session_id: Optional[str] = None
+    redis = await get_redis()
+    if redis:
+        mgr = SessionManager(redis, expiry_hours=settings.jwt_expiry_hours)
+        user_agent = request.headers.get("user-agent", "")
+        ip_address = request.client.host if request.client else ""
+        session_id = await mgr.create_session(user["id"], user_agent, ip_address)
+
+    token = _create_jwt(user, session_id=session_id)
     _audit("user_login", "user", user["id"], f"User {user['username']} logged in", user["username"])
 
     safe_user = {k: v for k, v in user.items() if k != "password_hash"}
@@ -362,6 +376,7 @@ async def login(body: LoginRequest):
         token=token,
         expires_in_seconds=settings.jwt_expiry_hours * 3600,
         user=safe_user,
+        session_id=session_id,
     )
 
 
@@ -403,9 +418,113 @@ async def get_current_user_info(request: Request):
 
 
 @public_router.post("/logout")
-async def logout():
-    """Client-side logout — tokens are stateless JWTs, just drop the token.
+async def logout(request: Request):
+    """Logout: revoke the current session in Redis (if session tracking is active).
 
-    Returns success; the client is expected to delete its stored token.
+    Also returns success so the client can drop its stored token.
     """
+    # Try to revoke the session tied to this token
+    auth_header = request.headers.get("authorization", "") or request.headers.get("Authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header[7:].strip()
+        payload = decode_jwt(token)
+        if payload and payload.get("sid"):
+            redis = await get_redis()
+            if redis:
+                mgr = SessionManager(redis, expiry_hours=settings.jwt_expiry_hours)
+                await mgr.revoke_session(payload["sub"], payload["sid"])
     return {"ok": True, "message": "Logged out"}
+
+
+def _require_jwt(request: Request) -> dict:
+    """Extract and validate JWT from Authorization header. Returns payload or raises 401."""
+    auth_header = request.headers.get("authorization", "") or request.headers.get("Authorization", "")
+    if not auth_header.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    token = auth_header[7:].strip()
+    payload = decode_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return payload
+
+
+# ---- Session management endpoints -----------------------------------------------
+
+@public_router.get("/sessions")
+async def list_sessions(request: Request):
+    """List all active sessions for the current user.
+
+    Returns sessions sorted by last_active (most recent first).
+    Each session includes device info, IP, timestamps, and whether
+    it is the current session making this request.
+    """
+    payload = _require_jwt(request)
+    user_id = payload["sub"]
+    current_sid = payload.get("sid")
+
+    redis = await get_redis()
+    if not redis:
+        return {"data": [], "total": 0, "message": "Session tracking unavailable (Redis not configured)"}
+
+    mgr = SessionManager(redis, expiry_hours=settings.jwt_expiry_hours)
+    sessions = await mgr.get_sessions(user_id)
+
+    # Mark which session is the current one
+    for s in sessions:
+        s["is_current"] = (s["session_id"] == current_sid) if current_sid else False
+
+    return {"data": sessions, "total": len(sessions)}
+
+
+@public_router.delete("/sessions/{session_id}")
+async def revoke_session(session_id: str, request: Request):
+    """Revoke a specific session by ID.
+
+    Cannot revoke the current session (use POST /logout instead).
+    """
+    payload = _require_jwt(request)
+    user_id = payload["sub"]
+    current_sid = payload.get("sid")
+
+    if session_id == current_sid:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot revoke current session. Use POST /v1/auth/logout instead.",
+        )
+
+    redis = await get_redis()
+    if not redis:
+        raise HTTPException(status_code=503, detail="Session tracking unavailable (Redis not configured)")
+
+    mgr = SessionManager(redis, expiry_hours=settings.jwt_expiry_hours)
+    revoked = await mgr.revoke_session(user_id, session_id)
+    if not revoked:
+        raise HTTPException(status_code=404, detail="Session not found or already expired")
+
+    _audit("session_revoked", "session", session_id,
+           f"User {payload.get('username', user_id)} revoked session {session_id}",
+           payload.get("username", user_id))
+    return {"ok": True, "revoked_session_id": session_id}
+
+
+@public_router.delete("/sessions")
+async def revoke_all_sessions(request: Request):
+    """Revoke all sessions except the current one.
+
+    The caller's own session remains active so they stay logged in.
+    """
+    payload = _require_jwt(request)
+    user_id = payload["sub"]
+    current_sid = payload.get("sid", "")
+
+    redis = await get_redis()
+    if not redis:
+        raise HTTPException(status_code=503, detail="Session tracking unavailable (Redis not configured)")
+
+    mgr = SessionManager(redis, expiry_hours=settings.jwt_expiry_hours)
+    count = await mgr.revoke_all_except(user_id, current_sid)
+
+    _audit("all_sessions_revoked", "session", None,
+           f"User {payload.get('username', user_id)} revoked {count} other sessions",
+           payload.get("username", user_id))
+    return {"ok": True, "revoked_count": count}
