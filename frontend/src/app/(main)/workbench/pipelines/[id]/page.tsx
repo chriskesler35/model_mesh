@@ -17,6 +17,8 @@ interface PhaseDef {
   artifact_type: 'json' | 'md' | 'code'
   system_prompt?: string
   depends_on?: string[]
+  phase_type?: 'standard' | 'branch'
+  branch_condition?: string
 }
 
 interface PhaseRun {
@@ -43,6 +45,9 @@ interface PhaseRun {
   started_at?: string
   completed_at?: string
   created_at?: string
+  retry_count?: number
+  branch_result?: string
+  branch_taken?: string
 }
 
 interface Pipeline {
@@ -483,6 +488,52 @@ function estimateTokenCost(input: number, output: number): string {
   return `$${cost.toFixed(3)}`
 }
 
+function BranchTooltip({ phase, run, children }: {
+  phase: PhaseDef
+  run: PhaseRun | null
+  children: React.ReactNode
+}) {
+  const [show, setShow] = useState(false)
+  const condition = phase.branch_condition
+  const result = run?.branch_result
+  const taken = run?.branch_taken
+
+  if (!condition && !result && !taken) return <>{children}</>
+
+  return (
+    <div className="relative" onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}>
+      {children}
+      {show && (
+        <div className="absolute z-30 bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 bg-gray-900 text-gray-100 rounded-lg shadow-xl p-3 text-xs space-y-1.5 pointer-events-none">
+          <div className="font-semibold text-amber-300">Branch Decision</div>
+          {condition && (
+            <div><span className="text-gray-400">Condition:</span> <span className="font-mono">{condition}</span></div>
+          )}
+          {result && (
+            <div><span className="text-gray-400">Result:</span> <span className="font-mono">{result}</span></div>
+          )}
+          {taken && (
+            <div><span className="text-gray-400">Path taken:</span> <span className="text-green-400 font-semibold">{taken}</span></div>
+          )}
+          <div className="absolute top-full left-1/2 -translate-x-1/2 w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-t-[6px] border-t-gray-900" />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RetryIndicator({ count }: { count: number }) {
+  return (
+    <div className="absolute -top-1.5 -right-1.5 z-20 flex items-center gap-0.5 bg-amber-500 text-white rounded-full px-1.5 py-0.5 text-[9px] font-bold shadow-md" title={`Retried ${count} time${count > 1 ? 's' : ''}`}>
+      <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M1 4v6h6" />
+        <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+      </svg>
+      {count}
+    </div>
+  )
+}
+
 function SwimLaneView({
   phases, runsByIndex,
 }: {
@@ -491,7 +542,7 @@ function SwimLaneView({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const cardRefs = useRef<Record<number, HTMLDivElement | null>>({})
-  const [arrows, setArrows] = useState<{ x1: number; y1: number; x2: number; y2: number }[]>([])
+  const [arrows, setArrows] = useState<{ x1: number; y1: number; x2: number; y2: number; inactive?: boolean }[]>([])
 
   const layers = buildLayers(phases)
   const nameToIdx: Record<string, number> = {}
@@ -508,6 +559,8 @@ function SwimLaneView({
         const deps = phase.depends_on || []
         const targetCard = cardRefs.current[idx]
         if (!targetCard) return
+        const targetRun = runsByIndex[idx]
+        const targetSkipped = targetRun?.status === 'skipped'
 
         for (const dep of deps) {
           const srcIdx = nameToIdx[dep]
@@ -523,6 +576,7 @@ function SwimLaneView({
             y1: srcRect.bottom - containerRect.top,
             x2: tgtRect.left + tgtRect.width / 2 - containerRect.left,
             y2: tgtRect.top - containerRect.top,
+            inactive: targetSkipped,
           })
         }
       })
@@ -537,7 +591,7 @@ function SwimLaneView({
       <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 mb-1">
         <span className="font-semibold uppercase tracking-wider">Pipeline Timeline</span>
         <span className="text-gray-300 dark:text-gray-600">—</span>
-        <span>Sequential ↓ · Parallel ↔</span>
+        <span>Sequential ↓ · Parallel ↔ · ◇ Branch</span>
       </div>
       <div ref={containerRef} className="relative overflow-x-auto">
         {/* SVG arrow overlay */}
@@ -545,6 +599,9 @@ function SwimLaneView({
           <defs>
             <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
               <path d="M0,0 L8,3 L0,6" fill="none" stroke="currentColor" className="text-gray-400 dark:text-gray-500" strokeWidth="1.5" />
+            </marker>
+            <marker id="arrowhead-inactive" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L8,3 L0,6" fill="none" stroke="currentColor" className="text-gray-300 dark:text-gray-700" strokeWidth="1.5" />
             </marker>
           </defs>
           {arrows.map((a, i) => {
@@ -555,9 +612,10 @@ function SwimLaneView({
                 d={`M${a.x1},${a.y1} C${a.x1},${midY} ${a.x2},${midY} ${a.x2},${a.y2}`}
                 fill="none"
                 stroke="currentColor"
-                className="text-gray-300 dark:text-gray-600"
-                strokeWidth="2"
-                markerEnd="url(#arrowhead)"
+                className={a.inactive ? 'text-gray-200 dark:text-gray-700' : 'text-gray-300 dark:text-gray-600'}
+                strokeWidth={a.inactive ? 1.5 : 2}
+                strokeDasharray={a.inactive ? '4 3' : undefined}
+                markerEnd={a.inactive ? 'url(#arrowhead-inactive)' : 'url(#arrowhead)'}
               />
             )
           })}
@@ -587,40 +645,80 @@ function SwimLaneView({
                   const tokens = (run?.input_tokens || 0) + (run?.output_tokens || 0)
                   const duration = formatDuration(run?.started_at, run?.completed_at)
                   const isDone = status === 'approved' || status === 'skipped'
+                  const isBranch = phase.phase_type === 'branch'
+                  const isInactive = status === 'skipped'
+                  const retryCount = run?.retry_count || 0
 
-                  return (
+                  const cardContent = (
                     <div
                       key={phaseIdx}
                       ref={el => { cardRefs.current[phaseIdx] = el }}
-                      className={`relative rounded-lg border-2 ${style.border} ${style.bg} p-3 transition-all
-                        ${isRunning ? 'animate-pulse ring-2 ring-blue-400/50 dark:ring-blue-500/40' : ''}`}
+                      className={`relative transition-all
+                        ${isBranch ? 'flex items-center justify-center' : ''}
+                        ${isInactive ? 'opacity-40' : ''}`}
                     >
-                      {/* Header row */}
-                      <div className="flex items-center gap-2 mb-1.5">
-                        <div className={`w-7 h-7 rounded-full bg-gradient-to-br ${avatar.color} flex items-center justify-center text-sm flex-shrink-0`}>
-                          {avatar.icon}
+                      {retryCount > 0 && <RetryIndicator count={retryCount} />}
+                      {isBranch ? (
+                        /* ◇ Diamond node for branch phases */
+                        <div className={`relative w-32 h-32 flex items-center justify-center`}>
+                          <div
+                            className={`absolute w-24 h-24 border-2 ${style.border} ${style.bg} rotate-45 rounded-md transition-all
+                              ${isRunning ? 'animate-pulse ring-2 ring-blue-400/50 dark:ring-blue-500/40' : ''}`}
+                          />
+                          {/* Content inside diamond (counter-rotated) */}
+                          <div className="relative z-10 flex flex-col items-center gap-1 text-center px-1">
+                            <div className={`w-6 h-6 rounded-full bg-gradient-to-br ${avatar.color} flex items-center justify-center text-xs flex-shrink-0`}>
+                              {avatar.icon}
+                            </div>
+                            <div className="text-[11px] font-semibold text-gray-900 dark:text-white leading-tight max-w-[5rem] truncate">
+                              {phase.name}
+                            </div>
+                            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${style.dot}`} />
+                            {run?.branch_taken && (
+                              <div className="text-[9px] text-green-600 dark:text-green-400 font-semibold truncate max-w-[5rem]">
+                                → {run.branch_taken}
+                              </div>
+                            )}
+                          </div>
                         </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm font-semibold text-gray-900 dark:text-white truncate">{phase.name}</div>
-                          <div className="text-[10px] text-gray-500 dark:text-gray-400 truncate">{phase.role}</div>
+                      ) : (
+                        /* Standard rectangular card */
+                        <div
+                          className={`rounded-lg border-2 ${style.border} ${style.bg} p-3 transition-all
+                            ${isRunning ? 'animate-pulse ring-2 ring-blue-400/50 dark:ring-blue-500/40' : ''}`}
+                        >
+                          {/* Header row */}
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <div className={`w-7 h-7 rounded-full bg-gradient-to-br ${avatar.color} flex items-center justify-center text-sm flex-shrink-0`}>
+                              {avatar.icon}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm font-semibold text-gray-900 dark:text-white truncate">{phase.name}</div>
+                              <div className="text-[10px] text-gray-500 dark:text-gray-400 truncate">{phase.role}</div>
+                            </div>
+                            <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${style.dot}`} title={STATUS_STYLE[status]?.label || status} />
+                          </div>
+                          {/* Meta row */}
+                          <div className="flex items-center gap-2 text-[10px] text-gray-500 dark:text-gray-400 flex-wrap">
+                            <span className={`uppercase font-semibold tracking-wider ${STATUS_STYLE[status]?.text || 'text-gray-500'}`}>
+                              {STATUS_STYLE[status]?.label || status}
+                            </span>
+                            {duration && <span className="font-mono">⏱ {duration}</span>}
+                            {isDone && tokens > 0 && (
+                              <>
+                                <span className="font-mono">{tokens.toLocaleString()} tok</span>
+                                <span className="font-mono">{estimateTokenCost(run?.input_tokens || 0, run?.output_tokens || 0)}</span>
+                              </>
+                            )}
+                          </div>
                         </div>
-                        <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${style.dot}`} title={STATUS_STYLE[status]?.label || status} />
-                      </div>
-                      {/* Meta row */}
-                      <div className="flex items-center gap-2 text-[10px] text-gray-500 dark:text-gray-400 flex-wrap">
-                        <span className={`uppercase font-semibold tracking-wider ${STATUS_STYLE[status]?.text || 'text-gray-500'}`}>
-                          {STATUS_STYLE[status]?.label || status}
-                        </span>
-                        {duration && <span className="font-mono">⏱ {duration}</span>}
-                        {isDone && tokens > 0 && (
-                          <>
-                            <span className="font-mono">{tokens.toLocaleString()} tok</span>
-                            <span className="font-mono">{estimateTokenCost(run?.input_tokens || 0, run?.output_tokens || 0)}</span>
-                          </>
-                        )}
-                      </div>
+                      )}
                     </div>
                   )
+
+                  return isBranch
+                    ? <BranchTooltip key={phaseIdx} phase={phase} run={run}>{cardContent}</BranchTooltip>
+                    : <div key={phaseIdx}>{cardContent}</div>
                 })}
               </div>
             </div>
