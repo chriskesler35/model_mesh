@@ -204,7 +204,10 @@ async def get_daily_costs(
             total_cost=round(current_total, 6),
             daily_average=daily_average,
             change_pct=change_pct,
-        )
+        ),
+    )
+
+
 def _percentile(sorted_values: List[float], p: float) -> float:
     """Compute the p-th percentile from a sorted list of values (0-100 scale)."""
     if not sorted_values:
