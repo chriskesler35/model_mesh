@@ -145,7 +145,7 @@ async def lifespan(app: FastAPI):
     try:
         from app.routes.model_sync import run_model_sync
         async with AsyncSessionLocal() as session:
-            result = await run_model_sync(session)
+            result = await run_model_sync(session, deduplicate_existing=False)
             import logging as _log
             _log.getLogger(__name__).info(
                 f"Startup model sync: {len(result['added'])} new, "

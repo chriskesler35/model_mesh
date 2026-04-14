@@ -1,6 +1,6 @@
 'use client'
 
-import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+import { getApiBase, getAuthHeaders } from '@/lib/config'
 
 import { useState, useEffect, useCallback } from 'react'
 
@@ -38,16 +38,32 @@ interface Props {
 export function ModelFitnessCheck({ modelId, showGpuBar = true, compact = false }: Props) {
   const [result, setResult] = useState<FitnessResult | null>(null)
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const check = useCallback(async () => {
     if (!modelId) return
     setLoading(true)
+    setError(null)
     try {
-      const res = await fetch(`${API_BASE}/v1/hardware/check/${encodeURIComponent(modelId)}`, { headers: AUTH_HEADERS })
-        .then(r => r.json())
-      setResult(res)
-    } catch {
+      const res = await fetch(`${getApiBase()}/v1/hardware/check/${encodeURIComponent(modelId)}`, {
+        headers: getAuthHeaders(),
+      })
+      const text = await res.text()
+      let payload: any = null
+      if (text) {
+        try {
+          payload = JSON.parse(text)
+        } catch {
+          payload = { detail: text }
+        }
+      }
+      if (!res.ok) {
+        throw new Error(payload?.detail || payload?.message || `Hardware check failed (${res.status})`)
+      }
+      setResult(payload)
+    } catch (e: any) {
       setResult(null)
+      setError(e?.message || 'Could not estimate model fit right now.')
     } finally {
       setLoading(false)
     }
@@ -65,6 +81,14 @@ export function ModelFitnessCheck({ modelId, showGpuBar = true, compact = false 
       Checking hardware compatibility...
     </div>
   )
+  if (error) {
+    return (
+      <div className="mt-2 p-3 rounded-xl border border-red-200 dark:border-red-700 bg-red-50 dark:bg-red-900/20">
+        <div className="text-xs font-semibold text-red-700 dark:text-red-300">Could not estimate fit</div>
+        <div className="text-xs text-red-600 dark:text-red-200 mt-1">{error}</div>
+      </div>
+    )
+  }
   if (!result) return null
 
   const style = VERDICT_STYLES[result.verdict] || VERDICT_STYLES.unknown
@@ -149,7 +173,7 @@ export function GpuStatusWidget() {
   useEffect(() => {
     const fetch_ = async () => {
       try {
-        const res = await fetch(`${API_BASE}/v1/hardware/status`, { headers: AUTH_HEADERS }).then(r => r.json())
+        const res = await fetch(`${getApiBase()}/v1/hardware/status`, { headers: getAuthHeaders() }).then(r => r.json())
         setHw(res)
       } catch { /* silent */ }
     }

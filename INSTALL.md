@@ -193,7 +193,7 @@ cd backend
 source venv/bin/activate        # macOS/Linux
 # venv\Scripts\activate         # Windows
 
-uvicorn app.main:app --host 0.0.0.0 --port 19000 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 19001 --reload
 ```
 
 **Terminal 2 — Frontend:**
@@ -207,8 +207,8 @@ npm run dev
 | Service | URL |
 |---|---|
 | **App (frontend)** | http://localhost:3001 |
-| **API** | http://localhost:19000 |
-| **API Docs (Swagger)** | http://localhost:19000/docs |
+| **API** | http://localhost:19001 |
+| **API Docs (Swagger)** | http://localhost:19001/docs |
 
 On first launch, DevForgeAI will run a short onboarding flow to set up your profile.
 

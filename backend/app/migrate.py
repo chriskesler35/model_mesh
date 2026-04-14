@@ -51,8 +51,25 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_workbench_commands_session ON workbench_commands(session_id)",
     "CREATE INDEX IF NOT EXISTS idx_workbench_commands_pipeline ON workbench_commands(pipeline_id)",
     "CREATE INDEX IF NOT EXISTS idx_workbench_commands_status ON workbench_commands(status)",
+    # workbench_pipelines - collaborative approval support
+    "ALTER TABLE workbench_pipelines ADD COLUMN approvers JSON",
+    "ALTER TABLE workbench_pipelines ADD COLUMN approval_policy VARCHAR(20) DEFAULT 'any'",
+    "ALTER TABLE workbench_pipelines ADD COLUMN created_by VARCHAR(100)",
+    # workbench_phase_runs - retry + approval metadata
+    "ALTER TABLE workbench_phase_runs ADD COLUMN approvals JSON",
+    "ALTER TABLE workbench_phase_runs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE workbench_phase_runs ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE workbench_phase_runs ADD COLUMN input_tokens INTEGER",
+    "ALTER TABLE workbench_phase_runs ADD COLUMN output_tokens INTEGER",
     # messages - inline image URL
     "ALTER TABLE messages ADD COLUMN image_url TEXT",
+    # models - persisted live validation state
+    "ALTER TABLE models ADD COLUMN validation_status VARCHAR(20) NOT NULL DEFAULT 'unverified'",
+    "ALTER TABLE models ADD COLUMN validated_at DATETIME",
+    "ALTER TABLE models ADD COLUMN validation_source VARCHAR(50)",
+    "ALTER TABLE models ADD COLUMN validation_warning VARCHAR(500)",
+    "ALTER TABLE models ADD COLUMN validation_error VARCHAR(500)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_models_provider_model_id ON models(provider_id, model_id)",
 ]
 
 

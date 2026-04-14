@@ -80,7 +80,7 @@ npx playwright install chromium
 
 ### Both
 DevForgeAI must be running:
-- Backend: http://localhost:19000
+- Backend: auto-detected from `DEVFORGEAI_URL`, preferring http://localhost:19001 and falling back to http://localhost:19000
 - Frontend: http://localhost:3001
 - Ollama: http://localhost:11434 (recommended)
 
@@ -133,6 +133,6 @@ DevForgeAI must be running:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DEVFORGEAI_URL` | `http://localhost:19000` | Backend API URL |
+| `DEVFORGEAI_URL` | auto-detect (`http://localhost:19001` preferred) | Backend API URL |
 | `DEVFORGEAI_KEY` | `modelmesh_local_dev_key` | API bearer token |
 | `DEVFORGEAI_FRONTEND_URL` | `http://localhost:3001` | Frontend URL (E2E) |

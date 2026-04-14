@@ -3,7 +3,7 @@
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
-import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+import { getApiBase, getAuthHeaders } from '@/lib/config'
 import { renderMarkdown } from '@/lib/markdown'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
@@ -64,6 +64,19 @@ interface Pipeline {
   phase_runs?: PhaseRun[]
 }
 
+interface PipelineEvent {
+  type: string
+  payload?: Record<string, any>
+  ts?: string
+}
+
+interface ModelOption {
+  id: string
+  model_id: string
+  display_name?: string
+  provider_name?: string
+}
+
 // ─── Role → avatar mapping ────────────────────────────────────────────────────
 const ROLE_AVATARS: Record<string, { icon: string; color: string }> = {
   'Business Analyst':       { icon: '🔍', color: 'from-blue-400 to-indigo-500' },
@@ -89,6 +102,140 @@ const STATUS_STYLE: Record<string, { bg: string; text: string; ring: string; lab
   rejected:           { bg: 'bg-red-50 dark:bg-red-900/20',        text: 'text-red-700',    ring: 'ring-red-300 dark:ring-red-700',     label: 'Rejected (re-running)' },
   failed:             { bg: 'bg-red-50 dark:bg-red-900/20',        text: 'text-red-700',    ring: 'ring-red-300 dark:ring-red-700',     label: 'Failed' },
   skipped:            { bg: 'bg-gray-100 dark:bg-gray-800',        text: 'text-gray-500',   ring: 'ring-gray-300 dark:ring-gray-600',   label: 'Skipped' },
+}
+
+const EVENT_REFRESH_TYPES = new Set([
+  'pipeline_created',
+  'phase_started',
+  'phase_completed',
+  'phase_failed',
+  'awaiting_approval',
+  'phase_skipped',
+  'phase_branch',
+  'phase_retry',
+  'phase_retry_exhausted',
+  'phase_model_changed',
+  'pipeline_done',
+  'files_written',
+])
+
+function makeEventKey(evt: PipelineEvent) {
+  const payload = evt.payload || {}
+  return [
+    evt.ts || '',
+    evt.type || '',
+    payload.phase_run_id || '',
+    payload.phase_index ?? '',
+    payload.command_id || '',
+    payload.message || '',
+    payload.error || '',
+  ].join('|')
+}
+
+function formatEventTime(ts?: string) {
+  if (!ts) return 'now'
+  const date = new Date(ts)
+  if (Number.isNaN(date.getTime())) return 'now'
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })
+}
+
+function describeEvent(evt: PipelineEvent, phases?: PhaseDef[]) {
+  const payload = evt.payload || {}
+  const phaseName = payload.phase_name || (typeof payload.phase_index === 'number' ? phases?.[payload.phase_index]?.name : undefined) || 'Phase'
+
+  switch (evt.type) {
+    case 'pipeline_created':
+      return { tone: 'info', title: 'Pipeline created', detail: `${payload.phases?.length || 0} phases queued.` }
+    case 'phase_started':
+      return { tone: 'info', title: `${phaseName} started`, detail: `${payload.agent_role || 'Agent'} using ${payload.model_id || 'the selected model'}.` }
+    case 'phase_thinking':
+      return { tone: 'info', title: phaseName, detail: payload.message || 'Agent is working.' }
+    case 'phase_progress':
+      return { tone: 'info', title: `${phaseName} streaming`, detail: `${Number(payload.chars || 0).toLocaleString()} characters received.` }
+    case 'phase_completed':
+      return {
+        tone: payload.status === 'approved' ? 'success' : 'info',
+        title: `${phaseName} completed`,
+        detail: payload.status === 'approved' ? 'Auto-approved and moving to the next step.' : 'Ready for your review.',
+      }
+    case 'awaiting_approval':
+      return { tone: 'warning', title: 'Waiting for review', detail: payload.message || `${phaseName} is awaiting approval.` }
+    case 'phase_failed':
+      return {
+        tone: 'error',
+        title: `${phaseName} failed`,
+        detail: payload.error || (payload.model_id ? `The selected model (${payload.model_id}) failed before producing an artifact.` : 'This phase failed before producing an artifact.'),
+      }
+    case 'phase_retry':
+      return { tone: 'warning', title: `${phaseName} retrying`, detail: payload.message || 'Retrying with fresh guidance.' }
+    case 'phase_retry_exhausted':
+      return { tone: 'warning', title: `${phaseName} needs help`, detail: payload.message || 'Retry limit reached.' }
+    case 'pipeline_retry': {
+      const retriedNames = Array.isArray(payload.retried_phase_names) ? payload.retried_phase_names.filter(Boolean) : []
+      const title = retriedNames.length === 1 ? `${retriedNames[0]} retrying` : 'Retrying failed phases'
+      return {
+        tone: 'warning',
+        title,
+        detail: payload.message || (retriedNames.length > 0 ? retriedNames.join(', ') : 'Retrying failed phases.'),
+      }
+    }
+    case 'phase_model_changed':
+      return {
+        tone: 'warning',
+        title: `${phaseName} model changed`,
+        detail: payload.message || `Switched to ${payload.model_id || 'a new model'} and restarted the phase.`,
+      }
+    case 'phase_skipped':
+      return { tone: 'warning', title: `${phaseName} skipped`, detail: payload.reason || 'Skipped by user or branch logic.' }
+    case 'phase_branch':
+      return { tone: 'info', title: `${phaseName} routed`, detail: `Continuing down "${payload.target || 'next'}".` }
+    case 'files_written':
+      return { tone: 'success', title: 'Files written', detail: `${payload.files?.length || 0} file(s) saved to the project.` }
+    case 'command_awaiting_approval':
+      return { tone: 'warning', title: 'Command needs approval', detail: payload.command || 'A command is waiting for approval.' }
+    case 'command_running':
+      return { tone: 'info', title: 'Command running', detail: payload.command || 'Executing command.' }
+    case 'command_completed':
+      return {
+        tone: payload.exit_code === 0 ? 'success' : 'error',
+        title: payload.exit_code === 0 ? 'Command completed' : 'Command failed',
+        detail: payload.command || `Exit code ${payload.exit_code ?? 'unknown'}.`,
+      }
+    case 'warning':
+      return { tone: 'warning', title: 'Warning', detail: payload.message || 'Something needs attention.' }
+    case 'info':
+      return { tone: 'info', title: 'Update', detail: payload.message || 'Pipeline update.' }
+    case 'user_message':
+      return {
+        tone: 'info',
+        title: 'Guidance sent',
+        detail: payload.applies_to ? `${payload.message} (${payload.applies_to})` : payload.message || 'User guidance added.',
+      }
+    case 'pipeline_done':
+      return {
+        tone: payload.status === 'completed' ? 'success' : 'error',
+        title: payload.status === 'completed' ? 'Pipeline finished' : 'Pipeline stopped',
+        detail: payload.message || 'Pipeline run ended.',
+      }
+    default:
+      return { tone: 'info', title: evt.type.replace(/_/g, ' '), detail: payload.message || payload.error || null }
+  }
+}
+
+async function readApiPayload(res: Response) {
+  const text = await res.text()
+  if (!text) return null
+  try {
+    return JSON.parse(text)
+  } catch {
+    return { detail: text }
+  }
+}
+
+function getApiErrorMessage(payload: any, status: number) {
+  if (!payload) return `Request failed (${status})`
+  if (typeof payload === 'string') return payload
+  return payload.detail || payload.message || payload.error || `Request failed (${status})`
 }
 
 // ─── Artifact viewer ──────────────────────────────────────────────────────────
@@ -161,13 +308,14 @@ function ArtifactViewer({ artifact }: { artifact: PhaseRun['output_artifact'] })
 
 // ─── Phase Card ───────────────────────────────────────────────────────────────
 function PhaseCard({
-  phase, run, isCurrent, onOpenApproval, onViewArtifact,
+  phase, run, isCurrent, onOpenApproval, onViewArtifact, onChangeModel,
 }: {
   phase: PhaseDef
   run: PhaseRun | null
   isCurrent: boolean
   onOpenApproval: (run: PhaseRun) => void
   onViewArtifact: (run: PhaseRun) => void
+  onChangeModel: (run: PhaseRun) => void
 }) {
   const avatar = ROLE_AVATARS[phase.role] || { icon: '🤖', color: 'from-gray-400 to-gray-600' }
   const status = run?.status || 'pending'
@@ -175,6 +323,8 @@ function PhaseCard({
   const isRunning = status === 'running'
   const awaitingApproval = status === 'awaiting_approval'
   const tokens = (run?.input_tokens || 0) + (run?.output_tokens || 0)
+  const assignedModel = run?.model_id || phase.model || phase.default_model || '—'
+  const canChangeModel = !!run && (status === 'failed' || status === 'awaiting_approval' || status === 'rejected')
 
   return (
     <div className={`relative rounded-xl border-2 bg-white dark:bg-gray-800 overflow-hidden transition-all
@@ -197,7 +347,7 @@ function PhaseCard({
           </div>
         </div>
         <div className="mt-2 flex items-center justify-between text-[11px] text-gray-500 dark:text-gray-400">
-          <span className="font-mono truncate">{phase.model || phase.default_model || '—'}</span>
+          <span className="font-mono truncate">{assignedModel}</span>
           {tokens > 0 && <span>{tokens.toLocaleString()} tok</span>}
         </div>
       </div>
@@ -219,7 +369,14 @@ function PhaseCard({
         )}
 
         {status === 'failed' && (
-          <div className="text-xs text-red-600 dark:text-red-400">Phase failed. See backend logs.</div>
+          <div className="space-y-2">
+            <div className="text-xs font-semibold text-red-600 dark:text-red-400">Phase failed</div>
+            {run?.raw_response && (
+              <div className="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 text-xs text-red-700 dark:text-red-200 whitespace-pre-wrap break-words">
+                {run.raw_response}
+              </div>
+            )}
+          </div>
         )}
 
         {status === 'skipped' && (
@@ -247,6 +404,15 @@ function PhaseCard({
             <span className="font-semibold">Rejection feedback:</span> {run.user_feedback}
           </div>
         )}
+
+        {canChangeModel && (
+          <button
+            onClick={() => onChangeModel(run)}
+            className="mt-3 w-full px-3 py-2 text-xs font-semibold rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700/60 transition-colors"
+          >
+            Change model for this phase
+          </button>
+        )}
       </div>
 
       {/* Action bar */}
@@ -258,6 +424,120 @@ function PhaseCard({
           </button>
         </div>
       )}
+    </div>
+  )
+}
+
+function ChangeModelModal({
+  run,
+  phase,
+  models,
+  onClose,
+  onSubmit,
+}: {
+  run: PhaseRun
+  phase: PhaseDef | undefined
+  models: ModelOption[]
+  onClose: () => void
+  onSubmit: (phaseIndex: number, modelId: string) => Promise<void>
+}) {
+  const currentModel = run.model_id || phase?.model || phase?.default_model || ''
+  const [selectedModel, setSelectedModel] = useState(currentModel)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleSubmit = async () => {
+    if (!selectedModel) {
+      setError('Choose a validated model before continuing.')
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      await onSubmit(run.phase_index, selectedModel)
+      onClose()
+    } catch (e: any) {
+      setError(e.message || 'Failed to change model')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="w-full max-w-xl bg-white dark:bg-gray-900 rounded-2xl shadow-2xl overflow-hidden">
+        <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-base font-semibold text-gray-900 dark:text-white">
+              Change model: {run.phase_name}
+            </h2>
+            <p className="text-xs text-gray-500 mt-1">
+              Pick a validated model and re-run this phase from the same step.
+            </p>
+          </div>
+          <button onClick={onClose} disabled={busy} className="text-gray-400 hover:text-gray-600 disabled:opacity-30">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="px-6 py-4 space-y-4">
+          <div className="rounded-xl border border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-900/20 px-3 py-2">
+            <div className="text-xs font-semibold uppercase tracking-wider text-amber-800 dark:text-amber-200">Current phase state</div>
+            <div className="text-sm text-amber-900 dark:text-amber-100 mt-1">
+              {run.status.replace(/_/g, ' ')} with <span className="font-mono">{currentModel || 'no assigned model'}</span>
+            </div>
+            {run.raw_response && (
+              <div className="mt-2 text-xs text-amber-900/90 dark:text-amber-100/90 whitespace-pre-wrap break-words">
+                {run.raw_response}
+              </div>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-gray-500 mb-1.5">
+              New model
+            </label>
+            <select
+              value={selectedModel}
+              onChange={e => setSelectedModel(e.target.value)}
+              className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+            >
+              <option value="">Choose a validated model</option>
+              {models.map(model => (
+                <option key={model.id} value={model.model_id}>
+                  {model.display_name || model.model_id}{model.provider_name ? ` (${model.provider_name})` : ''}
+                </option>
+              ))}
+            </select>
+            <div className="mt-1 text-[11px] text-gray-500">
+              Only active, validated, confirmed-working models are shown here.
+            </div>
+          </div>
+
+          {error && (
+            <div className="text-xs text-red-600 bg-red-50 dark:bg-red-900/20 px-3 py-2 rounded-lg">{error}</div>
+          )}
+        </div>
+
+        <div className="px-6 py-4 border-t border-gray-200 dark:border-gray-800 flex gap-3 justify-end">
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="px-4 py-2 text-sm font-medium rounded-lg text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-40"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={busy || !selectedModel}
+            className="px-4 py-2 text-sm font-medium rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-40"
+          >
+            {busy ? 'Switching…' : 'Switch model & re-run'}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -346,6 +626,8 @@ function ApprovalModal({
 
 // ─── Save as Template Dialog ──────────────────────────────────────────────────
 function SaveAsTemplateDialog({ pipelineId, onClose }: { pipelineId: string; onClose: () => void }) {
+  const apiBase = getApiBase()
+  const authHeaders = getAuthHeaders()
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [includeSystemPrompts, setIncludeSystemPrompts] = useState(false)
@@ -358,9 +640,9 @@ function SaveAsTemplateDialog({ pipelineId, onClose }: { pipelineId: string; onC
     setSaving(true)
     setError(null)
     try {
-      const res = await fetch(`${API_BASE}/v1/workbench/pipelines/${pipelineId}/save-as-template`, {
+      const res = await fetch(`${apiBase}/v1/workbench/pipelines/${pipelineId}/save-as-template`, {
         method: 'POST',
-        headers: AUTH_HEADERS,
+        headers: authHeaders,
         body: JSON.stringify({ name: name.trim(), description: description.trim() || null, include_system_prompts: includeSystemPrompts }),
       })
       if (!res.ok) {
@@ -734,13 +1016,21 @@ export default function PipelinePage() {
   const params = useParams()
   const router = useRouter()
   const pipelineId = Array.isArray(params?.id) ? params.id[0] : params?.id as string
+  const apiBase = getApiBase()
+  const authHeaders = getAuthHeaders()
 
   const [pipeline, setPipeline] = useState<Pipeline | null>(null)
   const [phaseRuns, setPhaseRuns] = useState<PhaseRun[]>([])
+  const [models, setModels] = useState<ModelOption[]>([])
+  const [events, setEvents] = useState<PipelineEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [approvalRun, setApprovalRun] = useState<PhaseRun | null>(null)
   const [viewArtifactRun, setViewArtifactRun] = useState<PhaseRun | null>(null)
+  const [changeModelRun, setChangeModelRun] = useState<PhaseRun | null>(null)
   const [showSaveTemplate, setShowSaveTemplate] = useState(false)
+  const [guidance, setGuidance] = useState('')
+  const [sendingGuidance, setSendingGuidance] = useState(false)
+  const [connectionState, setConnectionState] = useState<'connecting' | 'live' | 'reconnecting'>('connecting')
 
   // Escape closes the read-only artifact modal
   useEffect(() => {
@@ -749,8 +1039,27 @@ export default function PipelinePage() {
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
   }, [viewArtifactRun])
-  const [error, setError] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
   const esRef = useRef<EventSource | null>(null)
+  const seenEventKeysRef = useRef<Set<string>>(new Set())
+
+  const appendEvent = useCallback((evt: PipelineEvent) => {
+    if (!evt || !evt.type || evt.type === 'ping' || evt.type === 'init') return
+    const key = makeEventKey(evt)
+    if (seenEventKeysRef.current.has(key)) return
+    seenEventKeysRef.current.add(key)
+    setEvents(curr => {
+      if (evt.type === 'phase_progress' && curr.length > 0) {
+        const last = curr[curr.length - 1]
+        if (last.type === 'phase_progress' && last.payload?.phase_index === evt.payload?.phase_index) {
+          return [...curr.slice(0, -1), evt]
+        }
+      }
+      const next = [...curr, evt]
+      return next.slice(-160)
+    })
+  }, [])
 
   // Derive: most recent run per phase_index (handles re-runs after rejection)
   const runsByIndex: Record<number, PhaseRun> = {}
@@ -763,17 +1072,32 @@ export default function PipelinePage() {
 
   const refetch = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/v1/workbench/pipelines/${pipelineId}`, { headers: AUTH_HEADERS })
+      const res = await fetch(`${apiBase}/v1/workbench/pipelines/${pipelineId}`, { headers: authHeaders })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       setPipeline(data)
       setPhaseRuns(data.phase_runs || [])
       setLoading(false)
+      setLoadError(null)
     } catch (e: any) {
-      setError(e.message || 'Failed to load pipeline')
+      setLoadError(e.message || 'Failed to load pipeline')
       setLoading(false)
     }
-  }, [pipelineId])
+  }, [apiBase, authHeaders, pipelineId])
+
+  const fetchModels = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `${apiBase}/v1/models?active_only=true&usable_only=true&validated_only=true`,
+        { headers: authHeaders },
+      )
+      const payload = await readApiPayload(res)
+      if (!res.ok) throw new Error(getApiErrorMessage(payload, res.status))
+      setModels(Array.isArray(payload?.data) ? payload.data : [])
+    } catch (e: any) {
+      setActionError(e.message || 'Failed to load available models')
+    }
+  }, [apiBase, authHeaders])
 
   // Initial fetch
   useEffect(() => {
@@ -781,11 +1105,18 @@ export default function PipelinePage() {
     refetch()
   }, [pipelineId, refetch])
 
+  useEffect(() => {
+    fetchModels()
+  }, [fetchModels])
+
   // SSE subscription
   useEffect(() => {
     if (!pipelineId) return
-    const es = new EventSource(`${API_BASE}/v1/workbench/pipelines/${pipelineId}/stream`)
+    setConnectionState('connecting')
+    const es = new EventSource(`${apiBase}/v1/workbench/pipelines/${pipelineId}/stream`)
     esRef.current = es
+
+    es.onopen = () => setConnectionState('live')
 
     es.onmessage = (e) => {
       try {
@@ -794,54 +1125,92 @@ export default function PipelinePage() {
         if (evt.type === 'init') {
           setPipeline(evt.payload)
           setPhaseRuns(evt.payload.phase_runs || [])
+          setLoading(false)
           return
         }
-        // Any other event → refetch state to get the latest
-        refetch()
+        appendEvent(evt)
+        if (EVENT_REFRESH_TYPES.has(evt.type)) {
+          refetch()
+        }
       } catch {}
     }
-    es.onerror = () => { /* browser retries automatically */ }
+    es.onerror = () => { setConnectionState('reconnecting') }
 
     return () => { es.close(); esRef.current = null }
-  }, [pipelineId, refetch])
+  }, [apiBase, appendEvent, pipelineId, refetch])
 
   const approve = async (feedback?: string, phaseIndex?: number) => {
     const qs = phaseIndex !== undefined ? `?phase_index=${phaseIndex}` : ''
-    await fetch(`${API_BASE}/v1/workbench/pipelines/${pipelineId}/approve${qs}`, {
-      method: 'POST', headers: AUTH_HEADERS,
+    await fetch(`${apiBase}/v1/workbench/pipelines/${pipelineId}/approve${qs}`, {
+      method: 'POST', headers: authHeaders,
       body: JSON.stringify({ feedback: feedback || null }),
     })
     refetch()
   }
   const reject = async (feedback: string, phaseIndex?: number) => {
     const qs = phaseIndex !== undefined ? `?phase_index=${phaseIndex}` : ''
-    await fetch(`${API_BASE}/v1/workbench/pipelines/${pipelineId}/reject${qs}`, {
-      method: 'POST', headers: AUTH_HEADERS,
+    await fetch(`${apiBase}/v1/workbench/pipelines/${pipelineId}/reject${qs}`, {
+      method: 'POST', headers: authHeaders,
       body: JSON.stringify({ feedback }),
     })
     refetch()
   }
   const skip = async (reason?: string, phaseIndex?: number) => {
     const qs = phaseIndex !== undefined ? `?phase_index=${phaseIndex}` : ''
-    await fetch(`${API_BASE}/v1/workbench/pipelines/${pipelineId}/skip${qs}`, {
-      method: 'POST', headers: AUTH_HEADERS,
+    await fetch(`${apiBase}/v1/workbench/pipelines/${pipelineId}/skip${qs}`, {
+      method: 'POST', headers: authHeaders,
       body: JSON.stringify({ reason: reason || null }),
     })
     refetch()
   }
   const cancelPipeline = async () => {
     if (!confirm('Cancel this pipeline? Any running phase will be abandoned.')) return
-    await fetch(`${API_BASE}/v1/workbench/pipelines/${pipelineId}/cancel`, {
-      method: 'POST', headers: AUTH_HEADERS,
+    await fetch(`${apiBase}/v1/workbench/pipelines/${pipelineId}/cancel`, {
+      method: 'POST', headers: authHeaders,
     })
     refetch()
   }
   const retryPipeline = async () => {
-    await fetch(`${API_BASE}/v1/workbench/pipelines/${pipelineId}/retry`, {
-      method: 'POST', headers: AUTH_HEADERS,
+    await fetch(`${apiBase}/v1/workbench/pipelines/${pipelineId}/retry`, {
+      method: 'POST', headers: authHeaders,
     })
     refetch()
   }
+  const changePhaseModel = useCallback(async (phaseIndex: number, modelId: string) => {
+    setActionError(null)
+    const res = await fetch(`${apiBase}/v1/workbench/pipelines/${pipelineId}/phase-model`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ phase_index: phaseIndex, model_id: modelId }),
+    })
+    const payload = await readApiPayload(res)
+    if (!res.ok) {
+      throw new Error(getApiErrorMessage(payload, res.status))
+    }
+    await refetch()
+  }, [apiBase, authHeaders, pipelineId, refetch])
+  const sendGuidance = useCallback(async () => {
+    const message = guidance.trim()
+    if (!message) return
+    setSendingGuidance(true)
+    setActionError(null)
+    try {
+      const res = await fetch(`${apiBase}/v1/workbench/pipelines/${pipelineId}/message`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ message }),
+      })
+      const payload = await readApiPayload(res)
+      if (!res.ok) {
+        throw new Error(getApiErrorMessage(payload, res.status))
+      }
+      setGuidance('')
+    } catch (e: any) {
+      setActionError(e.message || 'Failed to send guidance')
+    } finally {
+      setSendingGuidance(false)
+    }
+  }, [apiBase, authHeaders, guidance, pipelineId])
 
   if (loading) {
     return (
@@ -853,12 +1222,12 @@ export default function PipelinePage() {
     )
   }
 
-  if (error || !pipeline) {
+  if (!pipeline) {
     return (
       <div className="text-center py-20">
         <div className="text-5xl mb-4">⚠️</div>
         <h3 className="text-lg font-semibold mb-2">Could not load pipeline</h3>
-        <p className="text-sm text-gray-500 mb-4">{error || 'Pipeline not found'}</p>
+        <p className="text-sm text-gray-500 mb-4">{loadError || 'Pipeline not found'}</p>
         <button onClick={() => router.push('/workbench')} className="text-sm text-indigo-600 hover:underline">
           ← Back to workbench
         </button>
@@ -869,6 +1238,12 @@ export default function PipelinePage() {
   const statusBadge = STATUS_STYLE[pipeline.status] || STATUS_STYLE.pending
   const totalTokens = phaseRuns.reduce((sum, r) => sum + (r.input_tokens || 0) + (r.output_tokens || 0), 0)
   const currentPhaseRun = runsByIndex[pipeline.current_phase_index]
+  const connectionLabel = connectionState === 'live' ? 'Live' : connectionState === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'
+  const connectionClasses = connectionState === 'live'
+    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+    : connectionState === 'reconnecting'
+      ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+      : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
 
   // Parallel approval: all phases currently awaiting approval
   const awaitingRuns = Object.values(runsByIndex).filter(r => r.status === 'awaiting_approval')
@@ -877,6 +1252,12 @@ export default function PipelinePage() {
     r.status === 'approved' || r.status === 'skipped'
   ).length
   const totalPhases = pipeline.phases.length
+  const latestEvent = [...events].reverse().find(evt => evt.type !== 'phase_progress') || null
+  const latestAlert = [...events].reverse().find(evt =>
+    evt.type === 'phase_failed' || evt.type === 'warning' || evt.type === 'awaiting_approval' || evt.type === 'pipeline_done'
+  ) || null
+  const latestEventSummary = latestEvent ? describeEvent(latestEvent, pipeline.phases) : null
+  const latestAlertSummary = latestAlert ? describeEvent(latestAlert, pipeline.phases) : null
 
   return (
     <div className="space-y-6">
@@ -893,6 +1274,9 @@ export default function PipelinePage() {
             <span className={`text-xs uppercase font-semibold px-2 py-0.5 rounded ${statusBadge.bg} ${statusBadge.text}`}>
               {statusBadge.label}
             </span>
+            <span className={`text-xs font-semibold px-2 py-0.5 rounded ${connectionClasses}`}>
+              {connectionLabel}
+            </span>
             {pipeline.auto_approve && (
               <span className="text-xs font-semibold px-2 py-0.5 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300">
                 AUTO
@@ -903,6 +1287,15 @@ export default function PipelinePage() {
           <div className="text-xs text-gray-500 mt-1">
             {pipeline.phases.length} phases · {totalTokens.toLocaleString()} tokens used
           </div>
+          {latestEventSummary && (
+            <div className="mt-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/60 px-3 py-2">
+              <div className="text-[11px] uppercase tracking-wider font-semibold text-gray-500 dark:text-gray-400">Latest update</div>
+              <div className="text-sm font-medium text-gray-900 dark:text-white mt-1">{latestEventSummary.title}</div>
+              {latestEventSummary.detail && (
+                <div className="text-xs text-gray-600 dark:text-gray-300 mt-0.5">{latestEventSummary.detail}</div>
+              )}
+            </div>
+          )}
         </div>
         <div className="flex gap-2 flex-shrink-0">
           {pipeline.status === 'completed' && (
@@ -930,6 +1323,35 @@ export default function PipelinePage() {
         </div>
       </div>
 
+      <div className="rounded-2xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-900/20 px-4 py-3">
+        <div className="text-sm font-semibold text-indigo-900 dark:text-indigo-200">How to use this pipeline view</div>
+        <div className="mt-1 text-sm text-indigo-800 dark:text-indigo-100">
+          This is now a supervisor workspace rather than a plain chat thread. Watch the live activity feed, send guidance that carries into the next phase or retry, and review artifacts before approving the handoff.
+        </div>
+      </div>
+
+      {loadError && (
+        <div className="rounded-2xl border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-900/20 px-4 py-3">
+          <div className="text-sm font-semibold text-amber-900 dark:text-amber-200">Refresh warning</div>
+          <div className="text-sm text-amber-800 dark:text-amber-100 mt-1">{loadError}</div>
+        </div>
+      )}
+
+      {latestAlertSummary && (
+        <div className={`rounded-2xl border px-4 py-3 ${
+          latestAlert?.type === 'phase_failed' || (latestAlert?.type === 'pipeline_done' && pipeline.status !== 'completed')
+            ? 'border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-900/20'
+            : latestAlert?.type === 'awaiting_approval'
+              ? 'border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-900/20'
+              : 'border-yellow-300 bg-yellow-50 dark:border-yellow-700 dark:bg-yellow-900/20'
+        }`}>
+          <div className="text-sm font-semibold text-gray-900 dark:text-white">{latestAlertSummary.title}</div>
+          {latestAlertSummary.detail && (
+            <div className="text-sm text-gray-700 dark:text-gray-300 mt-1">{latestAlertSummary.detail}</div>
+          )}
+        </div>
+      )}
+
       {/* Progress indicator */}
       <div className="space-y-1.5">
         <div className="flex items-center justify-between text-xs text-gray-600 dark:text-gray-400">
@@ -944,62 +1366,149 @@ export default function PipelinePage() {
         </div>
       </div>
 
-      {/* Awaiting-approval banner — shows ALL phases needing review */}
-      {awaitingRuns.length > 0 && (
-        <div className="rounded-xl border-2 border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-700 p-4 space-y-3">
-          <div className="text-sm font-semibold text-amber-900 dark:text-amber-200">
-            {awaitingRuns.length === 1
-              ? '1 phase awaiting your review'
-              : `${awaitingRuns.length} phases awaiting your review`}
-          </div>
-          <div className="space-y-2">
-            {awaitingRuns.map(run => (
-              <div key={run.id} className="flex items-center justify-between gap-3 bg-white dark:bg-gray-800 rounded-lg px-3 py-2 border border-amber-200 dark:border-amber-800">
-                <div className="flex-1 min-w-0">
-                  <span className="text-sm font-medium text-gray-900 dark:text-white">{run.phase_name}</span>
-                  <span className="text-xs text-gray-500 ml-2">({run.agent_role})</span>
-                </div>
-                <div className="flex gap-2 flex-shrink-0">
-                  <button
-                    onClick={() => { skip(undefined, run.phase_index) }}
-                    className="px-2.5 py-1 text-xs font-medium rounded-md text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 border border-gray-300 dark:border-gray-600">
-                    ⏭ Skip
-                  </button>
-                  <button
-                    onClick={() => setApprovalRun(run)}
-                    className="px-2.5 py-1 text-xs font-medium rounded-md bg-amber-500 hover:bg-amber-600 text-white">
-                    👁 Review
-                  </button>
-                  <button
-                    onClick={() => { approve(undefined, run.phase_index) }}
-                    className="px-2.5 py-1 text-xs font-medium rounded-md bg-green-600 hover:bg-green-700 text-white">
-                    ✓ Approve
-                  </button>
-                </div>
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_22rem]">
+        <div className="space-y-6">
+          {/* Awaiting-approval banner — shows ALL phases needing review */}
+          {awaitingRuns.length > 0 && (
+            <div className="rounded-xl border-2 border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-700 p-4 space-y-3">
+              <div className="text-sm font-semibold text-amber-900 dark:text-amber-200">
+                {awaitingRuns.length === 1
+                  ? '1 phase awaiting your review'
+                  : `${awaitingRuns.length} phases awaiting your review`}
               </div>
-            ))}
+              <div className="space-y-2">
+                {awaitingRuns.map(run => (
+                  <div key={run.id} className="flex items-center justify-between gap-3 bg-white dark:bg-gray-800 rounded-lg px-3 py-2 border border-amber-200 dark:border-amber-800">
+                    <div className="flex-1 min-w-0">
+                      <span className="text-sm font-medium text-gray-900 dark:text-white">{run.phase_name}</span>
+                      <span className="text-xs text-gray-500 ml-2">({run.agent_role})</span>
+                    </div>
+                    <div className="flex gap-2 flex-shrink-0">
+                      <button
+                        onClick={() => { skip(undefined, run.phase_index) }}
+                        className="px-2.5 py-1 text-xs font-medium rounded-md text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 border border-gray-300 dark:border-gray-600">
+                        ⏭ Skip
+                      </button>
+                      <button
+                        onClick={() => setApprovalRun(run)}
+                        className="px-2.5 py-1 text-xs font-medium rounded-md bg-amber-500 hover:bg-amber-600 text-white">
+                        👁 Review
+                      </button>
+                      <button
+                        onClick={() => { approve(undefined, run.phase_index) }}
+                        className="px-2.5 py-1 text-xs font-medium rounded-md bg-green-600 hover:bg-green-700 text-white">
+                        ✓ Approve
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Swim-lane timeline (parallel phases side-by-side) */}
+          <SwimLaneView phases={pipeline.phases} runsByIndex={runsByIndex} />
+
+          {/* Detailed phase cards */}
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3">Phase Details</div>
+            <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${Math.min(pipeline.phases.length, 3)}, minmax(240px, 1fr))` }}>
+              {pipeline.phases.map((phase, idx) => (
+                <PhaseCard
+                  key={idx}
+                  phase={phase}
+                  run={runsByIndex[idx] || null}
+                  isCurrent={idx === pipeline.current_phase_index && pipeline.status !== 'completed'}
+                  onOpenApproval={setApprovalRun}
+                  onViewArtifact={setViewArtifactRun}
+                  onChangeModel={setChangeModelRun}
+                />
+              ))}
+            </div>
           </div>
         </div>
-      )}
 
-      {/* Swim-lane timeline (parallel phases side-by-side) */}
-      <SwimLaneView phases={pipeline.phases} runsByIndex={runsByIndex} />
-
-      {/* Detailed phase cards */}
-      <div>
-        <div className="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3">Phase Details</div>
-        <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${Math.min(pipeline.phases.length, 3)}, minmax(240px, 1fr))` }}>
-          {pipeline.phases.map((phase, idx) => (
-            <PhaseCard
-              key={idx}
-              phase={phase}
-              run={runsByIndex[idx] || null}
-              isCurrent={idx === pipeline.current_phase_index && pipeline.status !== 'completed'}
-              onOpenApproval={setApprovalRun}
-              onViewArtifact={setViewArtifactRun}
+        <aside className="space-y-4 xl:sticky xl:top-4 self-start">
+          <div className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 p-4 space-y-3">
+            <div>
+              <div className="text-sm font-semibold text-gray-900 dark:text-white">Send guidance</div>
+              <div className="text-xs text-gray-500 mt-1">Guidance is recorded immediately and carried into the next phase or retry.</div>
+            </div>
+            <textarea
+              value={guidance}
+              onChange={e => setGuidance(e.target.value)}
+              onKeyDown={e => {
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                  e.preventDefault()
+                  sendGuidance()
+                }
+              }}
+              rows={4}
+              placeholder="Tell the pipeline what to prioritize, avoid, or verify next…"
+              className="w-full rounded-xl border border-gray-300 dark:border-gray-700 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-400"
             />
-          ))}
-        </div>
+            <button
+              onClick={sendGuidance}
+              disabled={!guidance.trim() || sendingGuidance}
+              className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium px-4 py-2 disabled:opacity-50"
+            >
+              {sendingGuidance ? 'Sending…' : 'Send guidance'}
+            </button>
+            {actionError && (
+              <div className="text-[11px] text-red-600 dark:text-red-300">{actionError}</div>
+            )}
+            {currentPhaseRun?.status === 'running' && (
+              <div className="text-[11px] text-amber-600 dark:text-amber-300">
+                The current phase keeps running. Your note will be applied when the pipeline reaches its next handoff or retry.
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 overflow-hidden">
+            <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-800">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-gray-900 dark:text-white">Live activity</div>
+                  <div className="text-xs text-gray-500 mt-1">Continuous status, failures, and handoffs.</div>
+                </div>
+                <span className={`text-[11px] font-semibold px-2 py-1 rounded-full ${connectionClasses}`}>
+                  {connectionLabel}
+                </span>
+              </div>
+            </div>
+            <div className="max-h-[34rem] overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800">
+              {events.length === 0 ? (
+                <div className="px-4 py-6 text-sm text-gray-500 dark:text-gray-400">
+                  Waiting for live pipeline events. As phases start, stream, fail, or request approval, they will appear here.
+                </div>
+              ) : (
+                [...events].reverse().map((evt, idx) => {
+                  const summary = describeEvent(evt, pipeline.phases)
+                  const toneClasses = summary.tone === 'error'
+                    ? 'border-red-200 bg-red-50 dark:border-red-900/40 dark:bg-red-900/10'
+                    : summary.tone === 'warning'
+                      ? 'border-amber-200 bg-amber-50 dark:border-amber-900/40 dark:bg-amber-900/10'
+                      : summary.tone === 'success'
+                        ? 'border-emerald-200 bg-emerald-50 dark:border-emerald-900/40 dark:bg-emerald-900/10'
+                        : 'border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900'
+                  return (
+                    <div key={`${makeEventKey(evt)}-${idx}`} className={`px-4 py-3 border-l-2 ${toneClasses}`}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-gray-900 dark:text-white">{summary.title}</div>
+                          {summary.detail && (
+                            <div className="text-xs text-gray-600 dark:text-gray-300 mt-1 whitespace-pre-wrap break-words">{summary.detail}</div>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-gray-400 whitespace-nowrap">{formatEventTime(evt.ts)}</div>
+                      </div>
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          </div>
+        </aside>
       </div>
 
       {/* Approval modal */}
@@ -1011,6 +1520,16 @@ export default function PipelinePage() {
           onApprove={approve}
           onReject={reject}
           onSkip={skip}
+        />
+      )}
+
+      {changeModelRun && (
+        <ChangeModelModal
+          run={changeModelRun}
+          phase={pipeline.phases[changeModelRun.phase_index]}
+          models={models}
+          onClose={() => setChangeModelRun(null)}
+          onSubmit={changePhaseModel}
         />
       )}
 

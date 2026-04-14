@@ -215,13 +215,14 @@ def severity_from_category(category):
 def generate_report(pytest_results, pw_results, pytest_log_path, e2e_log_path, timestamp):
     """Generate the full markdown report."""
     lines = []
+    backend_url = os.environ.get("DEVFORGEAI_URL") or os.environ.get("DEVFORGEAI_API_URL") or "http://localhost:19001"
 
     # Header
     lines.append(f"# DevForgeAI Test Report")
     lines.append(f"")
     lines.append(f"**Generated:** {timestamp.replace('_', ' ')}")
     lines.append(f"**Machine:** {os.environ.get('COMPUTERNAME', 'unknown')}")
-    lines.append(f"**Backend:** http://localhost:19000")
+    lines.append(f"**Backend:** {backend_url}")
     lines.append(f"**Frontend:** http://localhost:3001")
     lines.append(f"")
 

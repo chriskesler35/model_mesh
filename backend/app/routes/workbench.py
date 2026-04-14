@@ -106,6 +106,233 @@ def _provider_has_credentials(provider_name: str) -> bool:
     return True
 
 
+def _model_is_runtime_ready(model_orm, provider_orm) -> bool:
+    if not model_orm or not provider_orm:
+        return False
+    if not model_orm.is_active:
+        return False
+    if (model_orm.validation_status or "unverified") != "validated":
+        return False
+    if not _provider_has_credentials(provider_orm.name):
+        return False
+    return True
+
+
+def _enabled_capabilities(capabilities: Any) -> set[str]:
+    if not isinstance(capabilities, dict):
+        return set()
+    runtime_relevant = {"chat", "code", "streaming"}
+    return {
+        str(key)
+        for key, enabled in capabilities.items()
+        if enabled and str(key) in runtime_relevant
+    }
+
+
+def _should_failover_error(exc: Exception) -> bool:
+    low = str(exc).lower()
+    markers = (
+        "notfounderror",
+        "model_not_found",
+        "does not exist",
+        "authenticationerror",
+        "invalid_api_key",
+        "insufficient_quota",
+        "exceeded your current quota",
+        "ratelimiterror",
+        "apiconnectionerror",
+        "service unavailable",
+        "temporarily unavailable",
+        "timeout",
+        "timed out",
+        "connection refused",
+        "connection reset",
+        "bad gateway",
+        "gateway timeout",
+        "overloaded",
+        "503",
+        "502",
+        "429",
+        "401",
+        "404",
+    )
+    return any(marker in low for marker in markers)
+
+
+def _humanize_model_error(err_str: str, model_id: str) -> str:
+    friendly = err_str
+    low = err_str.lower()
+    if "insufficient_quota" in low or "exceeded your current quota" in low:
+        friendly = (
+            "OpenAI quota exceeded — your account is out of credits. "
+            "Top up at https://platform.openai.com/account/billing, or pick a different provider."
+        )
+    elif "authenticationerror" in low or "x-api-key" in low or "401" in err_str or "invalid_api_key" in low:
+        friendly = f"Provider rejected the API key for model '{model_id}'. Check the key in your .env file."
+    elif "ratelimiterror" in low or "429" in err_str:
+        friendly = f"Rate-limited by provider for model '{model_id}'. Wait and retry, or switch models."
+    elif "notfounderror" in low or "model_not_found" in low or "does not exist" in low or ("404" in err_str and "openai" in low):
+        friendly = (
+            f"Model '{model_id}' doesn't exist on the provider's API. "
+            "It may have been renamed or removed. Pick a different model."
+        )
+    elif "timeout" in low or "timed out" in low:
+        friendly = f"Provider call for model '{model_id}' timed out."
+    elif "apiconnectionerror" in low or "connection refused" in low or "connection reset" in low:
+        friendly = f"Could not connect to the provider for model '{model_id}'."
+    elif "service unavailable" in low or "temporarily unavailable" in low or "503" in low or "502" in low:
+        friendly = f"Provider for model '{model_id}' is temporarily unavailable."
+    return friendly
+
+
+async def _fetch_model_row(db: AsyncSession, model_ref: str, *, include_fuzzy: bool = True):
+    from app.models.model import Model as ModelORM
+    from app.models.provider import Provider as ProviderORM
+
+    result = await db.execute(
+        select(ModelORM, ProviderORM)
+        .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
+        .where(ModelORM.model_id == model_ref)
+        .limit(1)
+    )
+    row = result.first()
+    if row:
+        return row
+
+    try:
+        model_uuid = uuid.UUID(str(model_ref))
+    except (TypeError, ValueError):
+        model_uuid = None
+
+    if model_uuid:
+        result = await db.execute(
+            select(ModelORM, ProviderORM)
+            .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
+            .where(ModelORM.id == model_uuid)
+            .limit(1)
+        )
+        row = result.first()
+        if row:
+            return row
+
+    if include_fuzzy and model_ref:
+        last_part = str(model_ref).split("/")[-1]
+        result = await db.execute(
+            select(ModelORM, ProviderORM)
+            .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
+            .where(ModelORM.model_id.contains(last_part))
+            .where(ModelORM.is_active == True)
+            .order_by(desc(ModelORM.validated_at), ModelORM.display_name)
+        )
+        return result.first()
+
+    return None
+
+
+async def _collect_runtime_fallbacks(
+    model_ref: str,
+    explicit_fallback_refs: Optional[list[str]] = None,
+    *,
+    limit: int = 3,
+):
+    from app.models.model import Model as ModelORM
+    from app.models.provider import Provider as ProviderORM
+
+    candidates = []
+    seen: set[str] = set()
+
+    async with AsyncSessionLocal() as db:
+        requested_row = await _fetch_model_row(db, model_ref, include_fuzzy=True)
+        requested_model = requested_row[0] if requested_row else None
+        requested_provider = requested_row[1] if requested_row else None
+        required_caps = _enabled_capabilities(getattr(requested_model, "capabilities", None))
+        requested_context = getattr(requested_model, "context_window", None)
+
+        if requested_model:
+            seen.add(str(requested_model.id))
+
+        for fallback_ref in explicit_fallback_refs or []:
+            row = await _fetch_model_row(db, fallback_ref, include_fuzzy=False)
+            if not row:
+                continue
+            model_orm, provider_orm = row
+            if str(model_orm.id) in seen or not _model_is_runtime_ready(model_orm, provider_orm):
+                continue
+            seen.add(str(model_orm.id))
+            candidates.append((model_orm, provider_orm, "configured fallback"))
+            if len(candidates) >= limit:
+                return candidates
+
+        result = await db.execute(
+            select(ModelORM, ProviderORM)
+            .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
+            .where(ModelORM.is_active == True)
+            .where(ModelORM.validation_status == "validated")
+            .order_by(desc(ModelORM.validated_at), ModelORM.display_name)
+        )
+
+        scored = []
+        for model_orm, provider_orm in result:
+            if str(model_orm.id) in seen or not _model_is_runtime_ready(model_orm, provider_orm):
+                continue
+            candidate_caps = _enabled_capabilities(model_orm.capabilities)
+            if required_caps and not required_caps.issubset(candidate_caps):
+                continue
+
+            same_provider = 0 if requested_provider and model_orm.provider_id == requested_provider.id else 1
+            context_gap = 0 if not requested_context or not model_orm.context_window or model_orm.context_window >= requested_context else 1
+            validated_rank = 0 if model_orm.validated_at else 1
+            validated_ts = -model_orm.validated_at.timestamp() if model_orm.validated_at else 0
+            scored.append((
+                (same_provider, context_gap, validated_rank, validated_ts, (model_orm.display_name or model_orm.model_id).lower()),
+                model_orm,
+                provider_orm,
+            ))
+
+        for _, model_orm, provider_orm in sorted(scored):
+            seen.add(str(model_orm.id))
+            reason = "same-provider validated backup" if requested_provider and model_orm.provider_id == requested_provider.id else "validated backup"
+            candidates.append((model_orm, provider_orm, reason))
+            if len(candidates) >= limit:
+                break
+
+    return candidates
+
+
+async def _build_runtime_model_chain(
+    model_ref: str,
+    explicit_fallback_refs: Optional[list[str]] = None,
+    *,
+    limit: int = 3,
+):
+    primary_model, primary_provider = await _resolve_model(model_ref)
+    chain = []
+    seen: set[str] = set()
+
+    if primary_model and primary_provider:
+        chain.append((primary_model, primary_provider, "selected model"))
+        seen.add(str(primary_model.id))
+
+    for model_orm, provider_orm, reason in await _collect_runtime_fallbacks(
+        model_ref,
+        explicit_fallback_refs=explicit_fallback_refs,
+        limit=limit,
+    ):
+        if str(model_orm.id) in seen:
+            continue
+        chain.append((model_orm, provider_orm, reason))
+        seen.add(str(model_orm.id))
+
+    preflight_note = None
+    if not primary_model and chain:
+        preflight_note = (
+            f"Selected model '{model_ref}' was unavailable, inactive, unvalidated, or missing credentials. "
+            f"Switching to validated backup '{chain[0][0].model_id}'."
+        )
+
+    return chain, preflight_note
+
+
 async def _resolve_model(model_id: str):
     """Return (Model, Provider) objects from DB for a given model_id string.
 
@@ -119,35 +346,24 @@ async def _resolve_model(model_id: str):
         from sqlalchemy import select
 
         async with AsyncSessionLocal() as db:
-            # 1. Exact match on model_id
-            result = await db.execute(
-                select(ModelORM, ProviderORM)
-                .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
-                .where(ModelORM.model_id == model_id)
-                .limit(1)
-            )
-            row = result.first()
+            row = await _fetch_model_row(db, model_id, include_fuzzy=True)
             if row:
+                if not row[0].is_active:
+                    logger.error(f"Model '{model_id}' matched but is inactive")
+                    return None, None
+                if (row[0].validation_status or "unverified") != "validated":
+                    logger.error(
+                        f"Model '{model_id}' matched but is not live-validated "
+                        f"(status={row[0].validation_status or 'unverified'})"
+                    )
+                    return None, None
                 if not _provider_has_credentials(row[1].name):
                     logger.error(f"Model '{model_id}' matched but provider '{row[1].name}' has no API credentials set")
                     return None, None
                 return row[0], row[1]
 
-            # 2. Fuzzy partial match — ONLY keep candidates whose provider has credentials
-            last_part = model_id.split("/")[-1]
-            result = await db.execute(
-                select(ModelORM, ProviderORM)
-                .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
-                .where(ModelORM.model_id.contains(last_part))
-                .where(ModelORM.is_active == True)
-            )
-            for m, p in result:
-                if _provider_has_credentials(p.name):
-                    logger.info(f"Model '{model_id}' fuzzy-matched to '{m.model_id}' via {p.name}")
-                    return m, p
-
             # No fallback to arbitrary models — return None so the caller surfaces the error
-            logger.error(f"Could not resolve model '{model_id}' to any provider with credentials")
+            logger.error(f"Could not resolve model '{model_id}' to any active, live-validated provider model with credentials")
     except Exception as e:
         logger.error(f"Model resolve failed: {e}")
     return None, None
@@ -411,18 +627,6 @@ async def _run_turn(
     turn_num = (len([m for m in history if m.get("role") == "user"]) + 1)
     _push(session_id, "info", message=f"Turn {turn_num}: {user_message[:80]}{'…' if len(user_message) > 80 else ''}")
 
-    # ── Resolve model ────────────────────────────────────────────────────────
-    model_orm, provider_orm = await _resolve_model(model_id)
-
-    if not model_orm:
-        _push(session_id, "error", message=f"Could not find model '{model_id}' in database.")
-        await _db_update(session_id, status="failed", completed_at=datetime.utcnow())
-        _push(session_id, "done", message="Session failed.", status="failed")
-        return
-
-    _push(session_id, "agent_thought",
-          thought=f"Reading project files and thinking with {model_orm.display_name or model_orm.model_id}…")
-
     # ── Build message list: base system + method prompt + history + snapshot + user
     from app.services.model_client import ModelClient
     client = ModelClient()
@@ -459,15 +663,84 @@ async def _run_turn(
     llm_success = True
     llm_error = None
 
-    try:
-        stream = await client.call_model(
-            model=model_orm,
-            provider=provider_orm,
-            messages=messages,
-            stream=True,
-            temperature=0.2,
-            max_tokens=16000,
+    model_chain, preflight_note = await _build_runtime_model_chain(model_id)
+    if not model_chain:
+        _push(
+            session_id,
+            "error",
+            message=(
+                f"Could not resolve model '{model_id}' to any active, validated model with working credentials, "
+                "and no validated fallback model was available."
+            ),
         )
+        await _db_update(session_id, status="failed", completed_at=datetime.utcnow())
+        _push(session_id, "done", message="Session failed.", status="failed")
+        return
+
+    model_orm = None
+    provider_orm = None
+    stream = None
+
+    if preflight_note:
+        _push(session_id, "info", message=preflight_note)
+
+    last_error = None
+    for idx, (candidate_model, candidate_provider, reason) in enumerate(model_chain):
+        if idx > 0:
+            previous_model = model_chain[idx - 1][0]
+            previous_error = _humanize_model_error(str(last_error), previous_model.model_id) if last_error else "The previous model was unavailable."
+            _push(
+                session_id,
+                "info",
+                message=(
+                    f"Model failover: switched from '{previous_model.model_id}' to '{candidate_model.model_id}' "
+                    f"using {reason}. Reason: {previous_error}"
+                ),
+            )
+        try:
+            stream = await client.call_model(
+                model=candidate_model,
+                provider=candidate_provider,
+                messages=messages,
+                stream=True,
+                temperature=0.2,
+                max_tokens=16000,
+            )
+            model_orm = candidate_model
+            provider_orm = candidate_provider
+            break
+        except Exception as e:
+            last_error = e
+            logger.error(f"LLM call setup failed in workbench session {session_id} using {candidate_model.model_id}: {e}")
+            if idx + 1 >= len(model_chain) or not _should_failover_error(e):
+                break
+
+    if not model_orm or not provider_orm or stream is None:
+        err_str = str(last_error) if last_error else f"Could not initialize model '{model_id}'."
+        friendly = _humanize_model_error(err_str, model_id)
+        llm_success = False
+        llm_error = friendly
+        _push(session_id, "error", message=friendly)
+        _push(session_id, "done", message="Session failed.", status="failed")
+        await _db_update(
+            session_id,
+            status="failed",
+            completed_at=datetime.utcnow(),
+            model=model_orm.model_id if model_orm else model_id,
+            events_log=_event_logs.get(session_id, []),
+        )
+        return
+
+    if model_orm.model_id != model_id:
+        await _db_update(session_id, model=model_orm.model_id)
+
+    _push(
+        session_id,
+        "agent_thought",
+        thought=f"Reading project files and thinking with {model_orm.display_name or model_orm.model_id}…",
+    )
+
+    try:
 
         chunk_count = 0
         role_pushed = False
@@ -520,21 +793,7 @@ async def _run_turn(
     except Exception as e:
         err_str = str(e)
         logger.error(f"LLM call failed in workbench session {session_id}: {e}")
-        # Enrich common provider errors so the user knows what's wrong
-        friendly = err_str
-        low = err_str.lower()
-        if "insufficient_quota" in low or "exceeded your current quota" in low:
-            friendly = (f"OpenAI quota exceeded — your account is out of credits. "
-                        f"Top up at https://platform.openai.com/account/billing, or pick a different provider.")
-        elif "authenticationerror" in low or "x-api-key" in low or "401" in err_str or "invalid_api_key" in low:
-            friendly = f"Provider rejected the API key for model '{model_id}'. Check the key in your .env file."
-        elif "ratelimiterror" in low or "429" in err_str:
-            friendly = f"Rate-limited by provider for model '{model_id}'. Wait and retry, or switch models."
-        elif "notfounderror" in low or "model_not_found" in low or "does not exist" in low or ("404" in err_str and "openai" in low):
-            friendly = (f"Model '{model_id}' doesn't exist on the provider's API. "
-                        f"It may have been renamed or removed. Pick a different model.")
-        elif "timeout" in low or "timed out" in low:
-            friendly = f"Provider call for model '{model_id}' timed out."
+        friendly = _humanize_model_error(err_str, model_orm.model_id if model_orm else model_id)
         llm_success = False
         llm_error = friendly
         _push(session_id, "error", message=friendly)

@@ -72,12 +72,29 @@ class UserCreate(BaseModel):
     display_name: str
     password: str
     role: str = "member"  # owner | admin | member | viewer
+    github_token: Optional[str] = None
 
 
 class UserUpdate(BaseModel):
     display_name: Optional[str] = None
     role: Optional[str] = None
     is_active: Optional[bool] = None
+    github_token: Optional[str] = None
+
+
+def _mask_secret(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    if len(value) <= 8:
+        return "••••••••"
+    return value[:4] + "••••••••" + value[-4:]
+
+
+def _serialize_user(user: dict) -> dict:
+    safe = {k: v for k, v in user.items() if k not in ("password_hash", "github_token")}
+    safe["has_github_token"] = bool(user.get("github_token"))
+    safe["github_token_masked"] = _mask_secret(user.get("github_token"))
+    return safe
 
 
 class AuditEntry(BaseModel):
@@ -108,7 +125,7 @@ async def list_users():
     users = _load(_USERS_FILE)
     safe = []
     for u in users.values():
-        safe.append({k: v for k, v in u.items() if k != "password_hash"})
+        safe.append(_serialize_user(u))
     return {"data": safe, "total": len(safe)}
 
 
@@ -122,11 +139,12 @@ async def create_user(body: UserCreate):
         "id": user_id, "username": body.username,
         "display_name": body.display_name, "role": body.role,
         "password_hash": _hash_password(body.password),
+        "github_token": (body.github_token or "").strip() or None,
         "is_active": True, "created_at": _now(), "last_active": None,
     }
     _save(_USERS_FILE, users)
     _audit("user_created", "user", user_id, f"User {body.username} created with role {body.role}")
-    return {k: v for k, v in users[user_id].items() if k != "password_hash"}
+    return _serialize_user(users[user_id])
 
 
 @router.patch("/users/{user_id}")
@@ -137,8 +155,10 @@ async def update_user(user_id: str, body: UserUpdate):
     if body.display_name is not None: users[user_id]["display_name"] = body.display_name
     if body.role is not None: users[user_id]["role"] = body.role
     if body.is_active is not None: users[user_id]["is_active"] = body.is_active
+    if body.github_token is not None:
+        users[user_id]["github_token"] = body.github_token.strip() or None
     _save(_USERS_FILE, users)
-    return {k: v for k, v in users[user_id].items() if k != "password_hash"}
+    return _serialize_user(users[user_id])
 
 
 @router.delete("/users/{user_id}")

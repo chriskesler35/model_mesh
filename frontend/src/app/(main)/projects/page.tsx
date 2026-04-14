@@ -29,15 +29,29 @@ export default function ProjectsPage() {
   const [form, setForm] = useState({ name: '', path: '', template: 'blank', description: '', sandbox_mode: 'restricted' })
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
+  const [loadError, setLoadError] = useState('')
 
   const fetchData = useCallback(async () => {
-    const [proj, tmpl] = await Promise.all([
-      fetch(`${API_BASE}/v1/projects/`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
-      fetch(`${API_BASE}/v1/projects/templates`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
-    ])
-    setProjects(proj.data || [])
-    setTemplates(tmpl.data || [])
-    setLoading(false)
+    setLoadError('')
+    try {
+      const [projRes, tmplRes] = await Promise.all([
+        fetch(`${API_BASE}/v1/projects`, { headers: AUTH_HEADERS }),
+        fetch(`${API_BASE}/v1/projects/templates`, { headers: AUTH_HEADERS }),
+      ])
+
+      if (!projRes.ok) throw new Error(`Failed to load projects (${projRes.status})`)
+      if (!tmplRes.ok) throw new Error(`Failed to load templates (${tmplRes.status})`)
+
+      const [proj, tmpl] = await Promise.all([projRes.json(), tmplRes.json()])
+      setProjects(proj.data || [])
+      setTemplates(tmpl.data || [])
+    } catch (e: any) {
+      setProjects([])
+      setTemplates([])
+      setLoadError(e.message || 'Failed to load projects')
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   useEffect(() => { fetchData() }, [fetchData])
@@ -46,7 +60,7 @@ export default function ProjectsPage() {
     if (!form.name.trim() || !form.path.trim() || creating) return
     setCreating(true); setError('')
     try {
-      const res = await fetch(`${API_BASE}/v1/projects/`, {
+      const res = await fetch(`${API_BASE}/v1/projects`, {
         method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify(form)
       })
       if (!res.ok) throw new Error((await res.json()).detail || 'Failed')
@@ -90,6 +104,12 @@ export default function ProjectsPage() {
           </button>
         </div>
       </div>
+
+      {loadError && (
+        <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
+          {loadError}
+        </div>
+      )}
 
       {projects.length === 0 ? (
         <div className="text-center py-20">

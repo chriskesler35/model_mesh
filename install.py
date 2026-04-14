@@ -182,13 +182,13 @@ def create_start_scripts(python_bin):
             f'@echo off\n'
             f'echo Starting DevForgeAI...\n'
             f'echo.\n'
-            f'start "DevForgeAI Backend" cmd /k "cd /d "{BACKEND_DIR}" && "{python_bin}" -m uvicorn app.main:app --host 0.0.0.0 --port 19000 --reload"\n'
+            f'start "DevForgeAI Backend" cmd /k "cd /d "{BACKEND_DIR}" && "{python_bin}" -m uvicorn app.main:app --host 0.0.0.0 --port 19001 --reload"\n'
             f'timeout /t 3 /nobreak >nul\n'
             f'start "DevForgeAI Frontend" cmd /k "cd /d "{FRONTEND_DIR}" && npm run dev"\n'
             f'echo.\n'
-            f'echo Backend:  http://localhost:19000\n'
+            f'echo Backend:  http://localhost:19001\n'
             f'echo Frontend: http://localhost:3001\n'
-            f'echo API Docs: http://localhost:19000/docs\n'
+            f'echo API Docs: http://localhost:19001/docs\n'
             f'echo.\n'
             f'pause\n'
         )
@@ -200,19 +200,19 @@ def create_start_scripts(python_bin):
             f'#!/usr/bin/env bash\n'
             f'set -e\n'
             f'cd "{ROOT}"\n\n'
-            f'echo "Starting DevForgeAI Backend on :19000..."\n'
+            f'echo "Starting DevForgeAI Backend on :19001..."\n'
             f'cd backend\n'
             f'source venv/bin/activate\n'
-            f'uvicorn app.main:app --host 0.0.0.0 --port 19000 --reload &\n'
+            f'uvicorn app.main:app --host 0.0.0.0 --port 19001 --reload &\n'
             f'BACKEND_PID=$!\n\n'
             f'echo "Starting DevForgeAI Frontend on :3001..."\n'
             f'cd "{FRONTEND_DIR}"\n'
             f'npm run dev &\n'
             f'FRONTEND_PID=$!\n\n'
             f'echo ""\n'
-            f'echo "  Backend:  http://localhost:19000"\n'
+            f'echo "  Backend:  http://localhost:19001"\n'
             f'echo "  Frontend: http://localhost:3001"\n'
-            f'echo "  API Docs: http://localhost:19000/docs"\n'
+            f'echo "  API Docs: http://localhost:19001/docs"\n'
             f'echo ""\n'
             f'echo "Press Ctrl+C to stop both servers."\n'
             f'trap "kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; exit" INT TERM\n'
@@ -247,8 +247,8 @@ def print_summary(python_bin):
 
   {BOLD}URLs:{RESET}
     Frontend  →  http://localhost:3001
-    Backend   →  http://localhost:19000
-    API Docs  →  http://localhost:19000/docs
+        Backend   →  http://localhost:19001
+        API Docs  →  http://localhost:19001/docs
 
   {BOLD}Supported AI Providers:{RESET}
     Ollama (local, no key), Anthropic, Google Gemini,

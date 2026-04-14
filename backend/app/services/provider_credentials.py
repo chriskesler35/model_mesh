@@ -11,7 +11,11 @@ import os
 from typing import Optional
 
 from app.config import settings
-from app.services.codex_oauth import has_codex_cli_auth, provider_supports_codex_oauth
+from app.services.codex_oauth import (
+    has_codex_cli_auth,
+    is_codex_proxy_reachable,
+    provider_supports_codex_oauth,
+)
 
 
 PROVIDER_ENV_VARS: dict[str, tuple[str, ...]] = {
@@ -61,7 +65,9 @@ def get_provider_api_key(provider_name: str) -> Optional[str]:
 def has_provider_api_key(provider_name: str) -> bool:
     normalized = (provider_name or "").lower().strip()
     if provider_supports_codex_oauth(normalized):
-        return bool(get_provider_api_key(normalized)) or has_codex_cli_auth()
+        if get_provider_api_key(normalized):
+            return True
+        return has_codex_cli_auth() and is_codex_proxy_reachable()
     if normalized == "github-copilot":
         # Copilot uses a GitHub OAuth token stored on a user record
         from app.services.command_executor import get_first_github_token

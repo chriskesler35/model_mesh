@@ -19,6 +19,13 @@ interface TelegramStatus {
   authorized_chats?: number[]
 }
 
+interface BackendStatus {
+  running: boolean
+  healthy: boolean
+  pid: number | null
+  port?: number | null
+}
+
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
   return (
@@ -50,7 +57,7 @@ export function RemoteAccessTab() {
   const [tailscale, setTailscale] = useState<TailscaleInfo | null>(null)
   const [telegram, setTelegram] = useState<TelegramStatus | null>(null)
   const [loading, setLoading] = useState(true)
-  const [backendStatus, setBackendStatus] = useState<{ running: boolean; healthy: boolean; pid: number | null } | null>(null)
+  const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null)
   const [controlling, setControlling] = useState<string | null>(null)
 
   const [botToken, setBotToken] = useState('')
@@ -168,11 +175,6 @@ export function RemoteAccessTab() {
     finally { setSaving(null) }
   }
 
-  const FIREWALL_CMDS = [
-    `netsh advfirewall firewall add rule name="DevForgeAI API (19000)" dir=in action=allow protocol=tcp localport=19000 remoteip=100.64.0.0/10`,
-    `netsh advfirewall firewall add rule name="DevForgeAI Frontend (3001)" dir=in action=allow protocol=tcp localport=3001 remoteip=100.64.0.0/10`,
-  ]
-
   const TELEGRAM_COMMANDS = [
     '/start or /help — show all commands',
     '/status — system health (CPU, memory, uptime)',
@@ -186,6 +188,12 @@ export function RemoteAccessTab() {
 
   if (loading) return <div className="text-sm text-gray-400 py-8 text-center">Loading remote settings...</div>
 
+  const backendPort = backendStatus?.port ?? 19001
+  const FIREWALL_CMDS = [
+    `netsh advfirewall firewall add rule name="DevForgeAI API (${backendPort})" dir=in action=allow protocol=tcp localport=${backendPort} remoteip=100.64.0.0/10`,
+    `netsh advfirewall firewall add rule name="DevForgeAI Frontend (3001)" dir=in action=allow protocol=tcp localport=3001 remoteip=100.64.0.0/10`,
+  ]
+
   return (
     <div className="space-y-5">
       {/* Feedback toast */}
@@ -196,7 +204,7 @@ export function RemoteAccessTab() {
       )}
 
       {/* Backend Status — controls live in Settings → Server tab */}
-      <Card icon="⚙️" title="Backend Process" subtitle="Python backend status (port 19000)">
+      <Card icon="⚙️" title="Backend Process" subtitle={`Python backend status (port ${backendPort})`}>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className={`w-3 h-3 rounded-full flex-shrink-0 ${
@@ -211,7 +219,7 @@ export function RemoteAccessTab() {
                  backendStatus === null ? 'Checking...' : 'Stopped'}
               </p>
               {backendStatus?.pid && (
-                <p className="text-xs text-gray-400">PID {backendStatus.pid} · port 19000</p>
+                <p className="text-xs text-gray-400">PID {backendStatus.pid} · port {backendPort}</p>
               )}
             </div>
           </div>
@@ -242,7 +250,7 @@ export function RemoteAccessTab() {
                 ['Hostname', tailscale.hostname],
                 ['Tailscale IP', tailscale.tailscale_ip || 'Not connected'],
                 ['Frontend', tailscale.frontend_url || `http://${tailscale.tailscale_ip || 'localhost'}:3001`],
-                ['Backend', tailscale.backend_url || `http://${tailscale.tailscale_ip || 'localhost'}:19000`],
+                ['Backend', tailscale.backend_url || `http://${tailscale.tailscale_ip || 'localhost'}:${backendPort}`],
               ].map(([label, val]) => (
                 <div key={label} className="p-3 bg-gray-50 dark:bg-gray-900 rounded-lg">
                   <p className="text-xs text-gray-400 uppercase tracking-wider mb-1">{label}</p>
@@ -359,7 +367,7 @@ export function RemoteAccessTab() {
         <div className="space-y-3">
           {FIREWALL_CMDS.map((cmd, i) => (
             <div key={i}>
-              <p className="text-xs text-gray-500 mb-1">Port {i === 0 ? '19000 (Backend API)' : '3001 (Frontend)'}</p>
+              <p className="text-xs text-gray-500 mb-1">Port {i === 0 ? `${backendPort} (Backend API)` : '3001 (Frontend)'}</p>
               <div className="flex items-center gap-2 bg-gray-900 rounded-lg px-3 py-2.5">
                 <code className="text-xs font-mono text-green-400 flex-1 break-all">{cmd}</code>
                 <CopyButton text={cmd} />

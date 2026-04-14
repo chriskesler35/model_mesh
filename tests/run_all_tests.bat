@@ -15,6 +15,7 @@ set PYTEST_JSON=%REPORT_DIR%\pytest_results_%TIMESTAMP%.json
 set PYTEST_LOG=%REPORT_DIR%\pytest_output_%TIMESTAMP%.txt
 set E2E_JSON=%REPORT_DIR%\e2e_results_%TIMESTAMP%.json
 set E2E_LOG=%REPORT_DIR%\e2e_output_%TIMESTAMP%.txt
+set BACKEND_URL=
 
 :: Create reports dir
 if not exist "%REPORT_DIR%" mkdir "%REPORT_DIR%"
@@ -29,12 +30,21 @@ echo.
 set BACKEND_OK=0
 set FRONTEND_OK=0
 
-curl -s http://localhost:19000/v1/health >nul 2>&1
+curl -s http://localhost:19001/v1/health >nul 2>&1
 if %errorlevel% equ 0 (
     set BACKEND_OK=1
+    set BACKEND_URL=http://localhost:19001
+    echo [OK] Backend is healthy at %BACKEND_URL%
+) else (
+    curl -s http://localhost:19000/v1/health >nul 2>&1
+)
+
+if %BACKEND_OK% equ 0 if %errorlevel% equ 0 (
+    set BACKEND_OK=1
+    set BACKEND_URL=http://localhost:19000
     echo [OK] Backend is healthy
 ) else (
-    echo [ERROR] Backend is not running at localhost:19000
+    echo [ERROR] Backend is not running at localhost:19001 or localhost:19000
     echo Please start DevForgeAI first: devforgeai_startup.bat
     exit /b 1
 )
@@ -64,6 +74,8 @@ if %errorlevel% neq 0 (
 
 if exist tests\conftest.py (
     echo Running pytest... (output: %PYTEST_LOG%)
+    set DEVFORGEAI_URL=%BACKEND_URL%
+    set DEVFORGEAI_API_URL=%BACKEND_URL%
     python -m pytest tests\ -v --tb=long --ignore=tests\e2e --ignore=tests\manual --json-report --json-report-file="%PYTEST_JSON%" >"!PYTEST_LOG!" 2>&1
     set PYTEST_EXIT=!errorlevel!
     :: Show summary on console

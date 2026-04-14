@@ -9,6 +9,7 @@ import subprocess
 import sys
 import json
 import random
+import shlex
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +25,64 @@ from typing import Optional, List
 import os
 
 logger = logging.getLogger(__name__)
+
+
+async def _stop_comfyui_progress_task(ws_stop_event: "asyncio.Event", ws_task) -> None:
+    """Stop the background ComfyUI progress stream task if it is running."""
+    ws_stop_event.set()
+    if ws_task:
+        try:
+            await asyncio.wait_for(ws_task, timeout=1.0)
+        except Exception:
+            pass
+
+
+async def _cancel_comfyui_prompt(client: httpx.AsyncClient, comfyui_url: str, prompt_id: str) -> None:
+    """Best-effort cleanup for an abandoned ComfyUI prompt.
+
+    If the prompt is actively running, request an interrupt. If it is still
+    pending, remove it from the queue. This prevents stale jobs from blocking
+    later frontend requests after timeouts, disconnects, or backend restarts.
+    """
+    try:
+        is_running = False
+        queue_resp = await client.get(f"{comfyui_url}/queue")
+        if queue_resp.status_code == 200:
+            queue_data = queue_resp.json()
+            for item in queue_data.get("queue_running", []):
+                if isinstance(item, list) and len(item) > 1 and item[1] == prompt_id:
+                    is_running = True
+                    break
+
+        if is_running:
+            interrupt_resp = await client.post(f"{comfyui_url}/interrupt")
+            logger.info(
+                "Requested ComfyUI interrupt for prompt %s (status=%s)",
+                prompt_id,
+                interrupt_resp.status_code,
+            )
+
+        delete_resp = await client.post(f"{comfyui_url}/queue", json={"delete": [prompt_id]})
+        logger.info(
+            "Requested ComfyUI queue cleanup for prompt %s (status=%s)",
+            prompt_id,
+            delete_resp.status_code,
+        )
+    except Exception as e:
+        logger.warning("Failed to clean up ComfyUI prompt %s: %s", prompt_id, e)
+
+
+def _extract_comfyui_file_refs(node_output: dict) -> list[dict]:
+    """Collect file-like outputs from a ComfyUI history node output."""
+    refs = []
+    for key in ("images", "gifs", "audio", "videos", "files"):
+        values = node_output.get(key)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if isinstance(item, dict) and item.get("filename"):
+                refs.append(item)
+    return refs
 
 # ─── ComfyUI auto-launch ──────────────────────────────────────────────────────
 
@@ -41,7 +100,13 @@ async def _get_comfyui_paths():
             cfg = await get_comfyui_config(db)
             return cfg
     except Exception:
-        return {"dir": "", "python": "", "url": "http://localhost:8188", "gpu_devices": "0"}
+        return {
+            "dir": "",
+            "python": "",
+            "url": "http://localhost:8188",
+            "gpu_devices": "0",
+            "launch_args": "",
+        }
 
 
 async def is_comfyui_running(url: str = "http://localhost:8188") -> bool:
@@ -76,24 +141,33 @@ async def launch_comfyui(url: str = "http://localhost:8188") -> bool:
 
     env = os.environ.copy()
     gpu_devices = cfg.get("gpu_devices", "0")
+    launch_args = (cfg.get("launch_args") or "").strip()
     env["CUDA_VISIBLE_DEVICES"] = gpu_devices
     # Performance env vars
     env["NVIDIA_TF32_OVERRIDE"] = "1"
     env["CUDA_MODULE_LOADING"] = "LAZY"
     env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-    cmd = [
-        str(comfyui_python), "main.py",
-        "--listen", "0.0.0.0",
-        "--default-device", "0",  # primary GPU, keeps others visible for overflow
-        "--highvram",             # maximize VRAM usage, offload only when needed
-        "--async-offload", "2",   # async offload across 2 streams when needed
-        "--cuda-malloc",          # faster CUDA memory allocation
-        "--fast",                 # enable fast-path optimizations
-        "--preview-method", "auto",
-        "--enable-cors-header", "*",
-    ]
-    logger.info(f"Launching ComfyUI: CUDA_VISIBLE_DEVICES={gpu_devices}, cmd={' '.join(cmd[2:])}")
+    if launch_args:
+        cmd = [str(comfyui_python), "main.py", *shlex.split(launch_args, posix=False)]
+    else:
+        cmd = [
+            str(comfyui_python), "main.py",
+            "--listen", "0.0.0.0",
+            "--default-device", "0",  # primary GPU, keeps others visible for overflow
+            "--highvram",               # maximize VRAM usage, offload only when needed
+            "--async-offload", "2",   # async offload across 2 streams when needed
+            "--cuda-malloc",            # faster CUDA memory allocation
+            "--fast",                   # enable fast-path optimizations
+            "--preview-method", "auto",
+            "--enable-cors-header", "*",
+        ]
+    logger.info(
+        "Launching ComfyUI: CUDA_VISIBLE_DEVICES=%s, cwd=%s, args=%s",
+        gpu_devices,
+        comfyui_dir,
+        " ".join(cmd[2:]),
+    )
 
     try:
         _comfyui_proc = subprocess.Popen(
@@ -611,19 +685,14 @@ async def generate_with_comfyui(
                             msgs = status_info.get("messages", [])
                             err_detail = str(msgs) if msgs else "unknown error"
                             logger.error(f"ComfyUI execution failed: {err_detail[:300]}")
-                            # Stop the WS streamer before raising
-                            ws_stop_event.set()
-                            if ws_task:
-                                try:
-                                    await asyncio.wait_for(ws_task, timeout=1.0)
-                                except Exception:
-                                    pass
+                            await _stop_comfyui_progress_task(ws_stop_event, ws_task)
                             raise HTTPException(status_code=500, detail=f"ComfyUI execution error: {err_detail[:300]}")
 
                         outputs = entry.get("outputs", {})
                         for node_id, node_output in outputs.items():
-                            if "images" in node_output:
-                                for img in node_output["images"]:
+                            file_refs = _extract_comfyui_file_refs(node_output)
+                            if file_refs:
+                                for img in file_refs:
                                     filename = img.get("filename", "")
                                     subfolder = img.get("subfolder", "")
                                     img_type = img.get("type", "output")
@@ -642,30 +711,27 @@ async def generate_with_comfyui(
                                         image_bytes = img_response.content
                                         elapsed = attempt + 1
                                         logger.info(f"ComfyUI generation complete in {elapsed}s, image: {filename}")
-                                        # Stop the WS streamer before returning
-                                        ws_stop_event.set()
-                                        if ws_task:
-                                            try:
-                                                await asyncio.wait_for(ws_task, timeout=1.0)
-                                            except Exception:
-                                                pass
+                                        await _stop_comfyui_progress_task(ws_stop_event, ws_task)
                                         return {
                                             "base64": base64.b64encode(image_bytes).decode('utf-8'),
                                             "revised_prompt": prompt
                                         }
 
             # Timed out — stop the WS streamer
-            ws_stop_event.set()
-            if ws_task:
-                try:
-                    await asyncio.wait_for(ws_task, timeout=1.0)
-                except Exception:
-                    pass
+            await _stop_comfyui_progress_task(ws_stop_event, ws_task)
+            await _cancel_comfyui_prompt(client, comfyui_url, prompt_id)
             raise HTTPException(
                 status_code=504,
                 detail=f"ComfyUI generation timed out after {max_poll // 60} minutes"
             )
             
+    except asyncio.CancelledError:
+        try:
+            await _stop_comfyui_progress_task(ws_stop_event, ws_task)
+            if 'client' in locals() and 'prompt_id' in locals() and prompt_id:
+                await _cancel_comfyui_prompt(client, comfyui_url, prompt_id)
+        finally:
+            raise
     except httpx.TimeoutException:
         raise HTTPException(
             status_code=504,
@@ -706,6 +772,13 @@ def _convert_txt2img_to_img2img(workflow: dict, uploaded_image_name: str, denois
     if load_image_nodes:
         for nid in load_image_nodes:
             workflow[nid].setdefault("inputs", {})["image"] = uploaded_image_name
+        for node in workflow.values():
+            if not isinstance(node, dict):
+                continue
+            if node.get("class_type") in ("KSampler", "KSamplerAdvanced", "SamplerCustom", "SamplerCustomAdvanced"):
+                inputs = node.setdefault("inputs", {})
+                if "denoise" in inputs:
+                    inputs["denoise"] = denoise
         logger.info(f"Workflow has LoadImage — using as-is with uploaded image")
         return workflow
 
@@ -784,10 +857,282 @@ def _convert_txt2img_to_img2img(workflow: dict, uploaded_image_name: str, denois
     return workflow
 
 
-async def _upload_image_to_comfyui(source_bytes: bytes, comfyui_url: str, filename: str = "devforgeai_variation.png") -> str:
+def _resolve_denoise(value: Optional[float], default: float) -> float:
+    """Validate an optional denoise value and fall back to a default."""
+    if value is None:
+        return default
+    denoise = float(value)
+    if denoise < 0.0 or denoise > 1.0:
+        raise HTTPException(status_code=422, detail="denoise must be between 0.0 and 1.0")
+    return denoise
+
+
+def _resolve_mask_grow(value: Optional[int], default: int = 8) -> int:
+    """Validate an optional mask grow value in pixels."""
+    if value is None:
+        return default
+    grow = int(value)
+    if grow < 0 or grow > 128:
+        raise HTTPException(status_code=422, detail="mask_grow must be between 0 and 128")
+    return grow
+
+
+def _resolve_mask_feather(value: Optional[float], default: float = 6.0) -> float:
+    """Validate an optional mask feather value."""
+    if value is None:
+        return default
+    feather = float(value)
+    if feather < 0.0 or feather > 64.0:
+        raise HTTPException(status_code=422, detail="mask_feather must be between 0.0 and 64.0")
+    return feather
+
+
+def _mask_blur_kernel(mask_feather: float) -> int:
+    """Map a feather radius to an odd blur kernel size."""
+    if mask_feather <= 0:
+        return 0
+    kernel = int(round(mask_feather * 2)) + 1
+    return max(3, min(101, kernel if kernel % 2 == 1 else kernel + 1))
+
+
+def _find_vae_source(workflow: dict) -> list:
+    """Locate a VAE output reference inside a workflow."""
+    for nid, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        ct = node.get("class_type")
+        if ct in ("CheckpointLoaderSimple", "CheckpointLoader", "unCLIPCheckpointLoader"):
+            return [nid, 2]
+        if ct == "VAELoader":
+            return [nid, 0]
+    raise HTTPException(
+        status_code=400,
+        detail="Cannot prepare ComfyUI workflow — no CheckpointLoader or VAELoader found",
+    )
+
+
+def _next_node_id(workflow: dict) -> int:
+    """Return the next numeric node id for an API-format ComfyUI workflow."""
+    numeric_ids = [int(k) for k in workflow.keys() if str(k).isdigit()]
+    return (max(numeric_ids) if numeric_ids else 100) + 1
+
+
+def _replace_node_reference(
+    workflow: dict,
+    old_ref: list,
+    new_ref: list,
+    input_names: tuple[str, ...] = ("image", "images"),
+) -> int:
+    """Replace matching workflow node references on common image-style inputs."""
+    rewired = 0
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for input_name in input_names:
+            value = inputs.get(input_name)
+            if value == old_ref:
+                inputs[input_name] = new_ref
+                rewired += 1
+    return rewired
+
+
+def _convert_workflow_to_masked_inpaint(
+    workflow: dict,
+    uploaded_image_name: str,
+    uploaded_mask_name: str,
+    denoise: float = 0.45,
+    node_schema: Optional[dict[str, list[str]]] = None,
+    mask_grow: int = 8,
+    mask_feather: float = 6.0,
+) -> dict:
+    """Convert or adapt a workflow so masked edits only replace editable regions.
+
+    The incoming mask is expected to use white for editable regions and black
+    for protected regions. The workflow is run as img2img, then only the
+    editable region is composited back over the original image.
+    """
+    workflow = _convert_txt2img_to_img2img(workflow, uploaded_image_name, denoise=denoise)
+    node_schema = node_schema or {}
+
+    load_image_nodes = [
+        nid for nid, node in workflow.items()
+        if isinstance(node, dict) and node.get("class_type") == "LoadImage"
+    ]
+    if not load_image_nodes:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot prepare masked edit workflow — no LoadImage node found after img2img conversion",
+        )
+
+    for nid in load_image_nodes:
+        workflow[nid].setdefault("inputs", {})["image"] = uploaded_image_name
+    load_image_id = load_image_nodes[0]
+
+    load_mask_nodes = [
+        nid for nid, node in workflow.items()
+        if isinstance(node, dict) and node.get("class_type") == "LoadImageMask"
+    ]
+
+    if load_mask_nodes:
+        for nid in load_mask_nodes:
+            inputs = workflow[nid].setdefault("inputs", {})
+            inputs["image"] = uploaded_mask_name
+            inputs.setdefault("channel", "red")
+        load_mask_id = load_mask_nodes[0]
+    else:
+        load_mask_id = str(_next_node_id(workflow))
+        workflow[load_mask_id] = {
+            "class_type": "LoadImageMask",
+            "inputs": {"image": uploaded_mask_name, "channel": "red"},
+        }
+
+    sampler_ids: list[str] = []
+    rewired = 0
+    for nid, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        if node.get("class_type") in ("KSampler", "KSamplerAdvanced", "SamplerCustom", "SamplerCustomAdvanced"):
+            inputs = node.setdefault("inputs", {})
+            if "denoise" in inputs:
+                inputs["denoise"] = denoise
+            sampler_ids.append(nid)
+            rewired += 1
+
+    if rewired == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot convert workflow to masked inpaint — no sampler nodes were found",
+        )
+
+    composite_id = None
+    composite_mask_ref = [load_mask_id, 0]
+
+    if "GrowMask" in node_schema and mask_grow > 0:
+        grow_mask_id = str(_next_node_id(workflow))
+        workflow[grow_mask_id] = {
+            "class_type": "GrowMask",
+            "inputs": {
+                "mask": [load_mask_id, 0],
+                "expand": mask_grow,
+                "tapered_corners": True,
+            },
+        }
+        composite_mask_ref = [grow_mask_id, 0]
+
+    if "ImpactGaussianBlurMask" in node_schema and mask_feather > 0:
+        kernel_size = _mask_blur_kernel(mask_feather)
+        blur_mask_id = str(_next_node_id(workflow))
+        workflow[blur_mask_id] = {
+            "class_type": "ImpactGaussianBlurMask",
+            "inputs": {
+                "mask": composite_mask_ref,
+                "kernel_size": kernel_size,
+                "sigma": mask_feather,
+            },
+        }
+        composite_mask_ref = [blur_mask_id, 0]
+
+    output_rewired = 0
+    if "ImageCompositeMasked" in node_schema and sampler_ids:
+        primary_sampler_id = sampler_ids[0]
+        decode_id = next(
+            (
+                nid
+                for nid, node in workflow.items()
+                if isinstance(node, dict)
+                and node.get("class_type") == "VAEDecode"
+                and node.get("inputs", {}).get("samples") == [primary_sampler_id, 0]
+            ),
+            None,
+        )
+
+        if not decode_id:
+            decode_id = str(_next_node_id(workflow))
+            workflow[decode_id] = {
+                "class_type": "VAEDecode",
+                "inputs": {
+                    "samples": [primary_sampler_id, 0],
+                    "vae": vae_source,
+                },
+            }
+
+        composite_id = str(_next_node_id(workflow))
+        workflow[composite_id] = {
+            "class_type": "ImageCompositeMasked",
+            "inputs": {
+                "destination": [load_image_id, 0],
+                "source": [decode_id, 0],
+                "x": 0,
+                "y": 0,
+                "resize_source": False,
+                "mask": composite_mask_ref,
+            },
+        }
+
+        output_rewired += _replace_node_reference(workflow, [decode_id, 0], [composite_id, 0])
+        for node in workflow.values():
+            if not isinstance(node, dict):
+                continue
+            if node.get("class_type") not in ("SaveImage", "PreviewImage"):
+                continue
+            inputs = node.setdefault("inputs", {})
+            if "images" in inputs:
+                inputs["images"] = [composite_id, 0]
+                output_rewired += 1
+            elif "image" in inputs:
+                inputs["image"] = [composite_id, 0]
+                output_rewired += 1
+
+    logger.info(
+        "Prepared masked composite workflow: LoadImage=%s LoadImageMask=%s samplers=%s denoise=%s mask_grow=%s mask_feather=%s composite=%s output_rewired=%s",
+        load_image_id,
+        load_mask_id,
+        rewired,
+        denoise,
+        mask_grow,
+        mask_feather,
+        composite_id,
+        output_rewired,
+    )
+    return workflow
+
+
+def _extension_for_mime_type(mime_type: str) -> str:
+    """Return a sensible file extension for an image MIME type."""
+    normalized = (mime_type or "image/png").lower().strip()
+    if normalized == "image/jpeg":
+        return "jpg"
+    if normalized.startswith("image/"):
+        return normalized.split("/", 1)[1]
+    return "png"
+
+
+def _ensure_comfyui_png_source(source_mime: str, operation: str) -> None:
+    """Reject non-PNG source images for ComfyUI img2img-style operations."""
+    normalized = (source_mime or "").lower().strip()
+    if normalized != "image/png":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"ComfyUI currently requires a PNG source image for {operation}. "
+                f"This image is {normalized or 'an unknown format'}. Re-upload or convert it to PNG, "
+                f"or use Gemini for this request."
+            ),
+        )
+
+
+async def _upload_image_to_comfyui(
+    source_bytes: bytes,
+    comfyui_url: str,
+    filename: str = "devforgeai_variation.png",
+    mime_type: str = "image/png",
+) -> str:
     """Upload raw image bytes to ComfyUI's /upload/image endpoint. Returns the name ComfyUI assigns."""
     async with httpx.AsyncClient(timeout=30.0) as client:
-        files = {"image": (filename, source_bytes, "image/png")}
+        files = {"image": (filename, source_bytes, mime_type)}
         data = {"overwrite": "true"}
         resp = await client.post(f"{comfyui_url}/upload/image", files=files, data=data)
         if resp.status_code != 200:
@@ -806,6 +1151,13 @@ async def generate_img2img_with_comfyui(
     comfyui_url: str,
     comfyui_dir: str = "",
     workflow_id: str = "sdxl-img2img",
+    source_mime: str = "image/png",
+    mask_bytes: Optional[bytes] = None,
+    mask_mime: str = "image/png",
+    denoise: float = 0.65,
+    mask_grow: int = 8,
+    mask_feather: float = 6.0,
+    progress_cb=None,
 ) -> dict:
     """Run an img2img variation via ComfyUI.
 
@@ -821,8 +1173,24 @@ async def generate_img2img_with_comfyui(
     logger.info(f"ComfyUI img2img: workflow={workflow_id}, source_bytes={len(source_bytes)}, prompt={prompt[:60]}…")
 
     # 1. Upload source image to ComfyUI
-    uploaded_name = await _upload_image_to_comfyui(source_bytes, comfyui_url)
+    source_ext = _extension_for_mime_type(source_mime)
+    uploaded_name = await _upload_image_to_comfyui(
+        source_bytes,
+        comfyui_url,
+        filename=f"devforgeai_variation_{uuid.uuid4().hex}.{source_ext}",
+        mime_type=source_mime,
+    )
     logger.info(f"Uploaded source image to ComfyUI as: {uploaded_name}")
+
+    uploaded_mask_name = None
+    if mask_bytes is not None:
+        uploaded_mask_name = await _upload_image_to_comfyui(
+            mask_bytes,
+            comfyui_url,
+            filename=f"devforgeai_mask_{uuid.uuid4().hex}.png",
+            mime_type=mask_mime,
+        )
+        logger.info(f"Uploaded mask image to ComfyUI as: {uploaded_mask_name}")
 
     # 2. Load the workflow template
     template_path = find_workflow_path(workflow_id, comfyui_dir)
@@ -839,6 +1207,7 @@ async def generate_img2img_with_comfyui(
         raise HTTPException(status_code=500, detail=f"Failed to load workflow: {e}")
 
     workflow_json = template_data.get("workflow", template_data)
+    node_schema: dict[str, list[str]] = {}
     is_api_format = workflow_json and isinstance(workflow_json, dict) and any(
         isinstance(v, dict) and "class_type" in v for v in workflow_json.values()
     )
@@ -877,14 +1246,29 @@ async def generate_img2img_with_comfyui(
 
     # 4. Ensure the workflow is img2img-capable. If it's txt2img, auto-convert
     #    it by injecting LoadImage + VAEEncode and rewiring KSamplers.
-    workflow = _convert_txt2img_to_img2img(workflow, uploaded_name, denoise=0.65)
+    if uploaded_mask_name:
+        if not node_schema:
+            node_schema = await _fetch_object_info_schema(comfyui_url)
+        workflow = _convert_workflow_to_masked_inpaint(
+            workflow,
+            uploaded_name,
+            uploaded_mask_name,
+            denoise=denoise,
+            node_schema=node_schema,
+            mask_grow=mask_grow,
+            mask_feather=mask_feather,
+        )
+    else:
+        workflow = _convert_txt2img_to_img2img(workflow, uploaded_name, denoise=denoise)
 
-    # Randomize any zero seeds
+    # Always randomize sampler seeds for variations.
+    # Reusing the same source filename + seed can cause ComfyUI to serve a
+    # cached success with empty outputs, which leaves the frontend waiting even
+    # though the asset appears inside ComfyUI.
     for node in workflow.values():
         if isinstance(node, dict) and node.get("class_type") in ("KSampler", "KSamplerAdvanced"):
             inputs = node.get("inputs", {})
-            if inputs.get("seed") in (0, "0"):
-                inputs["seed"] = random.randint(1, 2**32 - 1)
+            inputs["seed"] = random.randint(1, 2**32 - 1)
 
     # 4. Queue + poll the workflow
     try:
@@ -907,9 +1291,20 @@ async def generate_img2img_with_comfyui(
                 raise HTTPException(status_code=500, detail="ComfyUI did not return a prompt ID")
             logger.info(f"ComfyUI queued img2img prompt {prompt_id} (workflow={workflow_id})")
 
-            # Poll history — up to 10 minutes
-            for attempt in range(600):
+            ws_stop_event = asyncio.Event()
+            ws_task = None
+            if progress_cb is not None:
+                ws_task = asyncio.create_task(
+                    _stream_comfyui_progress(comfyui_url, prompt_id, workflow, progress_cb, ws_stop_event)
+                )
+
+            # Poll history — up to 30 minutes. Img2img can legitimately take
+            # much longer than txt2img on a memory-pressured local ComfyUI.
+            max_poll = 1800
+            for attempt in range(max_poll):
                 await asyncio.sleep(1)
+                if attempt > 0 and attempt % 30 == 0:
+                    logger.info(f"ComfyUI img2img still running… {attempt}s elapsed (workflow={workflow_id}, prompt_id={prompt_id})")
                 hist_resp = await client.get(f"{comfyui_url}/history/{prompt_id}")
                 if hist_resp.status_code != 200:
                     continue
@@ -918,6 +1313,19 @@ async def generate_img2img_with_comfyui(
                     continue
                 entry = history[prompt_id]
                 status_info = entry.get("status", {})
+                if status_info.get("completed") and not entry.get("outputs"):
+                    logger.warning(
+                        "ComfyUI prompt %s completed with no outputs; workflow=%s",
+                        prompt_id,
+                        workflow_id,
+                    )
+                    raise HTTPException(
+                        status_code=502,
+                        detail=(
+                            f"ComfyUI marked workflow '{workflow_id}' complete but returned no output files. "
+                            "This usually indicates a fully cached execution. Retry the variation to force a fresh output."
+                        ),
+                    )
                 if status_info.get("status_str") == "error":
                     msgs = status_info.get("messages", [])
                     # ComfyUI messages often wrap the real error deep in structured data
@@ -931,14 +1339,16 @@ async def generate_img2img_with_comfyui(
                                 break
                     err_detail = err_summary or str(msgs)[:300]
                     logger.error(f"ComfyUI execution failed for prompt {prompt_id}: {err_detail}")
+                    await _stop_comfyui_progress_task(ws_stop_event, ws_task)
                     raise HTTPException(
                         status_code=500,
                         detail=f"ComfyUI workflow '{workflow_id}' failed: {err_detail}"
                     )
                 outputs = entry.get("outputs", {})
                 for node_id, node_output in outputs.items():
-                    if "images" in node_output:
-                        for img in node_output["images"]:
+                    file_refs = _extract_comfyui_file_refs(node_output)
+                    if file_refs:
+                        for img in file_refs:
                             view_resp = await client.get(
                                 f"{comfyui_url}/view",
                                 params={
@@ -948,11 +1358,26 @@ async def generate_img2img_with_comfyui(
                                 }
                             )
                             if view_resp.status_code == 200:
+                                elapsed = attempt + 1
+                                logger.info(f"ComfyUI img2img complete in {elapsed}s, image: {img.get('filename', '')}")
+                                await _stop_comfyui_progress_task(ws_stop_event, ws_task)
                                 return {
                                     "base64": base64.b64encode(view_resp.content).decode(),
                                     "revised_prompt": None,
                                 }
-            raise HTTPException(status_code=504, detail="ComfyUI img2img timed out after 10 minutes")
+            await _stop_comfyui_progress_task(ws_stop_event, ws_task)
+            await _cancel_comfyui_prompt(client, comfyui_url, prompt_id)
+            raise HTTPException(
+                status_code=504,
+                detail=f"ComfyUI img2img timed out after {max_poll // 60} minutes"
+            )
+    except asyncio.CancelledError:
+        try:
+            await _stop_comfyui_progress_task(ws_stop_event, ws_task)
+            if 'client' in locals() and 'prompt_id' in locals() and prompt_id:
+                await _cancel_comfyui_prompt(client, comfyui_url, prompt_id)
+        finally:
+            raise
     except httpx.ConnectError:
         raise HTTPException(status_code=503, detail=f"ComfyUI not reachable at {comfyui_url}")
 
@@ -1234,6 +1659,11 @@ class ImageVariationRequest(BaseModel):
     model: Optional[str] = None     # "gemini-imagen" | "comfyui-local" — if None, use original's model
     prompt: Optional[str] = None    # Override prompt (for guided variations)
     workflow_id: Optional[str] = None  # ComfyUI workflow to use for img2img (defaults to "sdxl-img2img")
+    denoise: Optional[float] = None
+    mask_base64: Optional[str] = None
+    mask_mime: str = "image/png"
+    mask_grow: Optional[int] = None
+    mask_feather: Optional[float] = None
 
 
 @router.post("/{image_id}/variations", response_model=ImageListResponse)
@@ -1263,6 +1693,16 @@ async def generate_variation(
     model = (request.model if request and request.model else original.get("model")) or "gemini-imagen"
     size = request.size if request and request.size else original.get("size", "1024x1024")
     format = request.format if request and request.format else original.get("format", "png")
+    denoise = _resolve_denoise(request.denoise if request else None, 0.65)
+    mask_grow = _resolve_mask_grow(request.mask_grow if request else None, 8)
+    mask_feather = _resolve_mask_feather(request.mask_feather if request else None, 6.0)
+    mask_bytes = None
+    mask_mime = (request.mask_mime if request else None) or "image/png"
+    if request and request.mask_base64:
+        try:
+            mask_bytes = base64.b64decode(request.mask_base64)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid mask_base64 payload: {exc}")
 
     # Load the SOURCE IMAGE from disk — variations are img2img, they MUST use the original pixels
     source_bytes: Optional[bytes] = None
@@ -1296,6 +1736,7 @@ async def generate_variation(
             # ComfyUI img2img — uploads source image and runs the chosen workflow.
             # NO silent fallback: if user picks ComfyUI and it fails, they see the real error.
             # (Fallback used to hide ComfyUI problems behind confusing Gemini errors.)
+            _ensure_comfyui_png_source(source_mime, "variations")
             comfyui_url = await get_setting("comfyui_url", db)
             comfyui_dir = await get_setting("comfyui_dir", db)
             chosen_workflow = (request.workflow_id if request and request.workflow_id else None) or "sdxl-img2img"
@@ -1312,6 +1753,12 @@ async def generate_variation(
                 comfyui_url=comfyui_url,
                 comfyui_dir=comfyui_dir,
                 workflow_id=chosen_workflow,
+                source_mime=source_mime,
+                mask_bytes=mask_bytes,
+                mask_mime=mask_mime,
+                denoise=denoise,
+                mask_grow=mask_grow,
+                mask_feather=mask_feather,
             )
         else:
             raise HTTPException(
@@ -1373,6 +1820,13 @@ class ImageEditRequest(BaseModel):
     source_mime: str = "image/png"
     prompt: str                            # Edit instruction
     size: str = "1024x1024"
+    model: Optional[str] = None
+    workflow_id: Optional[str] = None
+    denoise: Optional[float] = None
+    mask_base64: Optional[str] = None
+    mask_mime: str = "image/png"
+    mask_grow: Optional[int] = None
+    mask_feather: Optional[float] = None
 
 
 class ImageUploadRequest(BaseModel):
@@ -1486,6 +1940,18 @@ async def edit_image(req: ImageEditRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400,
                             detail="Provide either source_image_id or source_base64")
 
+    try:
+        source_bytes = base64.b64decode(source_b64)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid source image payload: {exc}")
+
+    mask_bytes = None
+    if req.mask_base64:
+        try:
+            mask_bytes = base64.b64decode(req.mask_base64)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid mask_base64 payload: {exc}")
+
     # Determine which model originally created this image
     original_model = None
     original_workflow_id = None
@@ -1495,22 +1961,36 @@ async def edit_image(req: ImageEditRequest, db: AsyncSession = Depends(get_db)):
         original_workflow_id = stored.get("workflow_id")
 
     result = None
-    used_model = original_model
+    preferred_model = req.model or original_model
+    used_model = preferred_model or original_model
+    chosen_workflow = req.workflow_id or original_workflow_id or "sdxl-img2img"
+    denoise = _resolve_denoise(req.denoise, 0.45)
+    mask_grow = _resolve_mask_grow(req.mask_grow, 8)
+    mask_feather = _resolve_mask_feather(req.mask_feather, 6.0)
 
     # Try original model first (same priority as variations endpoint)
-    if original_model == "comfyui-local":
+    if preferred_model == "comfyui-local":
         comfyui_url = await get_setting("comfyui_url", db)
         comfyui_dir = await get_setting("comfyui_dir", db)
         try:
+            _ensure_comfyui_png_source(source_mime, "edits")
             comfyui_available = await ensure_comfyui(comfyui_url)
             if not comfyui_available:
                 raise Exception("ComfyUI not reachable")
-            result = await generate_with_comfyui(
+            result = await generate_img2img_with_comfyui(
+                source_bytes=source_bytes,
                 prompt=req.prompt,
                 comfyui_url=comfyui_url,
-                workflow_id=original_workflow_id,
+                workflow_id=chosen_workflow,
                 comfyui_dir=comfyui_dir,
+                source_mime=source_mime,
+                mask_bytes=mask_bytes,
+                mask_mime=req.mask_mime,
+                denoise=denoise,
+                mask_grow=mask_grow,
+                mask_feather=mask_feather,
             )
+            used_model = "comfyui-local"
         except Exception as comfy_err:
             logger.warning(f"ComfyUI failed for edit, falling back to Gemini: {comfy_err}")
             used_model = None  # will fall through to Gemini below
@@ -1538,7 +2018,7 @@ async def edit_image(req: ImageEditRequest, db: AsyncSession = Depends(get_db)):
         "format": fmt,
         "size": req.size,
         "model": used_model,
-        "workflow_id": original_workflow_id,
+        "workflow_id": chosen_workflow if used_model == "comfyui-local" else original_workflow_id,
         "source_image_id": req.source_image_id,
     })
 

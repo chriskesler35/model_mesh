@@ -70,7 +70,7 @@ export default function PersonaDetailPage() {
     async function fetchData() {
       try {
         const [modelsRes] = await Promise.all([
-          fetch(`${API_BASE}/v1/models`, {
+          fetch(`${API_BASE}/v1/models?active_only=true&usable_only=true&validated_only=true&chat_only=true`, {
             headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
           }).then(r => r.json())
         ])

@@ -5,6 +5,7 @@ import PreferencesTab from '@/components/PreferencesTab'
 import ImageSettingsTab from '@/components/ImageSettingsTab'
 import VoiceAudioTab from '@/components/VoiceAudioTab'
 import { RemoteAccessTab } from './remote'
+import { useToast } from '@/app/ToastProvider'
 
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '@/lib/api'
@@ -14,8 +15,10 @@ const PROVIDER_META: Record<string, { label: string; placeholder: string; link: 
   anthropic:  { label: 'Anthropic',  placeholder: 'sk-ant-…',        link: 'https://console.anthropic.com/settings/keys',    color: 'bg-orange-100 text-orange-800' },
   google:     { label: 'Google',     placeholder: 'AIzaSy…',         link: 'https://aistudio.google.com/app/apikey',          color: 'bg-blue-100 text-blue-800' },
   gemini:     { label: 'Gemini',     placeholder: 'AIzaSy…',         link: 'https://aistudio.google.com/app/apikey',          color: 'bg-blue-100 text-blue-800' },
+  'github-copilot': { label: 'GitHub Copilot OAuth', placeholder: 'gho_… or github_pat_…', link: 'https://github.com/settings/tokens', color: 'bg-slate-100 text-slate-800' },
   openrouter: { label: 'OpenRouter', placeholder: 'sk-or-v1-…',      link: 'https://openrouter.ai/keys',                      color: 'bg-purple-100 text-purple-800' },
   openai:     { label: 'OpenAI',     placeholder: 'sk-…',            link: 'https://platform.openai.com/api-keys',            color: 'bg-green-100 text-green-800' },
+  'openai-oauth': { label: 'OpenAI OAuth', placeholder: 'Paste Codex/ChatGPT OAuth access token…', link: '', color: 'bg-emerald-100 text-emerald-800' },
 }
 
 interface KeyStatus {
@@ -23,6 +26,62 @@ interface KeyStatus {
   env_var: string
   is_set: boolean
   masked_value: string | null
+}
+
+interface ProviderInventory {
+  id: string
+  name: string
+  display_name?: string
+  is_active: boolean
+  model_count: number
+  active_model_count: number
+}
+
+interface RuntimeCredentialStatus {
+  openai_oauth: {
+    provider: string
+    has_access_token: boolean
+    masked_access_token: string | null
+    has_refresh_token: boolean
+    codex_cli_installed: boolean
+    codex_cli_logged_in: boolean
+    codex_cli_status: string | null
+    auth_file: string
+    proxy_base_url: string
+    proxy_reachable: boolean
+    proxy_url_supported: boolean
+    proxy_env_override: boolean
+    using_default_proxy_url: boolean
+    configuration_issue: string | null
+    auth_ready: boolean
+    usable: boolean
+    usability_summary: string
+    recommended_action: string | null
+  }
+  github_copilot: {
+    provider: string
+    has_token: boolean
+    masked_token: string | null
+    source: 'env' | 'collaboration_user' | 'none'
+    usable: boolean
+    collaboration_user_count: number
+    oauth_configured: boolean
+    live_verified: boolean
+    validation_error: string | null
+  }
+}
+
+function getCodexRuntimeBadge(status: RuntimeCredentialStatus['openai_oauth']): {
+  label: string
+  className: string
+} {
+  if (status.usable) {
+    return { label: 'Usable', className: 'bg-emerald-100 text-emerald-800' }
+  }
+  if (status.codex_cli_logged_in || status.auth_ready) {
+    return { label: 'CLI connected', className: 'bg-blue-100 text-blue-800' }
+  }
+  return { label: 'Needs setup', className: 'bg-amber-100 text-amber-800' }
 }
 
 interface ClearImpact {
@@ -35,6 +94,7 @@ interface ClearImpact {
 }
 
 function ApiKeysTab() {
+  const { addToast } = useToast()
   const [keys, setKeys] = useState<KeyStatus[]>([])
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<Record<string, string>>({})
@@ -44,6 +104,18 @@ function ApiKeysTab() {
   const [clearImpact, setClearImpact] = useState<ClearImpact | null>(null)
   const [replacements, setReplacements] = useState<Record<string, string>>({})
   const [clearing, setClearing] = useState(false)
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeCredentialStatus | null>(null)
+  const [providerInventory, setProviderInventory] = useState<Record<string, ProviderInventory>>({})
+
+  const fetchRuntimeStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/v1/api-keys/runtime-status`, { headers: AUTH_HEADERS })
+      if (!res.ok) return
+      setRuntimeStatus(await res.json())
+    } catch (e) {
+      console.error('Failed to fetch runtime credential status', e)
+    }
+  }, [])
 
   const fetchKeys = useCallback(async () => {
     try {
@@ -57,7 +129,25 @@ function ApiKeysTab() {
     }
   }, [])
 
-  useEffect(() => { fetchKeys() }, [fetchKeys])
+  const fetchProviderInventory = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/v1/providers?active_only=false`, { headers: AUTH_HEADERS })
+      if (!res.ok) return
+      const data = await res.json()
+      const inventory = Object.fromEntries(
+        (data.data || []).map((provider: ProviderInventory) => [provider.name, provider])
+      )
+      setProviderInventory(inventory)
+    } catch (e) {
+      console.error('Failed to fetch providers', e)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchKeys()
+    fetchRuntimeStatus()
+    fetchProviderInventory()
+  }, [fetchKeys, fetchRuntimeStatus, fetchProviderInventory])
 
   const saveKey = async (provider: string) => {
     const value = editing[provider]?.trim()
@@ -81,6 +171,8 @@ function ApiKeysTab() {
       ))
       setEditing(e => { const n = { ...e }; delete n[provider]; return n })
       setSaved(s => ({ ...s, [provider]: true }))
+      await fetchRuntimeStatus()
+      await fetchProviderInventory()
       setTimeout(() => setSaved(s => ({ ...s, [provider]: false })), 2500)
     } catch (e: any) {
       setErrors(err => ({ ...err, [provider]: e.message }))
@@ -115,6 +207,8 @@ function ApiKeysTab() {
       })
       if (res.ok) {
         setKeys(prev => prev.map(k => k.provider === provider ? { ...k, is_set: false, masked_value: null } : k))
+        await fetchRuntimeStatus()
+        await fetchProviderInventory()
       }
       return
     }
@@ -143,8 +237,10 @@ function ApiKeysTab() {
       }
       const result = await res.json()
       setKeys(prev => prev.map(k => k.provider === clearImpact.provider ? { ...k, is_set: false, masked_value: null } : k))
+      await fetchRuntimeStatus()
+      await fetchProviderInventory()
       alert(
-        `✓ ${PROVIDER_META[clearImpact.provider]?.label} key cleared.\n\n` +
+        `✓ ${PROVIDER_META[clearImpact.provider]?.label} provider removed.\n\n` +
         `Deactivated ${result.deactivated_models} models.\n` +
         `Reassigned ${result.reassigned_personas} personas, ${result.reassigned_agents} agents.`
       )
@@ -175,7 +271,52 @@ function ApiKeysTab() {
     window.location.href = authUrl
   }
 
+  const connectGitHubOAuth = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/v1/auth/github/authorize?origin=${encodeURIComponent(window.location.origin)}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const { authorize_url, state } = await res.json()
+      sessionStorage.setItem('github_oauth_state', state)
+      sessionStorage.setItem('github_oauth_redirect', '/settings?tab=api-keys')
+      window.location.href = authorize_url
+    } catch (e: any) {
+      addToast({ type: 'error', title: 'GitHub OAuth failed', message: e.message || 'Could not start GitHub sign-in', autoClose: 4000 })
+    }
+  }
+
+  const launchCodexCliLogin = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/v1/api-keys/openai-oauth/launch-cli-login`, {
+        method: 'POST',
+        headers: AUTH_HEADERS,
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Could not launch Codex CLI login')
+      await fetchRuntimeStatus()
+
+      const refreshedRes = await fetch(`${API_BASE}/v1/api-keys/runtime-status`, { headers: AUTH_HEADERS })
+      const refreshedStatus: RuntimeCredentialStatus | null = refreshedRes.ok ? await refreshedRes.json() : null
+      const codexStatus = refreshedStatus?.openai_oauth
+      const toastMessage = codexStatus?.usable
+        ? (data.message || 'Codex runtime is ready.')
+        : codexStatus?.codex_cli_logged_in
+        ? `${data.message || 'Logged in using ChatGPT'} Runtime still needs an OpenAI-compatible HTTP proxy or OPENAI_API_KEY.`
+        : (data.message || 'Refresh runtime status after finishing the login flow.')
+
+      addToast({
+        type: codexStatus?.usable ? 'success' : (data.started ? 'info' : 'warning'),
+        title: data.started ? 'Codex login started' : 'Codex already connected',
+        message: toastMessage,
+        autoClose: 6500,
+      })
+    } catch (e: any) {
+      addToast({ type: 'error', title: 'Codex login failed', message: e.message || 'Could not launch Codex CLI login', autoClose: 5000 })
+    }
+  }
+
   if (loading) return <div className="text-sm text-gray-500 py-8 text-center">Loading keys…</div>
+
+  const codexRuntimeBadge = runtimeStatus ? getCodexRuntimeBadge(runtimeStatus.openai_oauth) : null
 
   return (
     <div className="space-y-4">
@@ -188,10 +329,99 @@ function ApiKeysTab() {
         <strong>🔗 OpenRouter OAuth</strong> — Click "Connect with OAuth" to authorize via your OpenRouter account
         (no copy/paste needed). OpenRouter proxies GPT-4, Claude, Llama, and many more models through one connection.
       </div>
+      <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 text-sm text-slate-700">
+        <strong>OAuth-backed providers</strong> — GitHub Copilot uses a GitHub OAuth or PAT token, and OpenAI OAuth
+        seeds the local Codex auth file used by the OAuth proxy. These are separate from normal API keys.
+      </div>
+
+      {runtimeStatus && (
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="font-semibold">OpenAI Codex Runtime</p>
+                <p className="mt-1 text-emerald-800/80">
+                  {runtimeStatus.openai_oauth.usability_summary}
+                </p>
+              </div>
+              <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${codexRuntimeBadge?.className || 'bg-amber-100 text-amber-800'}`}>
+                {codexRuntimeBadge?.label || 'Needs setup'}
+              </span>
+            </div>
+            <div className="mt-3 space-y-1 text-xs text-emerald-900/90">
+              <div>Access token: {runtimeStatus.openai_oauth.has_access_token ? (runtimeStatus.openai_oauth.masked_access_token || 'present') : 'missing'}</div>
+              <div>Refresh token: {runtimeStatus.openai_oauth.has_refresh_token ? 'present' : 'missing'}</div>
+              <div>Codex CLI: {runtimeStatus.openai_oauth.codex_cli_installed ? (runtimeStatus.openai_oauth.codex_cli_logged_in ? 'installed and logged in' : 'installed but not logged in') : 'not installed'}</div>
+              <div>Proxy: {runtimeStatus.openai_oauth.proxy_reachable ? `online at ${runtimeStatus.openai_oauth.proxy_base_url}` : `offline at ${runtimeStatus.openai_oauth.proxy_base_url}`}</div>
+              <div>Proxy URL: {runtimeStatus.openai_oauth.proxy_url_supported ? 'OpenAI-compatible http(s)' : 'unsupported transport'}</div>
+              <div>Proxy source: {runtimeStatus.openai_oauth.proxy_env_override ? 'CODEX_OAUTH_PROXY_BASE_URL override' : 'default built-in assumption'}</div>
+              <div>Auth file: {runtimeStatus.openai_oauth.auth_file}</div>
+              {runtimeStatus.openai_oauth.codex_cli_status && (
+                <div className="text-[11px] text-emerald-900/70">CLI status: {runtimeStatus.openai_oauth.codex_cli_status}</div>
+              )}
+              {runtimeStatus.openai_oauth.configuration_issue && (
+                <div className="text-[11px] text-amber-800">Issue: {runtimeStatus.openai_oauth.configuration_issue}</div>
+              )}
+              {runtimeStatus.openai_oauth.recommended_action && (
+                <div className="text-[11px] text-emerald-900/70">Next step: {runtimeStatus.openai_oauth.recommended_action}</div>
+              )}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                onClick={launchCodexCliLogin}
+                className="text-xs px-2 py-1 rounded border border-emerald-300 hover:bg-emerald-100 text-emerald-800 font-medium">
+                {runtimeStatus.openai_oauth.codex_cli_logged_in ? 'Reconnect Codex CLI' : 'Launch Codex CLI Login'}
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-900">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="font-semibold">GitHub Copilot Runtime</p>
+                <p className="mt-1 text-slate-700">
+                  {runtimeStatus.github_copilot.usable
+                    ? 'GitHub token is present and passed a live Copilot API probe.'
+                    : runtimeStatus.github_copilot.has_token
+                    ? 'GitHub token is present, but the live Copilot probe failed.'
+                    : 'No GitHub token is available yet. Add one here or on a collaboration user.'}
+                </p>
+              </div>
+              <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${runtimeStatus.github_copilot.usable ? 'bg-slate-200 text-slate-800' : 'bg-amber-100 text-amber-800'}`}>
+                {runtimeStatus.github_copilot.usable ? 'Live verified' : runtimeStatus.github_copilot.has_token ? 'Needs attention' : 'Missing token'}
+              </span>
+            </div>
+            <div className="mt-3 space-y-1 text-xs text-slate-700">
+              <div>Token: {runtimeStatus.github_copilot.has_token ? (runtimeStatus.github_copilot.masked_token || 'present') : 'missing'}</div>
+              <div>Source: {runtimeStatus.github_copilot.source === 'collaboration_user' ? 'Collaboration user token' : runtimeStatus.github_copilot.source === 'env' ? 'Environment / API Keys tab' : 'None'}</div>
+              <div>Users with GitHub token: {runtimeStatus.github_copilot.collaboration_user_count}</div>
+              <div>OAuth app: {runtimeStatus.github_copilot.oauth_configured ? 'configured' : 'not configured'}</div>
+              <div>Live probe: {runtimeStatus.github_copilot.live_verified ? 'passed' : 'not verified'}</div>
+              {runtimeStatus.github_copilot.validation_error && (
+                <div className="text-[11px] text-slate-600">Probe detail: {runtimeStatus.github_copilot.validation_error}</div>
+              )}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                onClick={connectGitHubOAuth}
+                className="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100 text-slate-800 font-medium">
+                {runtimeStatus.github_copilot.has_token ? 'Reconnect GitHub OAuth' : 'Connect with GitHub OAuth'}
+              </button>
+              <button
+                onClick={fetchRuntimeStatus}
+                className="text-xs px-2 py-1 rounded border border-slate-200 hover:bg-slate-100 text-slate-600">
+                Refresh status
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {keys.map((key) => {
         const meta = PROVIDER_META[key.provider]
         const isEditing = key.provider in editing
+        const inventory = providerInventory[key.provider]
+        const canRemoveProvider = key.provider !== 'openai-oauth' && (key.is_set || Boolean(inventory?.is_active) || (inventory?.active_model_count || 0) > 0)
         return (
           <div key={key.provider} className="bg-white shadow sm:rounded-lg overflow-hidden">
             <div className="px-4 py-4 sm:px-6">
@@ -205,6 +435,9 @@ function ApiKeysTab() {
                     ? <span className="text-xs text-green-600 font-medium">✓ Set</span>
                     : <span className="text-xs text-red-500 font-medium">✗ Not set</span>
                   }
+                  {inventory && inventory.active_model_count > 0 && (
+                    <span className="text-xs text-gray-500 font-medium">{inventory.active_model_count} active models</span>
+                  )}
                   {saved[key.provider] && <span className="text-xs text-green-600 animate-pulse">Saved!</span>}
                 </div>
                 <div className="flex items-center gap-2">
@@ -221,6 +454,20 @@ function ApiKeysTab() {
                       {key.is_set ? 'Reconnect with OAuth' : '🔗 Connect with OAuth'}
                     </button>
                   )}
+                  {!isEditing && key.provider === 'github-copilot' && (
+                    <button
+                      onClick={connectGitHubOAuth}
+                      className="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium">
+                      {key.is_set ? 'Reconnect GitHub OAuth' : 'Connect GitHub OAuth'}
+                    </button>
+                  )}
+                  {!isEditing && key.provider === 'openai-oauth' && (
+                    <button
+                      onClick={launchCodexCliLogin}
+                      className="text-xs px-2 py-1 rounded border border-emerald-300 hover:bg-emerald-50 text-emerald-700 font-medium">
+                      Launch Codex CLI Login
+                    </button>
+                  )}
                   {!isEditing && (
                     <button
                       onClick={() => setEditing(e => ({ ...e, [key.provider]: '' }))}
@@ -228,10 +475,10 @@ function ApiKeysTab() {
                       {key.is_set ? 'Update' : 'Set Key'}
                     </button>
                   )}
-                  {key.is_set && !isEditing && (
+                  {canRemoveProvider && !isEditing && (
                     <button onClick={() => clearKey(key.provider)}
                       className="text-xs px-2 py-1 rounded border border-red-200 hover:bg-red-50 text-red-500">
-                      Clear
+                      Remove Provider
                     </button>
                   )}
                 </div>
@@ -239,6 +486,11 @@ function ApiKeysTab() {
 
               {key.is_set && !isEditing && (
                 <div className="mt-2 font-mono text-sm text-gray-500">{key.masked_value}</div>
+              )}
+              {!key.is_set && inventory?.is_active && inventory.active_model_count > 0 && (
+                <div className="mt-2 text-xs text-amber-600">
+                  This provider still has active models in the catalog. Remove Provider to deactivate them.
+                </div>
               )}
 
               {isEditing && (
@@ -667,7 +919,7 @@ function ServerTab() {
             name: 'devforgeai-backend',
             status: backendStatus?.running ? 'online' : 'stopped',
             pid: backendStatus?.pid ?? null,
-            port: 19000,
+            port: backendStatus?.port ?? 19001,
             memory_mb: null,
             restarts: 0,
           },

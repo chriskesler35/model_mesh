@@ -7,10 +7,232 @@ import { renderMarkdown } from '@/lib/markdown'
 import { useState, useEffect, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 
-// SandboxPanel stub — sandbox.tsx not yet implemented
-const SandboxPanel = ({ projectId }: { projectId: string }) => (
-  <div className="text-sm text-gray-500 py-8 text-center">Sandbox coming soon.</div>
-)
+// ─── Sandbox Panel ──────────────────────────────────────────────────────────
+function SandboxPanel({ projectId }: { projectId: string }) {
+  const [status, setStatus] = useState<any>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [packages, setPackages] = useState('')
+  const [snapshotMsg, setSnapshotMsg] = useState('DevForgeAI snapshot')
+  const [envKey, setEnvKey] = useState('')
+  const [envVal, setEnvVal] = useState('')
+  const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+
+  const fb = (type: 'ok' | 'err', text: string) => {
+    setFeedback({ type, text })
+    setTimeout(() => setFeedback(null), 4000)
+  }
+
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await fetch(`${API_BASE}/v1/sandbox/projects/${projectId}/status`, { headers: AUTH_HEADERS })
+      if (res.ok) setStatus(await res.json())
+    } catch { /* ignore */ }
+    finally { setLoading(false) }
+  }, [projectId])
+
+  useEffect(() => { refresh() }, [refresh])
+
+  const act = async (label: string, url: string, method: string, body?: any) => {
+    setBusy(label)
+    try {
+      const res = await fetch(`${API_BASE}${url}`, {
+        method, headers: AUTH_HEADERS, body: body ? JSON.stringify(body) : undefined
+      })
+      const data = await res.json()
+      if (res.ok) { fb('ok', data.message || `${label} succeeded`); await refresh() }
+      else fb('err', data.detail || `${label} failed`)
+    } catch (e: any) { fb('err', e.message) }
+    finally { setBusy(null) }
+  }
+
+  if (loading) return <div className="text-sm text-gray-400 py-8 text-center">Loading sandbox status…</div>
+  if (!status) return <div className="text-sm text-red-400 py-8 text-center">Failed to load sandbox status</div>
+
+  return (
+    <div className="max-w-3xl mx-auto space-y-5">
+      {feedback && (
+        <div className={`px-4 py-2 rounded-lg text-sm border ${feedback.type === 'ok' ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border-green-200 dark:border-green-700' : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 border-red-200 dark:border-red-700'}`}>
+          {feedback.type === 'ok' ? '✓ ' : '✗ '}{feedback.text}
+        </div>
+      )}
+
+      {/* Status overview */}
+      <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-5">
+        <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">📊 Sandbox Status</h3>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+          <div className="p-3 bg-gray-50 dark:bg-gray-900 rounded-lg">
+            <p className="text-gray-400 uppercase tracking-wider mb-1">Path</p>
+            <p className={`font-mono ${status.path_exists ? 'text-green-600' : 'text-red-500'}`}>
+              {status.path_exists ? '✓ exists' : '✗ missing'}
+            </p>
+          </div>
+          <div className="p-3 bg-gray-50 dark:bg-gray-900 rounded-lg">
+            <p className="text-gray-400 uppercase tracking-wider mb-1">Venv</p>
+            <p className={`font-mono ${status.venv_exists ? 'text-green-600' : 'text-gray-500'}`}>
+              {status.venv_exists ? '✓ active' : '—'}
+            </p>
+          </div>
+          <div className="p-3 bg-gray-50 dark:bg-gray-900 rounded-lg">
+            <p className="text-gray-400 uppercase tracking-wider mb-1">Git</p>
+            <p className={`font-mono ${status.git_initialized ? 'text-green-600' : 'text-gray-500'}`}>
+              {status.git_initialized ? '✓ initialized' : '—'}
+            </p>
+          </div>
+          <div className="p-3 bg-gray-50 dark:bg-gray-900 rounded-lg">
+            <p className="text-gray-400 uppercase tracking-wider mb-1">Packages</p>
+            <p className="font-mono text-gray-700 dark:text-gray-300">
+              {status.installed_packages?.length || 0}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Virtual Environment */}
+      <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-5">
+        <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">🐍 Virtual Environment</h3>
+        {status.venv_exists ? (
+          <div className="space-y-3">
+            <p className="text-xs text-gray-500 font-mono">{status.venv_path}</p>
+            {status.installed_packages?.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {status.installed_packages.map((pkg: string) => (
+                  <span key={pkg} className="text-xs px-2 py-0.5 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400 rounded-full border border-blue-200 dark:border-blue-700">{pkg}</span>
+                ))}
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <input value={packages} onChange={e => setPackages(e.target.value)}
+                placeholder="flask requests numpy…"
+                className="flex-1 text-sm px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-white" />
+              <button onClick={() => { if (packages.trim()) act('Install', `/v1/sandbox/projects/${projectId}/install`, 'POST', { requirements: packages.trim() }) }}
+                disabled={!!busy || !packages.trim()}
+                className="px-3 py-1.5 text-xs font-medium bg-blue-500 hover:bg-blue-600 text-white rounded-lg disabled:opacity-50">
+                {busy === 'Install' ? '…' : 'Install'}
+              </button>
+            </div>
+            <button onClick={() => act('Delete venv', `/v1/sandbox/projects/${projectId}/venv`, 'DELETE')}
+              disabled={!!busy}
+              className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50">
+              Remove virtual environment
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <p className="text-xs text-gray-500">No virtual environment. Create one to install packages in an isolated Python environment.</p>
+            <div className="flex items-center gap-2">
+              <input value={packages} onChange={e => setPackages(e.target.value)}
+                placeholder="Initial packages (optional): flask requests…"
+                className="flex-1 text-sm px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-white" />
+              <button onClick={() => act('Create venv', `/v1/sandbox/projects/${projectId}/venv`, 'POST', { requirements: packages.trim() || null })}
+                disabled={!!busy}
+                className="px-3 py-1.5 text-xs font-medium bg-green-500 hover:bg-green-600 text-white rounded-lg disabled:opacity-50">
+                {busy === 'Create venv' ? '…' : 'Create Venv'}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Git Snapshots */}
+      <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-5">
+        <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">📸 Git Snapshots</h3>
+        {!status.git_initialized ? (
+          <div className="space-y-3">
+            <p className="text-xs text-gray-500">Git not initialized. Initialize to enable snapshots and rollbacks.</p>
+            <button onClick={() => act('Git init', `/v1/sandbox/projects/${projectId}/git/init`, 'POST')}
+              disabled={!!busy}
+              className="px-3 py-1.5 text-xs font-medium bg-gray-700 hover:bg-gray-800 text-white rounded-lg disabled:opacity-50">
+              {busy === 'Git init' ? '…' : 'Initialize Git'}
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {/* Git status */}
+            {status.git_status && (
+              <pre className="text-xs font-mono text-gray-500 bg-gray-50 dark:bg-gray-900 p-2 rounded-lg overflow-x-auto max-h-24">{status.git_status || '(clean)'}</pre>
+            )}
+            {/* Create snapshot */}
+            <div className="flex items-center gap-2">
+              <input value={snapshotMsg} onChange={e => setSnapshotMsg(e.target.value)}
+                placeholder="Snapshot message"
+                className="flex-1 text-sm px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-white" />
+              <button onClick={() => act('Snapshot', `/v1/sandbox/projects/${projectId}/snapshot`, 'POST', { message: snapshotMsg })}
+                disabled={!!busy || !snapshotMsg.trim()}
+                className="px-3 py-1.5 text-xs font-medium bg-orange-500 hover:bg-orange-600 text-white rounded-lg disabled:opacity-50">
+                {busy === 'Snapshot' ? '…' : '📸 Snapshot'}
+              </button>
+            </div>
+            {/* Snapshot history */}
+            {status.snapshots?.length > 0 && (
+              <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+                <table className="w-full text-xs">
+                  <thead><tr className="bg-gray-50 dark:bg-gray-900"><th className="px-3 py-1.5 text-left text-gray-500 font-medium">Hash</th><th className="px-3 py-1.5 text-left text-gray-500 font-medium">Message</th><th className="px-3 py-1.5 text-right text-gray-500 font-medium">Actions</th></tr></thead>
+                  <tbody>
+                    {status.snapshots.map((s: { hash: string; message: string }) => (
+                      <tr key={s.hash} className="border-t border-gray-100 dark:border-gray-800">
+                        <td className="px-3 py-1.5 font-mono text-orange-600">{s.hash}</td>
+                        <td className="px-3 py-1.5 text-gray-700 dark:text-gray-300">{s.message}</td>
+                        <td className="px-3 py-1.5 text-right">
+                          <button onClick={() => { if (confirm(`Rollback to ${s.hash}? A safety snapshot will be created first.`)) act('Rollback', `/v1/sandbox/projects/${projectId}/rollback`, 'POST', { commit_hash: s.hash }) }}
+                            disabled={!!busy}
+                            className="text-orange-500 hover:text-orange-700 font-medium disabled:opacity-50">
+                            ↩ Rollback
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {(!status.snapshots || status.snapshots.length === 0) && (
+              <p className="text-xs text-gray-400">No snapshots yet. Create one to save the current state.</p>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Environment Variables */}
+      <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-5">
+        <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">🔑 Environment Variables</h3>
+        {status.env_vars && Object.keys(status.env_vars).length > 0 ? (
+          <div className="space-y-2 mb-3">
+            {Object.entries(status.env_vars).map(([k, v]) => (
+              <div key={k} className="flex items-center gap-2 text-xs">
+                <span className="font-mono text-gray-700 dark:text-gray-300 font-semibold">{k}</span>
+                <span className="text-gray-400">=</span>
+                <span className="font-mono text-gray-500 truncate flex-1">{String(v)}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-gray-400 mb-3">No environment variables set.</p>
+        )}
+        <div className="flex items-center gap-2">
+          <input value={envKey} onChange={e => setEnvKey(e.target.value)}
+            placeholder="KEY"
+            className="w-32 text-xs px-2 py-1.5 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 font-mono text-gray-900 dark:text-white" />
+          <span className="text-gray-400">=</span>
+          <input value={envVal} onChange={e => setEnvVal(e.target.value)}
+            placeholder="value"
+            className="flex-1 text-xs px-2 py-1.5 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 font-mono text-gray-900 dark:text-white" />
+          <button onClick={() => {
+            if (!envKey.trim()) return
+            const current = { ...(status.env_vars || {}), [envKey.trim()]: envVal }
+            act('Set env', `/v1/sandbox/projects/${projectId}/env-vars`, 'POST', current)
+            setEnvKey(''); setEnvVal('')
+          }}
+            disabled={!!busy || !envKey.trim()}
+            className="px-3 py-1.5 text-xs font-medium bg-purple-500 hover:bg-purple-600 text-white rounded-lg disabled:opacity-50">
+            {busy === 'Set env' ? '…' : 'Set'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 
 interface FileNode { name: string; path: string; type: 'file' | 'dir'; size: number; children?: FileNode[] }

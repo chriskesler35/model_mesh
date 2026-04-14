@@ -54,7 +54,7 @@ export default function PersonaForm() {
   useEffect(() => {
     async function fetchData() {
       try {
-        const modelsRes = await fetch(`${API_BASE}/v1/models`, {
+        const modelsRes = await fetch(`${API_BASE}/v1/models?active_only=true&usable_only=true&validated_only=true&chat_only=true`, {
           headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
         })
         const modelsData = await modelsRes.json()

@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import { useState, useEffect } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 
@@ -122,6 +122,7 @@ function UserMenu({ collapsed }: { collapsed: boolean }) {
 
 export default function Navigation() {
   const pathname = usePathname()
+  const router = useRouter()
 
   // All hooks must be declared before any conditional returns
   const [mounted, setMounted] = useState(false)
@@ -148,6 +149,12 @@ export default function Navigation() {
     const interval = setInterval(check, 15000)
     return () => clearInterval(interval)
   }, [])
+
+  useEffect(() => {
+    for (const item of NAV_ITEMS) {
+      router.prefetch(item.href)
+    }
+  }, [router])
 
   const toggle = () => {
     const next = !collapsed

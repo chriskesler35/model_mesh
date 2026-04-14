@@ -8,6 +8,7 @@ import { api } from '@/lib/api'
 
 interface ValidationResult {
   valid: boolean
+  live_verified: boolean
   model_id: string
   display_name?: string
   provider: string
@@ -32,12 +33,18 @@ interface Model {
   cost_per_1m_input: number
   cost_per_1m_output: number
   capabilities: Record<string, boolean>
+  validation_status?: string
+  validated_at?: string | null
+  validation_source?: string | null
+  validation_warning?: string | null
+  validation_error?: string | null
 }
 
 interface Provider {
   id: string
   name: string
   display_name?: string
+  is_active?: boolean
 }
 
 interface ModelSuggestion {
@@ -47,6 +54,36 @@ interface ModelSuggestion {
   cost_per_1m_input?: number
   cost_per_1m_output?: number
   capabilities?: Record<string, boolean>
+}
+
+interface SyncProviderStatus {
+  key_set: boolean
+  in_db: number
+  sync_mode?: string
+}
+
+interface SyncProviderDetail {
+  configured: boolean
+  source: string
+  discovered: number
+  added: number
+  skipped: number
+}
+
+interface SyncRunResult {
+  ok: boolean
+  message: string
+  errors?: string[]
+  provider_details?: Record<string, SyncProviderDetail>
+}
+
+interface CatalogValidationResult {
+  ok: boolean
+  message: string
+  processed: number
+  validated: number
+  needs_review: number
+  failed: number
 }
 
 function formatCost(cost: number): string {
@@ -63,11 +100,26 @@ function formatContext(tokens: number | undefined): string {
 
 interface SyncStatus {
   ollama: { reachable: boolean; model_count: number; in_db: number }
-  providers: Record<string, { key_set: boolean; in_db: number }>
+  providers: Record<string, SyncProviderStatus>
+}
+
+function formatSyncMode(mode?: string): string {
+  if (!mode) return 'Catalog sync'
+  return mode.replace(/_/g, ' ')
+}
+
+function formatSyncSource(source?: string): string {
+  if (!source) return 'unknown'
+  if (source === 'provider_api') return 'live provider catalog'
+  if (source === 'codex_proxy') return 'Codex proxy catalog'
+  if (source === 'static_catalog') return 'bundled fallback catalog'
+  if (source === 'unavailable') return 'not configured'
+  return source.replace(/_/g, ' ')
 }
 
 export default function ModelsPage() {
   const [models, setModels] = useState<Model[]>([])
+  const [reviewModels, setReviewModels] = useState<Model[]>([])
   const [providers, setProviders] = useState<Provider[]>([])
   const [loading, setLoading] = useState(true)
   const [showAddModal, setShowAddModal] = useState(false)
@@ -77,10 +129,14 @@ export default function ModelsPage() {
   const [validating, setValidating] = useState(false)
   const [validation, setValidation] = useState<ValidationResult | null>(null)
   const [validationError, setValidationError] = useState<string | null>(null)
+  const [revalidatingId, setRevalidatingId] = useState<string | null>(null)
   const validateTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
   const [syncing, setSyncing] = useState(false)
-  const [syncResult, setSyncResult] = useState<string | null>(null)
+  const [syncResult, setSyncResult] = useState<SyncRunResult | null>(null)
+  const [catalogValidating, setCatalogValidating] = useState(false)
+  const [catalogValidationResult, setCatalogValidationResult] = useState<CatalogValidationResult | null>(null)
+  const [showReviewSection, setShowReviewSection] = useState(false)
   const [formData, setFormData] = useState<{
     model_id: string
     display_name: string
@@ -101,14 +157,40 @@ export default function ModelsPage() {
     is_active: true
   })
 
+  const fetchAllModels = async (query = ''): Promise<Model[]> => {
+    const pageSize = 250
+    let offset = 0
+    let allModels: Model[] = []
+    let hasMore = true
+
+    while (hasMore) {
+      const connector = query ? `${query}&` : ''
+      const res = await fetch(`${API_BASE}/v1/models?${connector}limit=${pageSize}&offset=${offset}`, { headers: AUTH_HEADERS })
+      const data = await res.json()
+      const pageModels: Model[] = data.data || []
+
+      allModels = allModels.concat(pageModels)
+      hasMore = Boolean(data.has_more)
+      offset += pageSize
+
+      if (pageModels.length === 0) {
+        break
+      }
+    }
+
+    return allModels
+  }
+
   const fetchModels = async () => {
     try {
-      const [modelsRes, providersRes] = await Promise.all([
-        fetch(`${API_BASE}/v1/models`, { headers: AUTH_HEADERS }).then(r => r.json()),
+      const [validatedModelsRes, allModelsRes, providersRes] = await Promise.all([
+        fetchAllModels('active_only=true&validated_only=true'),
+        fetchAllModels(),
         fetch(`${API_BASE}/v1/providers`, { headers: AUTH_HEADERS }).then(r => r.json()),
       ])
-      setModels(modelsRes.data || [])
-      setProviders(providersRes.data || [])
+      setModels(validatedModelsRes || [])
+      setReviewModels((allModelsRes || []).filter((model: Model) => model.validation_status !== 'validated' || !model.is_active))
+      setProviders((providersRes.data || []).filter((provider: Provider) => provider.is_active !== false))
     } catch (e) {
       console.error('Failed to fetch models:', e)
     }
@@ -126,15 +208,45 @@ export default function ModelsPage() {
     setSyncResult(null)
     try {
       const res = await fetch(`${API_BASE}/v1/models/sync`, { method: 'POST', headers: AUTH_HEADERS })
-      const data = await res.json()
-      setSyncResult(data.message || 'Sync complete')
+      const data: SyncRunResult = await res.json()
+      setSyncResult(data)
       await fetchModels()
       await fetchSyncStatus()
     } catch (e: any) {
-      setSyncResult('Sync failed — check backend logs')
+      setSyncResult({ ok: false, message: 'Sync failed — check backend logs' })
     } finally {
       setSyncing(false)
       setTimeout(() => setSyncResult(null), 5000)
+    }
+  }
+
+  const runCatalogValidation = async () => {
+    setCatalogValidating(true)
+    setCatalogValidationResult(null)
+    try {
+      const res = await fetch(`${API_BASE}/v1/models/validate-catalog`, {
+        method: 'POST',
+        headers: AUTH_HEADERS,
+      })
+      const data: CatalogValidationResult = await res.json()
+      setCatalogValidationResult(data)
+      await fetchModels()
+      await fetchSyncStatus()
+      if ((data.needs_review || 0) > 0 || (data.failed || 0) > 0) {
+        setShowReviewSection(true)
+      }
+    } catch (e) {
+      setCatalogValidationResult({
+        ok: false,
+        message: 'Catalog validation failed — check backend logs',
+        processed: 0,
+        validated: 0,
+        needs_review: 0,
+        failed: 0,
+      })
+    } finally {
+      setCatalogValidating(false)
+      setTimeout(() => setCatalogValidationResult(null), 7000)
     }
   }
 
@@ -279,6 +391,10 @@ export default function ModelsPage() {
 
   const handleAddModel = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (!validation?.live_verified) {
+      setValidationError('This model must pass a live validation check before it can be added.')
+      return
+    }
     try {
       const res = await fetch(`${API_BASE}/v1/models`, {
         method: 'POST',
@@ -302,9 +418,15 @@ export default function ModelsPage() {
           capabilities: { streaming: true },
           is_active: true
         })
+        setValidation(null)
+        setValidationError(null)
+      } else {
+        const data = await res.json().catch(() => ({}))
+        setValidationError(data.detail || 'Failed to add model')
       }
     } catch (e) {
       console.error('Failed to add model:', e)
+      setValidationError('Failed to add model')
     }
   }
 
@@ -323,7 +445,7 @@ export default function ModelsPage() {
       })
       if (res.ok) {
         const data = await res.json()
-        setModels(models.filter(m => m.id !== model.id))
+        await fetchModels()
         
         // Show affected personas if any
         if (data.affected_personas && data.affected_personas.length > 0) {
@@ -350,10 +472,35 @@ export default function ModelsPage() {
         body: JSON.stringify({ is_active: !model.is_active })
       })
       if (res.ok) {
-        setModels(models.map(m => m.id === model.id ? { ...m, is_active: !m.is_active } : m))
+        await fetchModels()
+      } else {
+        const data = await res.json().catch(() => ({}))
+        alert(data.detail || 'Failed to update model')
       }
     } catch (e) {
       console.error('Failed to toggle model:', e)
+    }
+  }
+
+  const handleRevalidateModel = async (model: Model) => {
+    try {
+      setRevalidatingId(model.id)
+      const res = await fetch(`${API_BASE}/v1/models/${model.id}/revalidate`, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer modelmesh_local_dev_key'
+        }
+      })
+      const data = await res.json().catch(() => ({}))
+      if (res.ok) {
+        await fetchModels()
+      } else {
+        alert(data.detail || 'Failed to revalidate model')
+      }
+    } catch (e) {
+      console.error('Failed to revalidate model:', e)
+    } finally {
+      setRevalidatingId(null)
     }
   }
 
@@ -372,6 +519,101 @@ export default function ModelsPage() {
     acc[provider].push(model)
     return acc
   }, {} as Record<string, Model[]>)
+
+  const reviewGrouped = reviewModels.reduce((acc, model) => {
+    const provider = model.provider_name || 'Unknown'
+    if (!acc[provider]) acc[provider] = []
+    acc[provider].push(model)
+    return acc
+  }, {} as Record<string, Model[]>)
+
+  const renderModelGroups = (groupMap: Record<string, Model[]>, emptyLabel: string) => {
+    const entries = Object.entries(groupMap)
+    if (entries.length === 0) {
+      return (
+        <div className="text-center py-12">
+          <h3 className="mt-2 text-sm font-medium text-gray-900 dark:text-white">{emptyLabel}</h3>
+        </div>
+      )
+    }
+
+    return entries.map(([provider, providerModels]) => (
+      <div key={provider} className="mb-8">
+        <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4 capitalize">{provider}</h2>
+        <div className="bg-white dark:bg-gray-800 shadow sm:rounded-lg">
+          <div className="w-full overflow-x-auto">
+            <table className="min-w-[920px] w-full divide-y divide-gray-200 dark:divide-gray-700">
+              <thead className="bg-gray-50 dark:bg-gray-700">
+                <tr>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Model</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Context</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Input Cost</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Output Cost</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Capabilities</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Status</th>
+                  <th className="sticky right-0 z-10 bg-gray-50 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 shadow-[-12px_0_12px_-12px_rgba(15,23,42,0.2)] dark:bg-gray-700 dark:text-gray-300 sm:px-6">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                {providerModels.map((model) => (
+                  <tr key={model.id} className="group hover:bg-gray-50 dark:hover:bg-gray-700">
+                    <td className="px-4 py-4 align-top sm:px-6">
+                      <div className="text-sm font-medium text-gray-900 dark:text-white">{model.display_name || model.model_id}</div>
+                      <div className="max-w-[18rem] break-all text-sm text-gray-500 dark:text-gray-400">{model.model_id}</div>
+                    </td>
+                    <td className="px-4 py-4 whitespace-nowrap align-top sm:px-6"><span className="text-sm text-gray-900 dark:text-white">{formatContext(model.context_window)} tokens</span></td>
+                    <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white align-top sm:px-6">{formatCost(model.cost_per_1m_input)}</td>
+                    <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white align-top sm:px-6">{formatCost(model.cost_per_1m_output)}</td>
+                    <td className="px-4 py-4 align-top sm:px-6">
+                      <div className="flex max-w-[12rem] flex-wrap gap-1">
+                        {Object.entries(model.capabilities || {}).map(([key, value]) => value && (
+                          <span key={key} className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200">{key}</span>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="px-4 py-4 align-top sm:px-6">
+                      <div className="flex max-w-[16rem] flex-col gap-1">
+                        <button
+                          onClick={() => handleToggleActive(model)}
+                          className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium w-fit ${
+                            model.is_active
+                              ? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200'
+                              : 'bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200'
+                          }`}
+                        >
+                          {model.is_active ? 'Active' : 'Inactive'}
+                        </button>
+                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium w-fit ${
+                          model.validation_status === 'validated'
+                            ? 'bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200'
+                            : model.validation_status === 'failed'
+                              ? 'bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200'
+                              : 'bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200'
+                        }`}>
+                          {model.validation_status === 'validated' ? 'Validated' : model.validation_status === 'failed' ? 'Validation failed' : 'Needs review'}
+                        </span>
+                        {(model.validation_warning || model.validation_error) && (
+                          <span className="text-[11px] text-gray-500 dark:text-gray-400 max-w-xs">{model.validation_warning || model.validation_error}</span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="sticky right-0 bg-white px-4 py-4 text-sm align-top shadow-[-12px_0_12px_-12px_rgba(15,23,42,0.2)] transition-colors group-hover:bg-gray-50 dark:bg-gray-800 dark:group-hover:bg-gray-700 sm:px-6">
+                      <div className="flex min-w-[140px] flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+                        <button onClick={() => handleRevalidateModel(model)} disabled={revalidatingId === model.id} className="whitespace-nowrap text-left text-blue-600 hover:text-blue-900 dark:text-blue-400 dark:hover:text-blue-300 disabled:opacity-50">
+                          {revalidatingId === model.id ? 'Checking…' : 'Revalidate'}
+                        </button>
+                        <button onClick={() => handleDeleteModel(model)} className="whitespace-nowrap text-left text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300">Delete</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    ))
+  }
 
   return (
     <div>
@@ -394,6 +636,13 @@ export default function ModelsPage() {
             {syncing ? 'Syncing…' : 'Sync Models'}
           </button>
           <button
+            onClick={runCatalogValidation}
+            disabled={catalogValidating}
+            className="inline-flex items-center px-4 py-2 border border-blue-300 dark:border-blue-700 text-sm font-medium rounded-md text-blue-700 dark:text-blue-200 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 disabled:opacity-50"
+          >
+            {catalogValidating ? 'Validating…' : 'Validate Catalog'}
+          </button>
+          <button
             onClick={() => setShowAddModal(true)}
             className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700"
           >
@@ -407,8 +656,32 @@ export default function ModelsPage() {
 
       {/* Sync result toast */}
       {syncResult && (
-        <div className="mb-4 px-4 py-3 rounded-lg bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-700 text-sm text-green-800 dark:text-green-300">
-          ✓ {syncResult}
+        <div className={`mb-4 px-4 py-3 rounded-lg border text-sm ${
+          syncResult.ok
+            ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-700 text-green-800 dark:text-green-300'
+            : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-700 text-red-800 dark:text-red-300'
+        }`}>
+          <div className="font-medium">{syncResult.ok ? '✓' : '✕'} {syncResult.message}</div>
+          {syncResult.errors && syncResult.errors.length > 0 && (
+            <div className="mt-1 text-xs opacity-90">
+              {syncResult.errors.join(' | ')}
+            </div>
+          )}
+        </div>
+      )}
+
+      {catalogValidationResult && (
+        <div className={`mb-4 px-4 py-3 rounded-lg border text-sm ${
+          catalogValidationResult.ok
+            ? 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-700 text-blue-800 dark:text-blue-300'
+            : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-700 text-red-800 dark:text-red-300'
+        }`}>
+          <div className="font-medium">{catalogValidationResult.message}</div>
+          {catalogValidationResult.ok && (
+            <div className="mt-1 text-xs opacity-90">
+              Validated {catalogValidationResult.validated} · Needs review {catalogValidationResult.needs_review} · Failed/hidden {catalogValidationResult.failed}
+            </div>
+          )}
         </div>
       )}
 
@@ -447,115 +720,46 @@ export default function ModelsPage() {
                     ? `API key set · ${info.in_db} models in DB`
                     : 'No API key — add one in Settings → API Keys'}
                 </p>
+                {info.key_set && (
+                  <p className="text-gray-400 dark:text-gray-500 text-[11px] mt-1">
+                    {formatSyncMode(info.sync_mode)}
+                  </p>
+                )}
+                {syncResult?.provider_details?.[name] && (
+                  <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400 space-y-1">
+                    <p>Source: {formatSyncSource(syncResult.provider_details[name].source)}</p>
+                    <p>
+                      Discovered {syncResult.provider_details[name].discovered} · Added {syncResult.provider_details[name].added} · Skipped {syncResult.provider_details[name].skipped}
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           ))}
         </div>
       )}
 
-      {Object.entries(grouped).map(([provider, providerModels]) => (
-        <div key={provider} className="mb-8">
-          <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4 capitalize">{provider}</h2>
-          <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg">
-            <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-              <thead className="bg-gray-50 dark:bg-gray-700">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                    Model
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                    Context
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                    Input Cost
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                    Output Cost
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                    Capabilities
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                    Status
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                    Actions
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                {providerModels.map((model) => (
-                  <tr key={model.id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm font-medium text-gray-900 dark:text-white">
-                        {model.display_name || model.model_id}
-                      </div>
-                      <div className="text-sm text-gray-500 dark:text-gray-400">{model.model_id}</div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className="text-sm text-gray-900 dark:text-white">
-                        {formatContext(model.context_window)} tokens
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
-                      {formatCost(model.cost_per_1m_input)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
-                      {formatCost(model.cost_per_1m_output)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex flex-wrap gap-1">
-                        {Object.entries(model.capabilities || {}).map(([key, value]) => (
-                          value && (
-                            <span
-                              key={key}
-                              className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200"
-                            >
-                              {key}
-                            </span>
-                          )
-                        ))}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <button
-                        onClick={() => handleToggleActive(model)}
-                        className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                          model.is_active
-                            ? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200'
-                            : 'bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200'
-                        }`}
-                      >
-                        {model.is_active ? 'Active' : 'Inactive'}
-                      </button>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm">
-                      <button
-                        onClick={() => handleDeleteModel(model)}
-                        className="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300"
-                      >
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      ))}
+      <div className="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800 dark:border-green-700 dark:bg-green-900/20 dark:text-green-300">
+        <div className="font-medium">Validated Catalog</div>
+        <div className="mt-1 text-xs opacity-90">{models.length} validated and active models are shown here by default.</div>
+      </div>
+      {renderModelGroups(grouped, 'No validated active models yet. Run Validate Catalog to promote live catalog matches.')}
 
-      {models.length === 0 && (
-        <div className="text-center py-12">
-          <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 15v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
-          </svg>
-          <h3 className="mt-2 text-sm font-medium text-gray-900 dark:text-white">No models</h3>
-          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Add models to get started.
-          </p>
+      <div className="mb-4 mt-10 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="font-medium">Needs Review</div>
+            <div className="mt-1 text-xs opacity-90">{reviewModels.length} models are hidden from the main list because they are unvalidated, inactive, or failed validation.</div>
+          </div>
+          <button
+            onClick={() => setShowReviewSection((prev) => !prev)}
+            className="inline-flex items-center rounded-md border border-amber-300 px-3 py-1.5 text-xs font-medium hover:bg-amber-100 dark:border-amber-700 dark:hover:bg-amber-900/30"
+          >
+            {showReviewSection ? 'Hide Review Queue' : 'Show Review Queue'}
+          </button>
         </div>
-      )}
+      </div>
+      {showReviewSection && renderModelGroups(reviewGrouped, 'No models need review.')}
 
       {/* Add Model Modal */}
       {showAddModal && (
@@ -653,6 +857,13 @@ export default function ModelsPage() {
                       <span className="text-xs font-normal text-gray-400">via {validation.source}</span>
                     </div>
                     {validation.valid && (
+                      <p className={`mt-1 text-xs ${validation.live_verified ? 'text-green-700 dark:text-green-400' : 'text-amber-600 dark:text-amber-400'}`}>
+                        {validation.live_verified
+                          ? 'Live verification succeeded. This model can be used in dropdowns.'
+                          : 'Metadata was found, but live verification did not succeed yet. This model will stay hidden from dropdowns.'}
+                      </p>
+                    )}
+                    {validation.valid && (
                       <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-gray-600 dark:text-gray-300">
                         {validation.context_window && (
                           <span>Context: <strong>{(validation.context_window / 1000).toFixed(0)}K tokens</strong></span>
@@ -740,7 +951,8 @@ export default function ModelsPage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700"
+                  disabled={!validation?.live_verified}
+                  className="px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Add Model
                 </button>

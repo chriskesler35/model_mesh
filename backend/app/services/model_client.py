@@ -10,6 +10,8 @@ from app.services.codex_oauth import (
     codex_proxy_rejects_temperature,
     get_codex_proxy_api_key,
     get_codex_proxy_base_url,
+    get_codex_proxy_configuration_issue,
+    is_codex_proxy_reachable,
     should_use_codex_oauth_proxy,
 )
 from app.services.provider_credentials import get_provider_api_key
@@ -91,8 +93,7 @@ class ModelClient:
             if codex_proxy_rejects_temperature(model.model_id):
                 kwargs.pop("temperature", None)
         elif provider_name == "github-copilot":
-            # Exchange the stored GitHub OAuth token for a short-lived
-            # Copilot session token, then point LiteLLM at the Copilot API.
+            # Copilot accepts the stored GitHub OAuth token directly.
             from app.services.command_executor import get_first_github_token
             from app.services.github_copilot import (
                 exchange_for_copilot_token, get_copilot_headers, COPILOT_API_BASE,
@@ -119,6 +120,24 @@ class ModelClient:
             pass  # api_key already set above
         elif api_key:
             kwargs["api_key"] = api_key
+        elif provider_name == "openai-codex":
+            proxy_base = get_codex_proxy_base_url()
+            configuration_issue = get_codex_proxy_configuration_issue()
+            if configuration_issue:
+                raise ValueError(
+                    f"OpenAI Codex is not usable right now. {configuration_issue} "
+                    "Configure CODEX_OAUTH_PROXY_BASE_URL to a compatible HTTP proxy or set OPENAI_API_KEY."
+                )
+            if not is_codex_proxy_reachable():
+                raise ValueError(
+                    f"OpenAI Codex proxy is offline at {proxy_base}. "
+                    "Configure an OpenAI-compatible HTTP proxy at CODEX_OAUTH_PROXY_BASE_URL, "
+                    "set OPENAI_API_KEY, or choose a different model."
+                )
+            raise ValueError(
+                "OpenAI Codex does not have live credentials right now. "
+                "Reconnect Codex OAuth or choose a different model."
+            )
 
         # Debug logging
         import logging

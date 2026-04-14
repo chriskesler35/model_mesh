@@ -9,6 +9,7 @@ import redis.asyncio as redis
 router = APIRouter(tags=["health"])
 
 
+@router.get("/v1/health")
 @router.get("/health")
 async def health_check():
     """Health check endpoint."""

@@ -89,7 +89,8 @@ class TestAppSettings:
         """GET /v1/settings/app — verify known ComfyUI settings exist."""
         known_keys = [
             "comfyui_dir", "comfyui_python", "comfyui_url",
-            "comfyui_gpu_devices", "default_image_provider", "default_workflow"
+            "comfyui_gpu_devices", "comfyui_launch_args",
+            "default_image_provider", "default_workflow"
         ]
         r = client.get("/v1/settings/app")
         assert r.status_code == 200

@@ -130,6 +130,29 @@ class TestImageVariations:
         r = client.post("/v1/images/nonexistent-fake-id-99999/variations", json={})
         assert r.status_code in (404, 422), f"Expected 404/422, got {r.status_code}: {r.text}"
 
+    def test_variations_comfyui_rejects_non_png_source(self, client):
+        """ComfyUI variations should reject JPG uploads with a clear message."""
+        import base64
+
+        jpeg_bytes = base64.b64decode(
+            "/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEAAkGBxAQEBUQEBAVFRAQDw8PEA8PDw8QEA8QFREWFhURFRUYHSggGBolGxUVITEhJSkrLi4uFx8zODMsNygtLisBCgoKDg0OGhAQGi0fHyUtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLf/AABEIAAEAAQMBEQACEQEDEQH/xAAXAAEBAQEAAAAAAAAAAAAAAAAAAQID/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEAMQAAAB6A//xAAXEAEBAQEAAAAAAAAAAAAAAAABEQAh/9oACAEBAAEFAm0a1//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8BP//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8BP//Z"
+        )
+
+        upload = client.post("/v1/images/upload", json={
+            "base64": base64.b64encode(jpeg_bytes).decode(),
+            "filename": "test.jpg",
+            "mime_type": "image/jpeg",
+        })
+        assert upload.status_code == 200, upload.text
+        img_id = upload.json()["id"]
+
+        try:
+            r = client.post(f"/v1/images/{img_id}/variations", json={"model": "comfyui-local"})
+            assert r.status_code == 400, f"Expected 400, got {r.status_code}: {r.text}"
+            assert "requires a PNG source image" in r.text
+        finally:
+            client.delete(f"/v1/images/{img_id}")
+
     @pytest.mark.slow
     def test_variations_with_real_image(self, client):
         """POST /v1/images/{id}/variations should return 200 or indicate no provider."""

@@ -41,6 +41,13 @@ const SETTING_FIELDS = [
     type: 'text',
   },
   {
+    key: 'comfyui_launch_args',
+    label: 'ComfyUI Launch Arguments',
+    placeholder: '--listen 0.0.0.0',
+    help: 'Optional arguments passed after "python main.py". Leave blank to use DevForgeAI defaults. For your batch file, use "--listen 0.0.0.0".',
+    type: 'text',
+  },
+  {
     key: 'default_image_provider',
     label: 'Default Image Provider',
     placeholder: 'gemini',

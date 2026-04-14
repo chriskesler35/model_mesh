@@ -107,7 +107,7 @@ export default function ProjectSetupWizard({ templates, onComplete, onDismiss }:
     setCreating(true)
     setError('')
     try {
-      const res = await fetch(`${API_BASE}/v1/projects/`, {
+      const res = await fetch(`${API_BASE}/v1/projects`, {
         method: 'POST',
         headers: AUTH_HEADERS,
         body: JSON.stringify(form),

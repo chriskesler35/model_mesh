@@ -12,7 +12,7 @@ import path from 'path'
 const FRONTEND_DIR = process.cwd()
 const NEXT_DIR = path.join(FRONTEND_DIR, '.next')
 const CACHE_DIR = path.join(NEXT_DIR, 'cache')
-const BACKEND_PORT = 19000
+const BACKEND_PORT = 19001
 
 export async function GET() {
   let backendHealthy = false

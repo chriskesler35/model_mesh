@@ -20,6 +20,7 @@ DEFAULTS = {
     "comfyui_python": "",
     "comfyui_url": "http://localhost:8188",
     "comfyui_gpu_devices": "0",
+    "comfyui_launch_args": "",
     "default_image_provider": "gemini",
     "default_workflow": "sdxl-standard",
 }

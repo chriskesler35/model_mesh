@@ -108,8 +108,8 @@ Docker port mapping: Backend 19000→18800, Frontend 3001→18801, PostgreSQL 15
 | Service | Local Dev | Docker |
 |---------|-----------|--------|
 | Frontend | http://localhost:3001 | http://localhost:18801 |
-| Backend | http://localhost:19000 | http://localhost:19000 |
-| API Docs | http://localhost:19000/docs | http://localhost:19000/docs |
+| Backend | http://localhost:19001 | http://localhost:19000 |
+| API Docs | http://localhost:19001/docs | http://localhost:19000/docs |
 
 ## Development Workflow
 
@@ -117,7 +117,7 @@ Docker port mapping: Backend 19000→18800, Frontend 3001→18801, PostgreSQL 15
 ```bash
 cd backend
 source venv/bin/activate  # or venv\Scripts\activate on Windows
-uvicorn app.main:app --host 0.0.0.0 --port 19000 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 19001 --reload
 ```
 - Auto-reload enabled via `--reload`
 - FastAPI Swagger docs at `/docs`
@@ -130,7 +130,7 @@ cd frontend
 npm run dev
 ```
 - Runs on port 3001 with hot-reload
-- Auto-detects backend at `{hostname}:19000`
+- Auto-detects backend at `{hostname}:19001` for local development
 - `npm run build` for production build
 - `npm run lint` for ESLint
 

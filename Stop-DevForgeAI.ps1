@@ -19,6 +19,7 @@ function Kill-Port($port) {
     }
 }
 Kill-Port 19000
+Kill-Port 19001
 Kill-Port 3001
 
 Write-Host "DevForgeAI stopped."

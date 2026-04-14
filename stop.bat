@@ -8,6 +8,12 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":19000 " ^| findstr "LISTENI
     taskkill /PID %%a /F >nul 2>&1
 )
 
+:: Kill backend fallback (port 19001)
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":19001 " ^| findstr "LISTENING"') do (
+    echo Killing backend fallback PID %%a
+    taskkill /PID %%a /F >nul 2>&1
+)
+
 :: Kill frontend (port 3001)
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3001 " ^| findstr "LISTENING"') do (
     echo Killing frontend PID %%a

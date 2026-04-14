@@ -412,6 +412,10 @@ def get_first_github_token() -> Optional[str]:
     pipeline runs are tied to sessions, not users yet). Good enough for
     single-user self-hosted setups.
     """
+    env_token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if env_token:
+        return env_token
+
     import json as _json
     users_file = Path(__file__).parent.parent.parent.parent / "data" / "collab_users.json"
     if not users_file.exists():

@@ -1,6 +1,6 @@
 /**
  * Backend process control — runs on the Next.js server (port 3001), not the Python backend.
- * This means it works even when the backend (port 19000) is completely down.
+ * This means it works even when the backend (default port 19001) is completely down.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -11,7 +11,7 @@ import fs from 'fs'
 
 const execAsync = promisify(exec)
 
-const BACKEND_PORT = 19000
+const BACKEND_PORT = 19001
 
 // Resolve paths from process.cwd() (frontend directory) → sibling backend
 // In dev: cwd = G:\Model_Mesh\frontend, backend = G:\Model_Mesh\backend

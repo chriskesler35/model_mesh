@@ -1,21 +1,35 @@
 /**
  * Dynamic API configuration for DevForgeAI.
  *
- * Auto-detects backend URL from the browser's current hostname.
- * This means remote access (Tailscale, LAN) works automatically.
+ * Auto-detects backend URL from the browser's current hostname and the
+ * known backend port. This avoids relying on Next.js rewrites for auth'd API
+ * calls, because some runtime modes do not preserve Authorization headers.
  *
  * Override: set NEXT_PUBLIC_API_URL in .env.local
  */
 
-const BACKEND_PORT = '19000'
+const BACKEND_PORT = '19001'
+
+function trimTrailingSlash(url: string): string {
+  return url.replace(/\/+$/, '')
+}
 
 /**
  * Returns the backend API base URL. Always call this — don't cache the result
  * at module scope, or Next.js will inline the SSR value.
  */
 export function getApiBase(): string {
+  const envApiUrl = process.env.NEXT_PUBLIC_API_URL?.trim()
+  if (envApiUrl) return trimTrailingSlash(envApiUrl)
+
   if (typeof window !== 'undefined') {
-    return `${window.location.protocol}//${window.location.hostname}:${BACKEND_PORT}`
+    const { protocol, hostname, port } = window.location
+
+    if (port === BACKEND_PORT) {
+      return window.location.origin
+    }
+
+    return `${protocol}//${hostname}:${BACKEND_PORT}`
   }
   return `http://localhost:${BACKEND_PORT}`
 }
@@ -49,8 +63,8 @@ export function getAuthHeaders(): Record<string, string> {
 // Legacy compat — evaluated at import time. In 'use client' components,
 // window exists so they work. In SSR, they fall back to localhost.
 export const API_BASE = typeof window !== 'undefined'
-  ? `${window.location.protocol}//${window.location.hostname}:${BACKEND_PORT}`
-  : `http://localhost:${BACKEND_PORT}`
+  ? getApiBase()
+  : trimTrailingSlash(process.env.NEXT_PUBLIC_API_URL?.trim() || `http://localhost:${BACKEND_PORT}`)
 
 /**
  * AUTH_HEADERS — computed dynamically via a Proxy so the Authorization

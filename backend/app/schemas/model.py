@@ -37,6 +37,11 @@ class ModelResponse(ModelBase):
     id: UUID4
     provider_id: UUID4
     provider_name: Optional[str] = None
+    validation_status: str = "unverified"
+    validated_at: Optional[datetime] = None
+    validation_source: Optional[str] = None
+    validation_warning: Optional[str] = None
+    validation_error: Optional[str] = None
     created_at: datetime
 
     class Config:

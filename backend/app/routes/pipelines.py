@@ -65,6 +65,15 @@ class PipelineSkip(BaseModel):
     reason: Optional[str] = None
 
 
+class PipelineMessage(BaseModel):
+    message: str
+
+
+class PipelinePhaseModelUpdate(BaseModel):
+    phase_index: int
+    model_id: str
+
+
 # ─── Event helpers ────────────────────────────────────────────────────────────
 def _push(pipeline_id: str, type: str, **payload):
     evt = {"type": type, "payload": payload, "ts": datetime.utcnow().isoformat()}
@@ -358,7 +367,7 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
     from app.models.pipeline import Pipeline, PhaseRun
     from app.services.model_client import ModelClient
     from app.services.identity_context import build_identity_context
-    from app.routes.workbench import _resolve_model
+    from app.routes.workbench import _build_runtime_model_chain, _humanize_model_error, _should_failover_error
 
     # Load pipeline
     async with AsyncSessionLocal() as db:
@@ -504,6 +513,7 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
     resolved_model = None
     resolved_system_prompt = None  # persona + agent prompts prepended to phase prompt
     resolved_via = None             # for logging
+    explicit_fallback_models: list[str] = []
 
     if not phase_def.get("model"):
         try:
@@ -540,6 +550,10 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
                                 if m:
                                     resolved_model = m.model_id
                                     resolved_via = f"agent '{agent.name}' → persona '{persona.name}'"
+                            if persona.fallback_model_id:
+                                fm = (await db.execute(select(ModelORM).where(ModelORM.id == persona.fallback_model_id))).scalar_one_or_none()
+                                if fm:
+                                    explicit_fallback_models.append(str(fm.id))
                     # Fallback: agent's own model_id if no persona
                     if not resolved_model and agent.model_id:
                         m = (await db.execute(select(ModelORM).where(ModelORM.id == agent.model_id))).scalar_one_or_none()
@@ -561,6 +575,10 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
                             resolved_via = f"persona '{persona.name}' (name match, no agent)"
                             if persona.system_prompt:
                                 resolved_system_prompt = f"# Persona: {persona.name}\n{persona.system_prompt}"
+                        if persona.fallback_model_id:
+                            fm = (await db.execute(select(ModelORM).where(ModelORM.id == persona.fallback_model_id))).scalar_one_or_none()
+                            if fm:
+                                explicit_fallback_models.append(str(fm.id))
         except Exception as e:
             logger.warning(f"Phase '{phase_name}' resolution lookup failed: {e}")
 
@@ -598,28 +616,6 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
         await db.commit()
 
     await _db_update_pipeline(pipeline_id, status="running", current_phase_index=phase_index)
-    _push(
-        pipeline_id, "phase_started",
-        phase_index=phase_index,
-        phase_name=phase_name,
-        agent_role=agent_role,
-        phase_run_id=phase_run_id,
-        model_id=model_id,
-    )
-
-    # Resolve model
-    model_orm, provider_orm = await _resolve_model(model_id)
-    if not model_orm:
-        msg = (f"Could not resolve model '{model_id}' for phase {phase_name}. "
-               f"The model may not exist, or its provider has no API key configured. "
-               f"Check backend logs for details, or pick a different model for this phase.")
-        logger.error(msg)
-        await _db_update_phase(phase_run_id, status="failed", completed_at=datetime.utcnow())
-        _push(pipeline_id, "phase_failed", phase_index=phase_index, error=msg)
-        # Don't kill the entire pipeline — let _advance_to_next decide if
-        # other branches can continue or if the pipeline is fully blocked.
-        await _advance_to_next(pipeline_id)
-        return
 
     # Build messages: identity + persona prompt + phase system prompt + initial task + prior artifacts
     identity_block = build_identity_context(include_method=False)
@@ -637,6 +633,7 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
     # Load the session's project path so we can inject the current file snapshot.
     # Without this, code phases hallucinate new files instead of editing existing ones.
     session_project_path: Optional[Path] = None
+    recent_guidance: list[str] = []
     try:
         from app.models.workbench import WorkbenchSession
         async with AsyncSessionLocal() as db:
@@ -645,6 +642,14 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
             )).scalar_one_or_none()
             if sess and sess.project_path:
                 session_project_path = Path(sess.project_path)
+            if sess and sess.messages:
+                recent_guidance = [
+                    str(msg.get("content", "")).strip()
+                    for msg in (sess.messages or [])
+                    if isinstance(msg, dict)
+                    and msg.get("kind") == "pipeline_note"
+                    and str(msg.get("content", "")).strip()
+                ][-5:]
     except Exception as e:
         logger.debug(f"Could not resolve session project_path: {e}")
 
@@ -660,6 +665,13 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
     user_parts = [f"# Original task\n{initial_task}"]
     if project_snapshot:
         user_parts.append(project_snapshot)
+    if recent_guidance:
+        guidance = "\n".join(f"- {note}" for note in recent_guidance)
+        user_parts.append(
+            "# User guidance\n"
+            "Keep these latest notes from the user in mind while you work:\n"
+            f"{guidance}"
+        )
 
     # Merge parent phase contexts (E2.4)
     merged_context = _merge_parent_contexts(phases, phase_name, prior_run_dicts)
@@ -677,6 +689,113 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
 
     # Run LLM
     client = ModelClient()
+    model_chain, preflight_note = await _build_runtime_model_chain(
+        model_id,
+        explicit_fallback_refs=explicit_fallback_models,
+    )
+    if not model_chain:
+        msg = (
+            f"Could not resolve model '{model_id}' for phase {phase_name}. "
+            "The model may be inactive, not live-validated, missing, or its provider has no working credentials, "
+            "and no validated fallback model was available. Revalidate it on the Models page or pick a different model for this phase."
+        )
+        logger.error(msg)
+        await _db_update_phase(
+            phase_run_id,
+            status="failed",
+            raw_response=msg,
+            completed_at=datetime.utcnow(),
+        )
+        _push(
+            pipeline_id,
+            "phase_failed",
+            phase_index=phase_index,
+            phase_name=phase_name,
+            model_id=model_id,
+            error=msg,
+        )
+        await _advance_to_next(pipeline_id)
+        return
+
+    model_orm = None
+    provider_orm = None
+    stream = None
+    last_error = None
+    active_model_id = model_id
+
+    if preflight_note:
+        _push(pipeline_id, "info", phase_index=phase_index, phase_name=phase_name, message=preflight_note)
+
+    for idx, (candidate_model, candidate_provider, reason) in enumerate(model_chain):
+        if idx > 0:
+            previous_model = model_chain[idx - 1][0]
+            previous_error = _humanize_model_error(str(last_error), previous_model.model_id) if last_error else "The previous model was unavailable."
+            _push(
+                pipeline_id,
+                "info",
+                phase_index=phase_index,
+                phase_name=phase_name,
+                message=(
+                    f"Model failover: switched from '{previous_model.model_id}' to '{candidate_model.model_id}' "
+                    f"using {reason}. Reason: {previous_error}"
+                ),
+            )
+        try:
+            stream = await client.call_model(
+                model=candidate_model,
+                provider=candidate_provider,
+                messages=messages,
+                stream=True,
+                temperature=0.3,
+                max_tokens=16000,
+            )
+            model_orm = candidate_model
+            provider_orm = candidate_provider
+            active_model_id = candidate_model.model_id
+            break
+        except Exception as e:
+            last_error = e
+            logger.error(f"LLM call setup failed in phase {phase_name} of pipeline {pipeline_id} using {candidate_model.model_id}: {e}")
+            if idx + 1 >= len(model_chain) or not _should_failover_error(e):
+                break
+
+    if not model_orm or not provider_orm or stream is None:
+        msg = _humanize_model_error(str(last_error) if last_error else "", model_id)
+        await _db_update_phase(
+            phase_run_id,
+            status="failed",
+            raw_response=msg,
+            completed_at=datetime.utcnow(),
+        )
+        _push(
+            pipeline_id,
+            "phase_failed",
+            phase_index=phase_index,
+            phase_name=phase_name,
+            model_id=model_id,
+            error=msg,
+        )
+        await _advance_to_next(pipeline_id)
+        return
+
+    input_context = {
+        "prior_phases": [r["phase_name"] for r in prior_run_dicts],
+        "depends_on": list(depends_on),
+    }
+    if active_model_id != model_id:
+        input_context["requested_model"] = model_id
+        input_context["resolved_model"] = active_model_id
+        await _db_update_phase(phase_run_id, model_id=active_model_id, input_context=input_context)
+
+    _push(
+        pipeline_id, "phase_started",
+        phase_index=phase_index,
+        phase_name=phase_name,
+        agent_role=agent_role,
+        phase_run_id=phase_run_id,
+        model_id=active_model_id,
+    )
+
     full_response = ""
     input_tokens = 0
     output_tokens = 0
@@ -687,15 +806,6 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
           message=f"{agent_role} is working with {model_orm.display_name or model_orm.model_id}…")
 
     try:
-        stream = await client.call_model(
-            model=model_orm,
-            provider=provider_orm,
-            messages=messages,
-            stream=True,
-            temperature=0.3,
-            max_tokens=16000,
-        )
-
         chunk_count = 0
         async for chunk in stream:
             delta = ""
@@ -732,21 +842,7 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
     except Exception as e:
         err_str = str(e)
         logger.error(f"LLM call failed in phase {phase_name} of pipeline {pipeline_id}: {e}")
-        # Enrich common provider errors with a user-facing message
-        friendly = err_str
-        low = err_str.lower()
-        if "insufficient_quota" in low or "exceeded your current quota" in low:
-            friendly = (f"OpenAI quota exceeded — your account is out of credits. "
-                        f"Top up at https://platform.openai.com/account/billing, or pick a different provider for this phase.")
-        elif "authenticationerror" in low or "x-api-key" in low or "401" in err_str or "invalid_api_key" in low:
-            friendly = f"Provider rejected the API key for model '{model_id}'. Check the key in your .env file."
-        elif "ratelimiterror" in low or "429" in err_str:
-            friendly = f"Rate-limited by provider for model '{model_id}'. Wait and retry, or switch models."
-        elif "notfounderror" in low or "model_not_found" in low or "does not exist" in low or ("404" in err_str and "openai" in low):
-            friendly = (f"Model '{model_id}' doesn't exist on the provider's API. "
-                        f"It may have been renamed or removed. Pick a different model for this phase.")
-        elif "timeout" in low or "timed out" in low:
-            friendly = f"Provider call for model '{model_id}' timed out."
+        friendly = _humanize_model_error(err_str, model_orm.model_id if model_orm else model_id)
         llm_success = False
         llm_error = friendly
 
@@ -785,12 +881,19 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
         await _db_update_phase(
             phase_run_id,
             status="failed",
-            raw_response=full_response,
+            raw_response=full_response or llm_error,
             completed_at=datetime.utcnow(),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
         )
-        _push(pipeline_id, "phase_failed", phase_index=phase_index, error=llm_error)
+        _push(
+            pipeline_id,
+            "phase_failed",
+            phase_index=phase_index,
+            phase_name=phase_name,
+            model_id=model_orm.model_id if model_orm else model_id,
+            error=llm_error,
+        )
         # Let _advance_to_next decide pipeline-level status — other parallel
         # branches may still be running or runnable.
         await _advance_to_next(pipeline_id)
@@ -1109,10 +1212,12 @@ async def _advance_to_next(pipeline_id: str, _current_index: int = -1):
 
     # Determine which phases are ready to launch
     ready = get_ready_phases(phases, completed_names)
-    # Filter out phases that are already running or completed
+    # Filter out phases that are already running, completed, or failed.
+    # Failed phases must stay failed until the user explicitly retries.
     ready = [ph for ph in ready
              if ph["name"] not in running_names
-             and ph["name"] not in completed_names]
+             and ph["name"] not in completed_names
+             and ph["name"] not in failed_names]
 
     all_phase_names = {ph["name"] for ph in phases}
 
@@ -1528,6 +1633,61 @@ async def get_pipeline(pipeline_id: str, db: AsyncSession = Depends(get_db)):
     }
 
 
+@router.post("/{pipeline_id}/message", dependencies=[Depends(verify_api_key)])
+async def send_pipeline_message(
+    pipeline_id: str,
+    body: PipelineMessage,
+    db: AsyncSession = Depends(get_db),
+):
+    """Add user guidance that will be visible in the live activity feed and next phase context."""
+    from app.models.pipeline import Pipeline
+    from app.models.workbench import WorkbenchSession
+
+    message = (body.message or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    pipeline = (await db.execute(
+        select(Pipeline).where(Pipeline.id == pipeline_id)
+    )).scalar_one_or_none()
+    if not pipeline:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+    if pipeline.status in ("completed", "failed", "cancelled"):
+        raise HTTPException(status_code=409, detail=f"Pipeline is already {pipeline.status}")
+
+    session = (await db.execute(
+        select(WorkbenchSession).where(WorkbenchSession.id == pipeline.session_id)
+    )).scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Workbench session not found")
+
+    applies_to = (
+        "current approval or next retry"
+        if pipeline.status == "awaiting_approval"
+        else "next phase"
+    )
+
+    messages = list(session.messages or [])
+    messages.append({
+        "role": "user",
+        "content": message,
+        "kind": "pipeline_note",
+        "created_at": datetime.utcnow().isoformat(),
+        "applies_to": applies_to,
+    })
+    session.messages = messages
+    await db.commit()
+
+    _push(
+        pipeline_id,
+        "user_message",
+        message=message,
+        applies_to=applies_to,
+        pipeline_status=pipeline.status,
+    )
+    return {"ok": True, "message": message, "applies_to": applies_to}
+
+
 @router.post("/{pipeline_id}/approve", dependencies=[Depends(verify_api_key)])
 async def approve_phase(
     pipeline_id: str,
@@ -1857,10 +2017,19 @@ async def retry_phase(
     # Reset pipeline status
     await _db_update_pipeline(pipeline_id, status="running", completed_at=None)
 
+    phases = list(p.phases or [])
+
     if phase_index is not None:
         # Retry a single specific phase
-        _push(pipeline_id, "pipeline_retry", phase_index=phase_index,
-              message=f"Retrying phase {phase_index}")
+        phase_name = phases[phase_index].get("name") if 0 <= phase_index < len(phases) else f"Phase {phase_index + 1}"
+        _push(
+            pipeline_id,
+            "pipeline_retry",
+            phase_index=phase_index,
+            phase_name=phase_name,
+            retried_indices=[phase_index],
+            message=f"Retrying {phase_name}.",
+        )
         asyncio.create_task(_run_phase(pipeline_id, phase_index))
         return {"ok": True, "retrying_phase": phase_index}
 
@@ -1873,7 +2042,7 @@ async def retry_phase(
         .where(PhaseRun.status == "failed")
     )).scalars().all()
 
-    retried_indices = []
+    retried_indices: list[int] = []
     for fr in failed_runs:
         # Delete the failed run so _advance_to_next sees the phase as
         # pending and will re-launch it if deps are met.
@@ -1881,11 +2050,135 @@ async def retry_phase(
         retried_indices.append(fr.phase_index)
     await db.commit()
 
-    _push(pipeline_id, "pipeline_retry", phase_index=retried_indices[0] if retried_indices else 0,
-          message=f"Retrying failed phases: {retried_indices}")
+    unique_indices = sorted(set(retried_indices))
+    phase_labels = [
+        phases[idx].get("name") if 0 <= idx < len(phases) else f"Phase {idx + 1}"
+        for idx in unique_indices
+    ]
+    if not unique_indices:
+        retry_message = "No failed phases were waiting to be retried. Resuming the pipeline."
+    elif len(unique_indices) == 1:
+        retry_message = f"Retrying {phase_labels[0]}."
+    elif len(unique_indices) <= 4:
+        retry_message = f"Retrying phases: {', '.join(phase_labels)}."
+    else:
+        retry_message = f"Retrying {len(unique_indices)} failed phases."
+
+    _push(
+        pipeline_id,
+        "pipeline_retry",
+        phase_index=unique_indices[0] if unique_indices else 0,
+        phase_name=phase_labels[0] if phase_labels else None,
+        retried_indices=unique_indices,
+        retried_phase_names=phase_labels,
+        message=retry_message,
+    )
 
     await _advance_to_next(pipeline_id)
-    return {"ok": True, "retrying_phases": retried_indices}
+    return {"ok": True, "retrying_phases": unique_indices, "retrying_phase_names": phase_labels}
+
+
+@router.post("/{pipeline_id}/phase-model", dependencies=[Depends(verify_api_key)])
+async def update_phase_model(
+    pipeline_id: str,
+    body: PipelinePhaseModelUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Change the configured model for one phase and immediately rerun that phase.
+
+    This is intended for recovery when the current assigned model is invalid,
+    unavailable, or simply not the right choice for the phase.
+    """
+    from app.models.pipeline import Pipeline, PhaseRun
+    from app.routes.workbench import _resolve_model
+
+    p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
+    if not p:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+    if p.status == "completed":
+        raise HTTPException(status_code=409, detail="Completed pipelines cannot change phase models")
+
+    phases = list(p.phases or [])
+    if body.phase_index < 0 or body.phase_index >= len(phases):
+        raise HTTPException(status_code=400, detail="Invalid phase index")
+
+    model_ref = (body.model_id or "").strip()
+    if not model_ref:
+        raise HTTPException(status_code=400, detail="Model is required")
+
+    model_orm, _provider_orm = await _resolve_model(model_ref)
+    if not model_orm:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{model_ref}' is not active, validated, and ready for runtime use. "
+                "Choose another confirmed model from the dropdown."
+            ),
+        )
+
+    latest_run = (await db.execute(
+        select(PhaseRun)
+        .where(PhaseRun.pipeline_id == pipeline_id)
+        .where(PhaseRun.phase_index == body.phase_index)
+        .order_by(desc(PhaseRun.created_at))
+        .limit(1)
+    )).scalar_one_or_none()
+
+    if latest_run and latest_run.status == "running":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This phase is actively running right now. Wait for it to finish or fail before switching models."
+            ),
+        )
+
+    phase = dict(phases[body.phase_index] or {})
+    previous_model = phase.get("model") or (latest_run.model_id if latest_run else None) or phase.get("default_model")
+    phase["model"] = model_orm.model_id
+    phases[body.phase_index] = phase
+    p.phases = phases
+    p.status = "running"
+    p.completed_at = None
+    p.current_phase_index = body.phase_index
+
+    supersede_note = f"Superseded after manual model change to {model_orm.model_id}."
+    runs_to_supersede = (await db.execute(
+        select(PhaseRun)
+        .where(PhaseRun.pipeline_id == pipeline_id)
+        .where(PhaseRun.phase_index == body.phase_index)
+        .where(PhaseRun.status.in_(("failed", "awaiting_approval")))
+    )).scalars().all()
+
+    for run in runs_to_supersede:
+        run.status = "rejected"
+        if not run.user_feedback:
+            run.user_feedback = supersede_note
+
+    await db.commit()
+
+    phase_name = phase.get("name") or (latest_run.phase_name if latest_run else f"Phase {body.phase_index + 1}")
+    _push(
+        pipeline_id,
+        "phase_model_changed",
+        phase_index=body.phase_index,
+        phase_name=phase_name,
+        previous_model=previous_model,
+        model_id=model_orm.model_id,
+        message=(
+            f"Phase '{phase_name}' switched from '{previous_model or 'unassigned'}' to "
+            f"'{model_orm.model_id}'. Re-running with the updated model."
+        ),
+    )
+
+    asyncio.create_task(_run_phase(pipeline_id, body.phase_index))
+    return {
+        "ok": True,
+        "phase_index": body.phase_index,
+        "phase_name": phase_name,
+        "previous_model": previous_model,
+        "model_id": model_orm.model_id,
+        "re_running_phase": body.phase_index,
+    }
 
 
 @router.post("/{pipeline_id}/cancel", dependencies=[Depends(verify_api_key)])

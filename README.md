@@ -30,7 +30,7 @@ An intelligent AI development platform for multi-agent orchestration, image gene
 | Frontend | Next.js 14, React 18, TailwindCSS |
 | AI Providers | Ollama (local), Anthropic, Google Gemini, OpenRouter, OpenAI |
 | Image Gen | Gemini Imagen, ComfyUI |
-| Ports | Backend: 19000 · Frontend: 3001 |
+| Ports | Backend: 19001 preferred locally, 19000 fallback/Docker · Frontend: 3001 |
 
 ---
 
@@ -133,7 +133,7 @@ Terminal 1 - Backend:
 cd backend
 venv\Scripts\activate          # Windows
 # source venv/bin/activate    # macOS/Linux
-python -m uvicorn app.main:app --host 0.0.0.0 --port 19000
+python -m uvicorn app.main:app --host 0.0.0.0 --port 19001
 ```
 
 Terminal 2 - Frontend:
@@ -145,7 +145,7 @@ npm run dev
 ### 6. Open
 
 - **App:** http://localhost:3001
-- **API docs:** http://localhost:19000/docs
+- **API docs:** http://localhost:19001/docs
 
 First launch runs an onboarding wizard - the AI asks a few questions to set up your identity profile.
 
@@ -193,7 +193,7 @@ pm2 restart all
 | `ModuleNotFoundError: No module named 'redis'` | New package added, pip not re-run | `pip install -r requirements.txt` |
 | `ModuleNotFoundError: No module named 'X'` | Any missing package | `pip install -r requirements.txt` |
 | `Cannot find module '...'` (frontend) | New npm package added | `npm install` in `frontend/` |
-| `address already in use :19000` | Old backend still running | Kill the old process then restart |
+| `address already in use :19001` | Old backend still running | Kill the old process then restart |
 | `address already in use :3001` | Old frontend still running | Kill the old process then restart |
 | Blank page or 404 in browser | Stale webpack cache | Restart `npm run dev` (cache auto-clears on start) |
 

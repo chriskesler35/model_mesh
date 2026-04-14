@@ -1,6 +1,6 @@
 'use client'
 
-import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+import { getApiBase, getAuthHeaders } from '@/lib/config'
 
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
@@ -14,6 +14,25 @@ const AGENT_ICONS: Record<string, string> = {
 interface Session { id: string; task: string; agent_type: string; model: string; status: string; created_at: string }
 interface Model { id: string; model_id: string; display_name?: string; provider_name?: string }
 interface PipelineSummary { id: string; method_id: string; initial_task: string; status: string; current_phase_index: number; phases: any[]; auto_approve: boolean; created_at: string }
+interface ProjectSummary { id: string; name: string; path?: string }
+
+async function readApiPayload(res: Response) {
+  const text = await res.text()
+  if (!text) return null
+  try {
+    return JSON.parse(text)
+  } catch {
+    return text
+  }
+}
+
+function getApiErrorMessage(payload: any, fallbackStatus: number) {
+  if (typeof payload === 'string' && payload.trim()) return payload.trim()
+  if (payload?.detail?.error?.message) return payload.detail.error.message
+  if (payload?.detail && typeof payload.detail === 'string') return payload.detail
+  if (payload?.message && typeof payload.message === 'string') return payload.message
+  return String(fallbackStatus)
+}
 
 const METHOD_ICONS: Record<string, string> = { bmad: '🧠', gsd: '⚡', superpowers: '🦸' }
 
@@ -29,6 +48,7 @@ export default function WorkbenchListPage() {
   const [model, setModel] = useState('ollama/glm4:latest')
   const [creating, setCreating] = useState(false)
   const [projectId, setProjectId] = useState<string | null>(null)
+  const [projectName, setProjectName] = useState<string>('')
   const [models, setModels] = useState<Model[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
   // Pipeline mode
@@ -43,9 +63,11 @@ export default function WorkbenchListPage() {
   const [customizeModels, setCustomizeModels] = useState(false)
 
   const fetchSessions = useCallback(async () => {
+    const apiBase = getApiBase()
+    const authHeaders = getAuthHeaders()
     const [sessRes, pipeRes] = await Promise.all([
-      fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
-      fetch(`${API_BASE}/v1/workbench/pipelines`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+      fetch(`${apiBase}/v1/workbench/sessions`, { headers: authHeaders }).then(r => r.json()).catch(() => ({ data: [] })),
+      fetch(`${apiBase}/v1/workbench/pipelines`, { headers: authHeaders }).then(r => r.json()).catch(() => ({ data: [] })),
     ])
     setSessions(sessRes.data || [])
     setPipelines(pipeRes.data || [])
@@ -65,11 +87,30 @@ export default function WorkbenchListPage() {
     if (pid || agentType) setShowNew(true)
   }, [searchParams])
 
+  useEffect(() => {
+    if (!projectId) {
+      setProjectName('')
+      return
+    }
+
+    const apiBase = getApiBase()
+    const authHeaders = getAuthHeaders()
+
+    fetch(`${apiBase}/v1/projects/${projectId}`, { headers: authHeaders })
+      .then(r => r.ok ? r.json() : null)
+      .then((project: ProjectSummary | null) => {
+        setProjectName(project?.name || '')
+      })
+      .catch(() => setProjectName(''))
+  }, [projectId])
+
   // Fetch active method stack + phase preview when pipeline mode changes
   useEffect(() => {
     if (!asPipeline) { setPhasePreview([]); setActiveStack([]); return }
+    const apiBase = getApiBase()
+    const authHeaders = getAuthHeaders()
     // Check if user has a method stack active
-    fetch(`${API_BASE}/v1/methods/active`, { headers: AUTH_HEADERS })
+    fetch(`${apiBase}/v1/methods/active`, { headers: authHeaders })
       .then(r => r.ok ? r.json() : null)
       .then(d => {
         if (d && d.stack && d.stack.length > 0) {
@@ -92,7 +133,9 @@ export default function WorkbenchListPage() {
   // Fetch phase preview when pipeline method changes
   useEffect(() => {
     if (!asPipeline || !pipelineMethod) { setPhasePreview([]); return }
-    fetch(`${API_BASE}/v1/workbench/pipelines/methods/${pipelineMethod}/phases`, { headers: AUTH_HEADERS })
+    const apiBase = getApiBase()
+    const authHeaders = getAuthHeaders()
+    fetch(`${apiBase}/v1/workbench/pipelines/methods/${pipelineMethod}/phases`, { headers: authHeaders })
       .then(r => r.ok ? r.json() : { phases: [] })
       .then(d => {
         setPhasePreview(d.phases || [])
@@ -104,8 +147,10 @@ export default function WorkbenchListPage() {
   // Fetch available models for the dropdown
   useEffect(() => {
     if (!showNew || models.length > 0) return
+    const apiBase = getApiBase()
+    const authHeaders = getAuthHeaders()
     setLoadingModels(true)
-    fetch(`${API_BASE}/v1/models?limit=100`, { headers: AUTH_HEADERS })
+    fetch(`${apiBase}/v1/models?limit=100&active_only=true&usable_only=true&validated_only=true&chat_only=true`, { headers: authHeaders })
       .then(r => r.json())
       .then(d => {
         const list: Model[] = (d.data || []).filter((m: any) =>
@@ -123,15 +168,17 @@ export default function WorkbenchListPage() {
     if (!task.trim() || creating) return
     setCreating(true)
     try {
+      const apiBase = getApiBase()
+      const authHeaders = getAuthHeaders()
       const body: any = { task: task.trim(), agent_type: agentType, model }
       if (projectId) body.project_id = projectId
-      const sessRes = await fetch(`${API_BASE}/v1/workbench/sessions`, {
-        method: 'POST', headers: AUTH_HEADERS,
+      const sessRes = await fetch(`${apiBase}/v1/workbench/sessions`, {
+        method: 'POST', headers: authHeaders,
         body: JSON.stringify(body),
       })
-      const session = await sessRes.json()
+      const session = await readApiPayload(sessRes)
       if (!sessRes.ok || !session?.id) {
-        throw new Error(`Session creation failed: ${session?.detail || sessRes.status}`)
+        throw new Error(`Session creation failed: ${getApiErrorMessage(session, sessRes.status)}`)
       }
 
       if (asPipeline) {
@@ -157,8 +204,8 @@ export default function WorkbenchListPage() {
           effectiveOverrides[k] = v
         }
 
-        const pipeRes = await fetch(`${API_BASE}/v1/workbench/pipelines`, {
-          method: 'POST', headers: AUTH_HEADERS,
+        const pipeRes = await fetch(`${apiBase}/v1/workbench/pipelines`, {
+          method: 'POST', headers: authHeaders,
           body: JSON.stringify({
             session_id: session.id,
             method_id: activeStack.length > 1 ? 'stack' : pipelineMethod,
@@ -167,9 +214,9 @@ export default function WorkbenchListPage() {
             model_overrides: Object.keys(effectiveOverrides).length > 0 ? effectiveOverrides : undefined,
           }),
         })
-        const pipeline = await pipeRes.json()
+        const pipeline = await readApiPayload(pipeRes)
         if (!pipeRes.ok || !pipeline?.id) {
-          throw new Error(`Pipeline creation failed: ${pipeline?.detail || pipeRes.status}`)
+          throw new Error(`Pipeline creation failed: ${getApiErrorMessage(pipeline, pipeRes.status)}`)
         }
         router.push(`/workbench/pipelines/${pipeline.id}`)
         return
@@ -210,8 +257,10 @@ export default function WorkbenchListPage() {
                 const total = sessions.length + pipelines.length
                 if (!confirm(`Delete ALL ${total} session(s) + pipeline(s)? Running items are kept. This cannot be undone.`)) return
                 try {
-                  const res = await fetch(`${API_BASE}/v1/workbench/sessions`, {
-                    method: 'DELETE', headers: AUTH_HEADERS,
+                  const apiBase = getApiBase()
+                  const authHeaders = getAuthHeaders()
+                  const res = await fetch(`${apiBase}/v1/workbench/sessions`, {
+                    method: 'DELETE', headers: authHeaders,
                   })
                   const data = await res.json()
                   if (!res.ok) throw new Error(data.detail || 'Delete failed')
@@ -317,10 +366,19 @@ export default function WorkbenchListPage() {
             </div>
             <div className="px-6 py-5 space-y-4">
               {projectId && (
-                <div className="flex items-center gap-2 px-3 py-2 bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-700 rounded-lg text-xs text-orange-700 dark:text-orange-300">
-                  <span>📁</span>
-                  <span>Project linked — files will be written to disk</span>
-                  <code className="ml-auto font-mono opacity-60">{projectId.slice(0,8)}…</code>
+                <div className="rounded-lg border border-orange-200 dark:border-orange-700 bg-orange-50 dark:bg-orange-900/20 px-3 py-2 text-xs text-orange-700 dark:text-orange-300">
+                  <div className="flex items-center gap-2">
+                    <span>📁</span>
+                    <span className="font-medium">
+                      Project linked{projectName ? `: ${projectName}` : ''} — files will be written to disk
+                    </span>
+                    <code className="ml-auto font-mono opacity-60">{projectId.slice(0,8)}…</code>
+                  </div>
+                  {projectName && (
+                    <div className="mt-1 pl-6 text-[11px] text-orange-600/90 dark:text-orange-300/90">
+                      Launch context: {projectName}
+                    </div>
+                  )}
                 </div>
               )}
               <div>
@@ -342,6 +400,9 @@ export default function WorkbenchListPage() {
                   <div className="pl-6 space-y-2">
                     <div className="text-xs text-indigo-700 dark:text-indigo-300">
                       Specialist agents hand off to each other through approval gates. <b>All phases use the Model you selected below</b> — customize per-phase if needed.
+                    </div>
+                    <div className="text-[11px] text-indigo-800 dark:text-indigo-200 bg-white/70 dark:bg-gray-900/30 border border-indigo-200 dark:border-indigo-800 rounded-lg px-3 py-2">
+                      This opens the supervisor-style pipeline view, not the standard chat thread. You will watch a live activity feed, send guidance between phases, and approve or reject artifacts as work moves forward.
                     </div>
                     {!projectId && (
                       <div className="p-2 rounded bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 text-[11px] text-amber-800 dark:text-amber-200">

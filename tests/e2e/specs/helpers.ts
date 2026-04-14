@@ -1,6 +1,6 @@
 import { Page, expect } from '@playwright/test';
 
-export const API_BASE = process.env.DEVFORGEAI_API_URL || 'http://localhost:19000';
+export const API_BASE = process.env.DEVFORGEAI_API_URL || 'http://localhost:19001';
 export const API_KEY = process.env.DEVFORGEAI_KEY || 'modelmesh_local_dev_key';
 
 export async function waitForPageLoad(page: Page) {

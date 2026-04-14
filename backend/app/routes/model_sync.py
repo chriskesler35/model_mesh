@@ -10,15 +10,24 @@ On startup (and on demand):
 import uuid
 import httpx
 import logging
-from typing import Optional
+from typing import Any, Optional
+from datetime import datetime
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from app.database import get_db
 from app.models.model import Model
 from app.models.provider import Provider
+from app.models.persona import Persona
+from app.models.conversation import Message
+from app.models.request_log import RequestLog
+from app.models.agent import Agent
 from app.config import settings
 from app.middleware.auth import verify_api_key
+from app.services.codex_oauth import get_codex_proxy_api_key, get_codex_proxy_base_url, should_use_codex_oauth_proxy
+from app.services.provider_credentials import get_provider_api_key, has_provider_api_key
+from app.services.command_executor import get_first_github_token
+from app.services.github_copilot import COPILOT_API_BASE, get_copilot_headers
 
 logger = logging.getLogger(__name__)
 
@@ -67,18 +76,294 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[dict]] = {
         {"model_id": "deepseek/deepseek-chat",       "display_name": "DeepSeek Chat (OR)",    "input":  0.14, "output":  0.28, "ctx": 64000,  "caps": {"chat": True, "streaming": True}},
         {"model_id": "openrouter/auto",              "display_name": "OpenRouter Auto",       "input":  0,    "output":  0,    "ctx": 200000, "caps": {"chat": True, "streaming": True}},
     ],
+    "openai-codex": [
+        {"model_id": "gpt-5",               "display_name": "GPT-5 (Codex OAuth)",         "input":  1.25, "output": 10.00, "ctx": 400000, "caps": {"chat": True, "streaming": True, "code": True}},
+        {"model_id": "gpt-5-mini",          "display_name": "GPT-5 Mini (Codex OAuth)",    "input":  0.25, "output":  2.00, "ctx": 400000, "caps": {"chat": True, "streaming": True, "code": True}},
+        {"model_id": "gpt-4.1",             "display_name": "GPT-4.1 (Codex OAuth)",       "input":  2.00, "output":  8.00, "ctx": 128000, "caps": {"chat": True, "vision": True, "streaming": True, "code": True}},
+        {"model_id": "o4-mini",             "display_name": "o4 Mini (Codex OAuth)",       "input":  1.10, "output":  4.40, "ctx": 200000, "caps": {"chat": True, "streaming": True, "code": True}},
+        {"model_id": "codex-mini-latest",   "display_name": "Codex Mini Latest",            "input":  1.50, "output":  6.00, "ctx": 200000, "caps": {"chat": True, "streaming": True, "code": True}},
+    ],
+    "github-copilot": [
+        {"model_id": "gpt-4o",                 "display_name": "GPT-4o (GitHub Copilot)",        "input": 0.0, "output": 0.0, "ctx": 128000, "caps": {"chat": True, "vision": True, "streaming": True, "code": True}},
+        {"model_id": "gpt-4.1",                "display_name": "GPT-4.1 (GitHub Copilot)",       "input": 0.0, "output": 0.0, "ctx": 128000, "caps": {"chat": True, "streaming": True, "code": True}},
+        {"model_id": "claude-3.5-sonnet",      "display_name": "Claude 3.5 Sonnet (Copilot)",    "input": 0.0, "output": 0.0, "ctx": 200000, "caps": {"chat": True, "vision": True, "streaming": True, "code": True}},
+        {"model_id": "gemini-2.0-flash-001",   "display_name": "Gemini 2.0 Flash (Copilot)",     "input": 0.0, "output": 0.0, "ctx": 1000000, "caps": {"chat": True, "vision": True, "streaming": True, "code": True}},
+    ],
 }
 
-# Map provider name → which env var holds its API key.
-# Read from os.environ (hot-reloaded when keys are updated via UI) with
-# fallback to settings (initial .env load at startup).
-import os as _os
-PROVIDER_KEY_MAP = {
-    "anthropic":  lambda: _os.environ.get("ANTHROPIC_API_KEY")  or settings.anthropic_api_key,
-    "google":     lambda: _os.environ.get("GOOGLE_API_KEY")     or _os.environ.get("GEMINI_API_KEY") or settings.google_api_key or settings.gemini_api_key,
-    "openai":     lambda: _os.environ.get("OPENAI_API_KEY")     or settings.openai_api_key,
-    "openrouter": lambda: _os.environ.get("OPENROUTER_API_KEY") or settings.openrouter_api_key,
+PROVIDER_SYNC_META: dict[str, tuple[str, str, str]] = {
+    "anthropic": ("Anthropic", "https://api.anthropic.com", "api_key"),
+    "google": ("Google", "https://generativelanguage.googleapis.com", "api_key"),
+    "openai": ("OpenAI", "https://api.openai.com", "api_key"),
+    "openrouter": ("OpenRouter", "https://openrouter.ai/api", "api_key"),
+    "openai-codex": ("OpenAI Codex", get_codex_proxy_base_url(), "oauth"),
+    "github-copilot": ("GitHub Copilot", "https://api.githubcopilot.com", "oauth"),
 }
+
+LITELLM_MODEL_PREFIXES: dict[str, str] = {
+    "google": "gemini/",
+    "openrouter": "openrouter/",
+    "openai-codex": "openai/",
+    "github-copilot": "openai/",
+}
+
+
+def _build_litellm_model(provider_name: str, model_id: str) -> str:
+    prefix = LITELLM_MODEL_PREFIXES.get((provider_name or "").lower().strip(), "")
+    if prefix and not model_id.startswith(prefix):
+        return f"{prefix}{model_id}"
+    return model_id
+
+
+def _humanize_model_id(model_id: str) -> str:
+    tail = (model_id or "").split("/")[-1]
+    tail = tail.replace("-", " ").replace("_", " ").replace(".", " ")
+    return " ".join(part.upper() if part.isupper() else part.capitalize() for part in tail.split()) or model_id
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    if value in (None, "", False):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: Any) -> Optional[int]:
+    if value in (None, "", False):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _infer_model_capabilities(model_id: str, supported_methods: Optional[list[str]] = None, modalities: Any = None) -> dict:
+    normalized = (model_id or "").lower()
+    methods = {m.lower() for m in (supported_methods or []) if isinstance(m, str)}
+    modality_text = " ".join(modalities) if isinstance(modalities, list) else str(modalities or "")
+    modality_text = modality_text.lower()
+
+    if "embed" in normalized or "embedcontent" in methods:
+        return {"embedding": True}
+
+    if any(token in normalized for token in ("moderation", "whisper", "transcribe", "transcription", "tts", "speech")):
+        return {"audio_or_moderation": True}
+
+    if any(token in normalized for token in ("babbage", "davinci")):
+        return {"legacy_completion": True}
+
+    if any(token in normalized for token in ("imagen", "dall-e", "flux", "stable-diffusion", "sdxl")):
+        return {"image_generation": True}
+
+    capabilities: dict[str, bool] = {"chat": True, "streaming": True}
+    if any(token in normalized for token in ("codex", "coder", "copilot", "code", "starcoder")):
+        capabilities["code"] = True
+    if "vision" in normalized or "image" in modality_text or "vision" in modality_text:
+        capabilities["vision"] = True
+    if "generatecontent" in methods or "counttokens" in methods:
+        capabilities["chat"] = True
+    return capabilities
+
+
+def _is_catalog_usable(model_id: str, capabilities: dict[str, Any]) -> bool:
+    normalized = (model_id or "").lower()
+    if capabilities.get("embedding") or capabilities.get("audio_or_moderation") or capabilities.get("legacy_completion"):
+        return False
+    if any(token in normalized for token in ("moderation", "whisper", "transcribe", "transcription", "tts", "speech", "babbage", "davinci")):
+        return False
+    return bool(
+        capabilities.get("chat")
+        or capabilities.get("image_generation")
+        or capabilities.get("vision")
+        or capabilities.get("code")
+    )
+
+
+def _enrich_with_litellm_metadata(provider_name: str, model_entry: dict[str, Any]) -> dict[str, Any]:
+    litellm_model = _build_litellm_model(provider_name, model_entry["model_id"])
+    try:
+        import litellm
+
+        info = litellm.get_model_info(litellm_model)
+    except Exception:
+        return model_entry
+
+    context_window = info.get("max_input_tokens") or info.get("max_tokens")
+    output_tokens = info.get("max_output_tokens") or info.get("max_tokens")
+    input_cost = info.get("input_cost_per_token")
+    output_cost = info.get("output_cost_per_token")
+    capabilities = model_entry.get("caps") or {}
+
+    if info.get("supports_vision"):
+        capabilities["vision"] = True
+    if info.get("supports_function_calling"):
+        capabilities["function_calling"] = True
+    if info.get("mode") == "chat":
+        capabilities["chat"] = True
+        capabilities["streaming"] = True
+
+    if model_entry.get("ctx") is None and context_window:
+        model_entry["ctx"] = int(context_window)
+    if model_entry.get("max_output_tokens") is None and output_tokens:
+        model_entry["max_output_tokens"] = int(output_tokens)
+    if model_entry.get("input") is None and input_cost is not None:
+        model_entry["input"] = round(float(input_cost) * 1_000_000, 6)
+    if model_entry.get("output") is None and output_cost is not None:
+        model_entry["output"] = round(float(output_cost) * 1_000_000, 6)
+    model_entry["caps"] = capabilities
+    return model_entry
+
+
+async def _fetch_openrouter_models() -> list[dict[str, Any]]:
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get("https://openrouter.ai/api/v1/models")
+        response.raise_for_status()
+        payload = response.json()
+
+    discovered: list[dict[str, Any]] = []
+    for item in payload.get("data", []):
+        model_id = (item.get("id") or "").strip()
+        if not model_id:
+            continue
+        pricing = item.get("pricing") or {}
+        entry = {
+            "model_id": model_id,
+            "display_name": item.get("name") or _humanize_model_id(model_id),
+            "input": (_safe_float(pricing.get("input")) or 0.0) * 1_000_000 if pricing.get("input") is not None else None,
+            "output": (_safe_float(pricing.get("output")) or 0.0) * 1_000_000 if pricing.get("output") is not None else None,
+            "ctx": _safe_int(item.get("context_length")),
+            "caps": _infer_model_capabilities(model_id, modalities=item.get("architecture", {}).get("modality")),
+        }
+        enriched = _enrich_with_litellm_metadata("openrouter", entry)
+        if _is_catalog_usable(model_id, enriched.get("caps") or {}):
+            discovered.append(enriched)
+    return discovered
+
+
+async def _fetch_openai_compatible_models(base_url: str, api_key: str, provider_name: str, extra_headers: Optional[dict[str, str]] = None) -> list[dict[str, Any]]:
+    headers = {"Authorization": f"Bearer {api_key}"}
+    if extra_headers:
+        headers.update(extra_headers)
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get(f"{base_url.rstrip('/')}/models", headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+
+    discovered: list[dict[str, Any]] = []
+    for item in payload.get("data", []):
+        model_id = (item.get("id") or "").strip()
+        if not model_id:
+            continue
+        entry = {
+            "model_id": model_id,
+            "display_name": _humanize_model_id(model_id),
+            "input": None,
+            "output": None,
+            "ctx": None,
+            "caps": _infer_model_capabilities(model_id),
+        }
+        enriched = _enrich_with_litellm_metadata(provider_name, entry)
+        if _is_catalog_usable(model_id, enriched.get("caps") or {}):
+            discovered.append(enriched)
+    return discovered
+
+
+async def _fetch_google_models(api_key: str) -> list[dict[str, Any]]:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        payload = response.json()
+
+    discovered: list[dict[str, Any]] = []
+    for item in payload.get("models", []):
+        raw_name = (item.get("name") or "").strip()
+        model_id = raw_name.split("/", 1)[-1] if raw_name else ""
+        if not model_id:
+            continue
+        supported_methods = item.get("supportedGenerationMethods") or []
+        entry = {
+            "model_id": model_id,
+            "display_name": item.get("displayName") or _humanize_model_id(model_id),
+            "input": None,
+            "output": None,
+            "ctx": _safe_int(item.get("inputTokenLimit")),
+            "caps": _infer_model_capabilities(model_id, supported_methods=supported_methods),
+            "max_output_tokens": _safe_int(item.get("outputTokenLimit")),
+        }
+        enriched = _enrich_with_litellm_metadata("google", entry)
+        if _is_catalog_usable(model_id, enriched.get("caps") or {}):
+            discovered.append(enriched)
+    return discovered
+
+
+async def _fetch_anthropic_models(api_key: str) -> list[dict[str, Any]]:
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+    }
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get("https://api.anthropic.com/v1/models", headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+
+    discovered: list[dict[str, Any]] = []
+    for item in payload.get("data", []):
+        model_id = (item.get("id") or "").strip()
+        if not model_id:
+            continue
+        entry = {
+            "model_id": model_id,
+            "display_name": item.get("display_name") or _humanize_model_id(model_id),
+            "input": None,
+            "output": None,
+            "ctx": None,
+            "caps": _infer_model_capabilities(model_id),
+        }
+        enriched = _enrich_with_litellm_metadata("anthropic", entry)
+        if _is_catalog_usable(model_id, enriched.get("caps") or {}):
+            discovered.append(enriched)
+    return discovered
+
+
+async def discover_provider_models(provider_name: str) -> tuple[list[dict[str, Any]], str]:
+    normalized = (provider_name or "").lower().strip()
+
+    if normalized == "openrouter":
+        return await _fetch_openrouter_models(), "provider_api"
+
+    if normalized == "openai":
+        api_key = get_provider_api_key("openai")
+        if api_key:
+            return await _fetch_openai_compatible_models("https://api.openai.com/v1", api_key, "openai"), "provider_api"
+
+    if normalized == "google":
+        api_key = get_provider_api_key("google")
+        if api_key:
+            return await _fetch_google_models(api_key), "provider_api"
+
+    if normalized == "anthropic":
+        api_key = get_provider_api_key("anthropic")
+        if api_key:
+            return await _fetch_anthropic_models(api_key), "provider_api"
+
+    if normalized == "openai-codex":
+        api_key = get_provider_api_key("openai-codex")
+        if should_use_codex_oauth_proxy("openai-codex", api_key=api_key):
+            return await _fetch_openai_compatible_models(get_codex_proxy_base_url(), get_codex_proxy_api_key(), "openai-codex"), "codex_proxy"
+        if api_key:
+            return await _fetch_openai_compatible_models("https://api.openai.com/v1", api_key, "openai-codex"), "provider_api"
+
+    if normalized == "github-copilot":
+        github_token = (get_first_github_token() or "").strip()
+        if github_token:
+            return await _fetch_openai_compatible_models(COPILOT_API_BASE, github_token, "github-copilot", extra_headers=get_copilot_headers()), "provider_api"
+
+    fallback_models = [dict(model) for model in PROVIDER_DEFAULT_MODELS.get(normalized, [])]
+    enriched_fallback = [_enrich_with_litellm_metadata(normalized, entry) for entry in fallback_models]
+    return enriched_fallback, "static_catalog"
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +436,7 @@ def nice_display_name(model_id: str) -> str:
 # Core sync logic (shared by endpoint + startup)
 # ---------------------------------------------------------------------------
 
-async def run_model_sync(db: AsyncSession) -> dict:
+async def run_model_sync(db: AsyncSession, *, deduplicate_existing: bool = True) -> dict:
     """
     Sync Ollama models + enabled paid providers into the DB.
     Returns a summary dict.
@@ -159,6 +444,85 @@ async def run_model_sync(db: AsyncSession) -> dict:
     added = []
     skipped = []
     errors = []
+    provider_details: dict[str, dict[str, Any]] = {}
+
+    def deactivate_provider_models(
+        provider: Provider,
+        *,
+        warning: str,
+        validation_source: str,
+        validation_error: Optional[str] = None,
+        keep_discovered_ids: Optional[set[str]] = None,
+    ) -> int:
+        deactivated = 0
+        keep_discovered_ids = keep_discovered_ids or set()
+        for (provider_id, existing_model_id), current in existing.items():
+            if provider_id != str(provider.id):
+                continue
+            if existing_model_id in keep_discovered_ids:
+                continue
+            current.is_active = False
+            current.validation_status = "failed"
+            current.validation_source = validation_source
+            current.validation_warning = warning
+            current.validation_error = validation_error
+            deactivated += 1
+        return deactivated
+
+    async def deduplicate_models() -> int:
+        result = await db.execute(select(Model))
+        all_models = list(result.scalars().all())
+        grouped: dict[tuple[str, str], list[Model]] = {}
+        for model in all_models:
+            grouped.setdefault((str(model.provider_id), model.model_id), []).append(model)
+
+        duplicates_removed = 0
+        for _, group in grouped.items():
+            if len(group) < 2:
+                continue
+
+            group.sort(
+                key=lambda item: (
+                    0 if (item.validation_status or "") == "validated" else 1,
+                    0 if item.is_active else 1,
+                    item.created_at or datetime.min,
+                    str(item.id),
+                )
+            )
+            canonical = group[0]
+
+            for duplicate in group[1:]:
+                await db.execute(
+                    update(Persona)
+                    .where(Persona.primary_model_id == duplicate.id)
+                    .values(primary_model_id=canonical.id)
+                )
+                await db.execute(
+                    update(Persona)
+                    .where(Persona.fallback_model_id == duplicate.id)
+                    .values(fallback_model_id=canonical.id)
+                )
+                await db.execute(
+                    update(Message)
+                    .where(Message.model_used == duplicate.id)
+                    .values(model_used=canonical.id)
+                )
+                await db.execute(
+                    update(RequestLog)
+                    .where(RequestLog.model_id == duplicate.id)
+                    .values(model_id=canonical.id)
+                )
+                await db.execute(
+                    update(Agent)
+                    .where(Agent.model_id == duplicate.id)
+                    .values(model_id=canonical.id)
+                )
+                await db.execute(delete(Model).where(Model.id == duplicate.id))
+                duplicates_removed += 1
+
+        if duplicates_removed:
+            await db.flush()
+        return duplicates_removed
 
     # ── ensure providers exist ────────────────────────────────────────────────
     all_providers_result = await db.execute(select(Provider))
@@ -168,7 +532,12 @@ async def run_model_sync(db: AsyncSession) -> dict:
 
     async def get_or_create_provider(name: str, display: str, api_base: str, auth_type: str) -> Provider:
         if name in providers_by_name:
-            return providers_by_name[name]
+            existing_provider = providers_by_name[name]
+            existing_provider.display_name = display
+            existing_provider.api_base_url = api_base
+            existing_provider.auth_type = auth_type
+            existing_provider.is_active = True
+            return existing_provider
         p = Provider(
             id=uuid.uuid4(),
             name=name,
@@ -189,6 +558,10 @@ async def run_model_sync(db: AsyncSession) -> dict:
         "none",
     )
 
+    duplicates_removed = 0
+    if deduplicate_existing:
+        duplicates_removed = await deduplicate_models()
+
     # ── existing model index (provider_id, model_id) ─────────────────────────
     existing_result = await db.execute(select(Model))
     existing: dict[tuple, Model] = {
@@ -204,10 +577,30 @@ async def run_model_sync(db: AsyncSession) -> dict:
         cost_out: float,
         ctx: Optional[int],
         caps: dict,
+        *,
+        validation_status: str,
+        validation_source: str,
+        validation_warning: Optional[str] = None,
     ) -> bool:
         """Upsert a model. Returns True if it was new."""
         key = (str(provider.id), model_id)
         if key in existing:
+            current = existing[key]
+            current.display_name = current.display_name or display_name
+            current.cost_per_1m_input = current.cost_per_1m_input if current.cost_per_1m_input is not None else cost_in
+            current.cost_per_1m_output = current.cost_per_1m_output if current.cost_per_1m_output is not None else cost_out
+            current.context_window = current.context_window or ctx
+            current.capabilities = current.capabilities or caps
+            if validation_status == "validated":
+                current.validation_status = "validated"
+                current.validated_at = datetime.utcnow()
+                current.validation_source = validation_source
+                current.validation_warning = validation_warning
+                current.validation_error = None
+            elif (current.validation_status or "unverified") != "validated":
+                current.validation_status = validation_status
+                current.validation_source = validation_source
+                current.validation_warning = validation_warning
             return False  # already there
         m = Model(
             id=uuid.uuid4(),
@@ -219,6 +612,11 @@ async def run_model_sync(db: AsyncSession) -> dict:
             context_window=ctx,
             capabilities=caps,
             is_active=True,
+            validation_status=validation_status,
+            validated_at=datetime.utcnow() if validation_status == "validated" else None,
+            validation_source=validation_source,
+            validation_warning=validation_warning,
+            validation_error=None,
         )
         db.add(m)
         existing[key] = m
@@ -241,7 +639,11 @@ async def run_model_sync(db: AsyncSession) -> dict:
             display = nice_display_name(model_id)
             caps = infer_capabilities(model_id)
 
-            if upsert_model(ollama_provider, model_id, display, 0.0, 0.0, ctx_window, caps):
+            if upsert_model(
+                ollama_provider, model_id, display, 0.0, 0.0, ctx_window, caps,
+                validation_status="validated",
+                validation_source="ollama_sync",
+            ):
                 added.append(f"ollama/{model_id}")
             else:
                 skipped.append(f"ollama/{model_id}")
@@ -250,30 +652,90 @@ async def run_model_sync(db: AsyncSession) -> dict:
         logger.info("Ollama not reachable — skipping local model sync")
 
     # ── 2. Paid providers (key-gated) ─────────────────────────────────────────
-    for provider_name, models_list in PROVIDER_DEFAULT_MODELS.items():
-        key_fn = PROVIDER_KEY_MAP.get(provider_name)
-        if not key_fn or not key_fn():
+    for provider_name in PROVIDER_DEFAULT_MODELS:
+        if not has_provider_api_key(provider_name):
             logger.debug(f"Skipping {provider_name} — no API key set")
+            deactivated_missing = 0
+            existing_provider = providers_by_name.get(provider_name)
+            if existing_provider:
+                existing_provider.is_active = False
+                deactivated_missing = deactivate_provider_models(
+                    existing_provider,
+                    warning="Provider is not currently configured, so this model is unavailable.",
+                    validation_source="provider_sync:unavailable",
+                    validation_error="provider_not_configured",
+                )
+            provider_details[provider_name] = {
+                "configured": False,
+                "source": "unavailable",
+                "discovered": 0,
+                "added": 0,
+                "skipped": 0,
+                "deactivated": deactivated_missing,
+            }
             continue
 
-        # Map display names / api_base
-        meta = {
-            "anthropic":  ("Anthropic",  "https://api.anthropic.com",                 "api_key"),
-            "google":     ("Google",     "https://generativelanguage.googleapis.com",  "api_key"),
-            "openai":     ("OpenAI",     "https://api.openai.com",                    "api_key"),
-            "openrouter": ("OpenRouter", "https://openrouter.ai/api",                 "api_key"),
-        }
-        display_name, api_base, auth_type = meta[provider_name]
+        display_name, api_base, auth_type = PROVIDER_SYNC_META[provider_name]
         provider = await get_or_create_provider(provider_name, display_name, api_base, auth_type)
+
+        provider_added = 0
+        provider_skipped = 0
+        models_list: list[dict[str, Any]] = []
+        source = "static_catalog"
+        try:
+            models_list, source = await discover_provider_models(provider_name)
+        except Exception as exc:
+            logger.warning("Live model discovery failed for %s: %s", provider_name, exc)
+            errors.append(f"{provider_name}: {type(exc).__name__}: {exc}")
+            models_list = [_enrich_with_litellm_metadata(provider_name, dict(model)) for model in PROVIDER_DEFAULT_MODELS[provider_name]]
+
+        provider.config = {
+            **(provider.config or {}),
+            "last_sync_source": source,
+            "last_sync_model_count": len(models_list),
+            "last_synced_at": datetime.utcnow().isoformat(),
+        }
+        provider.is_active = True
 
         for m in models_list:
             if upsert_model(
                 provider, m["model_id"], m["display_name"],
-                m["input"], m["output"], m.get("ctx"), m["caps"],
+                m.get("input") or 0.0, m.get("output") or 0.0, m.get("ctx"), m.get("caps") or {"chat": True, "streaming": True},
+                validation_status="unverified",
+                validation_source=f"provider_sync:{source}",
+                validation_warning=(
+                    "Provider is configured, but this model has not been live-validated in the interface yet."
+                    if source != "provider_api" else
+                    "Discovered from the provider catalog, but not yet live-validated in the interface."
+                ),
             ):
                 added.append(f"{provider_name}/{m['model_id']}")
+                provider_added += 1
             else:
                 skipped.append(f"{provider_name}/{m['model_id']}")
+                provider_skipped += 1
+
+        deactivated_missing = 0
+        if source in {"provider_api", "codex_proxy"}:
+            discovered_ids = {m["model_id"] for m in models_list if m.get("model_id")}
+            provider_label = provider.display_name or provider_name
+            validation_error = "model_not_supported" if provider_name == "github-copilot" else "model_not_in_live_catalog"
+            deactivated_missing = deactivate_provider_models(
+                provider,
+                keep_discovered_ids=discovered_ids,
+                warning=f"This model is no longer exposed by the live {provider_label} catalog.",
+                validation_source=f"provider_sync:{source}",
+                validation_error=validation_error,
+            )
+
+        provider_details[provider_name] = {
+            "configured": True,
+            "source": source,
+            "discovered": len(models_list),
+            "added": provider_added,
+            "skipped": provider_skipped,
+            "deactivated": deactivated_missing,
+        }
 
     await db.commit()
 
@@ -284,6 +746,8 @@ async def run_model_sync(db: AsyncSession) -> dict:
         "ollama_available": len(ollama_raw) > 0,
         "ollama_models": len([a for a in added if a.startswith("ollama/")]),
         "paid_models": len([a for a in added if not a.startswith("ollama/")]),
+        "provider_details": provider_details,
+        "duplicates_removed": duplicates_removed,
     }
     logger.info(f"Model sync complete: {len(added)} added, {len(skipped)} already existed")
     return summary
@@ -319,8 +783,8 @@ async def sync_status(db: AsyncSession = Depends(get_db)):
     ollama_models = await fetch_ollama_models(ollama_url)
 
     providers_status = {}
-    for name, key_fn in PROVIDER_KEY_MAP.items():
-        providers_status[name] = bool(key_fn())
+    for name in PROVIDER_DEFAULT_MODELS:
+        providers_status[name] = has_provider_api_key(name)
 
     # Count models already in DB per provider
     result = await db.execute(
@@ -340,6 +804,7 @@ async def sync_status(db: AsyncSession = Depends(get_db)):
             name: {
                 "key_set": has_key,
                 "in_db": counts.get(name, 0),
+                "sync_mode": "live_discovery_with_fallback",
             }
             for name, has_key in providers_status.items()
         },

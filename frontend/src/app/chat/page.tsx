@@ -1825,7 +1825,7 @@ export default function ChatPage() {
     const init = async () => {
       try {
         const [modelsRes, personasRes, convsRes, identityRes] = await Promise.all([
-          fetch(`${API_BASE}/v1/models`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+          fetch(`${API_BASE}/v1/models?active_only=true&usable_only=true&validated_only=true&chat_only=true`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
           fetch(`${API_BASE}/v1/personas`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
           fetch(`${API_BASE}/v1/conversations?limit=100&pinned_first=true`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
           fetch(`${API_BASE}/v1/identity/status`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({})),

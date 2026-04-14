@@ -10,7 +10,7 @@ DevForgeAI is a multi-part application with a Python FastAPI backend serving as 
 
 ### REST API
 
-The frontend calls the backend REST API at port 19000. The base URL is auto-detected from `window.location.hostname`, allowing the frontend to work in both local development and Docker environments without hardcoded URLs.
+The frontend calls the backend REST API at port 19001 for local development. The base URL is auto-detected from `window.location.hostname`, allowing the frontend to work in both local development and Docker environments without hardcoded URLs. Docker still exposes the backend on port 19000.
 
 ### Authentication
 
@@ -150,7 +150,7 @@ When available, Redis provides:
 
 | Service     | Local Development | Docker        | Notes                          |
 |-------------|-------------------|---------------|--------------------------------|
-| Backend     | 19000             | 18800         | FastAPI with uvicorn           |
+| Backend     | 19001             | 18800         | FastAPI with uvicorn           |
 | Frontend    | 3001              | 18801         | Next.js dev server / standalone|
 | PostgreSQL  | --                | 15432         | Docker only                    |
 | Redis       | --                | 16379         | Docker only (optional locally) |

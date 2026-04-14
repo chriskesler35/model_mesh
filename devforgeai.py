@@ -27,6 +27,8 @@ IS_WIN = platform.system() == "Windows"
 VENV_PYTHON = BACKEND_DIR / ("venv/Scripts/python.exe" if IS_WIN else "venv/bin/python")
 
 PID_FILE = ROOT / ".devforgeai.pids"
+DEFAULT_BACKEND_PORT = 19001
+FALLBACK_BACKEND_PORT = 19000
 
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
@@ -80,6 +82,25 @@ def kill_pid(pid):
         pass
 
 
+def is_port_listening(port: int) -> bool:
+    if IS_WIN:
+        result = subprocess.run(
+            f'netstat -ano | findstr ":{port} " | findstr "LISTENING"',
+            capture_output=True, text=True, shell=True,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    return False
+
+
+def resolve_backend_port() -> int:
+    configured = os.environ.get("DEVFORGEAI_BACKEND_PORT", "").strip()
+    if configured.isdigit():
+        return int(configured)
+    if IS_WIN and is_port_listening(DEFAULT_BACKEND_PORT):
+        return FALLBACK_BACKEND_PORT
+    return DEFAULT_BACKEND_PORT
+
+
 def start_backend():
     if not VENV_PYTHON.exists():
         print(c(RED, "  ✗  Virtual environment not found. Run: python install.py"))
@@ -91,18 +112,21 @@ def start_backend():
         print(c(YELLOW, "     Copy backend/.env.example → backend/.env and add API keys."))
         sys.exit(1)
 
-    print(f"  {CYAN}→{RESET}  Starting backend on :19000 ...")
+    backend_port = resolve_backend_port()
+    env["DEVFORGEAI_BACKEND_PORT"] = str(backend_port)
+
+    print(f"  {CYAN}→{RESET}  Starting backend on :{backend_port} ...")
     proc = subprocess.Popen(
         [str(VENV_PYTHON), "-m", "uvicorn", "app.main:app",
-         "--host", "0.0.0.0", "--port", "19000", "--reload"],
+         "--host", "0.0.0.0", "--port", str(backend_port), "--reload"],
         cwd=BACKEND_DIR,
         env=env,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if IS_WIN else 0,
     )
-    return proc
+    return proc, backend_port
 
 
-def start_frontend():
+def start_frontend(backend_port: int):
     npm = shutil.which("npm")
     if not npm:
         print(c(RED, "  ✗  npm not found. Install Node.js 18+ from https://nodejs.org/"))
@@ -113,10 +137,14 @@ def start_frontend():
         subprocess.run("npm install", cwd=FRONTEND_DIR, shell=True, check=True)
 
     print(f"  {CYAN}→{RESET}  Starting frontend on :3001 ...")
+    env = os.environ.copy()
+    env["DEVFORGEAI_BACKEND_PORT"] = str(backend_port)
+    env["NEXT_PUBLIC_API_URL"] = f"http://localhost:{backend_port}"
     proc = subprocess.Popen(
         "npm run dev",
         cwd=FRONTEND_DIR,
         shell=True,
+        env=env,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if IS_WIN else 0,
     )
     return proc
@@ -127,14 +155,16 @@ def cmd_start(target=None):
 
     pids = {}
     procs = []
+    backend_port = resolve_backend_port()
 
     if target in (None, "backend"):
-        p = start_backend()
+        p, backend_port = start_backend()
         pids["backend"] = p.pid
+        pids["backend_port"] = backend_port
         procs.append(("backend", p))
 
     if target in (None, "frontend"):
-        p = start_frontend()
+        p = start_frontend(backend_port)
         pids["frontend"] = p.pid
         procs.append(("frontend", p))
 
@@ -145,8 +175,8 @@ def cmd_start(target=None):
   {GREEN}{BOLD}Running!{RESET}
 
     Frontend  →  {CYAN}http://localhost:3001{RESET}
-    Backend   →  {CYAN}http://localhost:19000{RESET}
-    API Docs  →  {CYAN}http://localhost:19000/docs{RESET}
+        Backend   →  {CYAN}http://localhost:{backend_port}{RESET}
+        API Docs  →  {CYAN}http://localhost:{backend_port}/docs{RESET}
 
   Press {BOLD}Ctrl+C{RESET} to stop.
 """)

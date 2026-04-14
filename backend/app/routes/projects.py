@@ -87,6 +87,7 @@ async def list_templates():
     }
 
 
+@router.get("")
 @router.get("/")
 async def list_projects():
     projects = _load_projects()
@@ -100,6 +101,7 @@ async def list_projects():
     return {"data": data, "total": len(data)}
 
 
+@router.post("")
 @router.post("/")
 async def create_project(body: ProjectCreate):
     projects = _load_projects()

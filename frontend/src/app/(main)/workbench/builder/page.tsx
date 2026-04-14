@@ -137,11 +137,14 @@ export default function WorkflowBuilderPage() {
     let cancelled = false
     ;(async () => {
       try {
-        const res = await fetch(`${getApiBase()}/v1/models`, { headers: apiHeaders() })
+        const res = await fetch(
+          `${getApiBase()}/v1/models?active_only=true&usable_only=true&validated_only=true&chat_only=true`,
+          { headers: apiHeaders() },
+        )
         if (!res.ok) return
         const body = await res.json()
         const models: string[] = (body.data ?? body.models ?? [])
-          .map((m: any) => typeof m === 'string' ? m : m.id || m.name)
+          .map((m: any) => typeof m === 'string' ? m : m.model_id || m.name)
           .filter(Boolean)
         if (!cancelled) setAvailableModels(models)
       } catch { /* silent — model dropdown shows only Default */ }

@@ -3,7 +3,7 @@ conftest.py - Shared fixtures for DevForgeAI test suite.
 
 All tests use a synchronous httpx.Client pointed at the live backend.
 Set environment variables to override defaults:
-  DEVFORGEAI_URL  (default: http://localhost:19000)
+  DEVFORGEAI_URL  (default: auto-detect healthy localhost backend, preferring http://localhost:19001)
   DEVFORGEAI_KEY  (default: modelmesh_local_dev_key)
 """
 
@@ -11,7 +11,30 @@ import os
 import pytest
 import httpx
 
-BASE_URL = os.getenv("DEVFORGEAI_URL", "http://localhost:19000")
+def _resolve_base_url() -> str:
+    explicit = os.getenv("DEVFORGEAI_URL")
+    if explicit:
+        return explicit
+
+    candidates = [
+        "http://localhost:19001",
+        "http://127.0.0.1:19001",
+        "http://localhost:19000",
+        "http://127.0.0.1:19000",
+    ]
+
+    for base_url in candidates:
+        try:
+            response = httpx.get(f"{base_url}/v1/health", timeout=2.0)
+            if response.is_success:
+                return base_url
+        except httpx.HTTPError:
+            continue
+
+    return "http://localhost:19001"
+
+
+BASE_URL = _resolve_base_url()
 API_KEY = os.getenv("DEVFORGEAI_KEY", "modelmesh_local_dev_key")
 
 

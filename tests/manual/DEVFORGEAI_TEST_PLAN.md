@@ -5,7 +5,7 @@
 **Tester:** ___________________________
 **Environment:** ☐ Primary (G:\Model_Mesh) ☐ Secondary (Laptop) ☐ Remote (Tailscale)
 **Browser:** ___________________________
-**Backend URL:** http://localhost:19000
+**Backend URL:** http://localhost:19001
 **Frontend URL:** http://localhost:3001
 
 ---
@@ -25,11 +25,11 @@
 
 | # | Test | Steps | Expected Result | Status | Notes |
 |---|------|-------|-----------------|--------|-------|
-| 1.1 | Backend starts | Run `start.bat` | Backend binds to port 19000, no errors in console | ☐ | |
+| 1.1 | Backend starts | Run `start.bat` | Backend binds to port 19001 by default, or falls back to 19000 if 19001 is already occupied | ☐ | |
 | 1.2 | Frontend starts | Verify Next.js starts | Frontend accessible at localhost:3001 | ☐ | |
 | 1.3 | Port conflict guard | Start with backend already running, run `start.bat` again | Should detect port in use and skip, not spawn duplicate | ☐ | |
-| 1.4 | Health endpoint | GET http://localhost:19000/v1/health | Returns 200 with status "healthy" | ☐ | |
-| 1.5 | Root endpoint | GET http://localhost:19000/ | Returns name: "DevForgeAI", version: "0.2.0" | ☐ | |
+| 1.4 | Health endpoint | GET http://localhost:19001/v1/health | Returns 200 with status "healthy" | ☐ | |
+| 1.5 | Root endpoint | GET http://localhost:19001/ | Returns name: "DevForgeAI", version: "0.2.0" | ☐ | |
 | 1.6 | Database auto-creation | Delete `data/devforgeai.db`, restart backend | DB recreated, tables seeded, no errors | ☐ | |
 | 1.7 | Migration on startup | Start backend with existing DB | Migrations run (new columns added), no errors | ☐ | |
 | 1.8 | Ollama model sync on startup | Start backend with Ollama running | Console shows model sync count | ☐ | |
@@ -436,7 +436,7 @@
 | # | Test | Steps | Expected Result | Status | Notes |
 |---|------|-------|-----------------|--------|-------|
 | 19.1 | Frontend accessible | Open http://[tailscale-ip]:3001 from another device | Frontend loads | ☐ | |
-| 19.2 | API accessible | curl http://[tailscale-ip]:19000/v1/health | Returns healthy | ☐ | |
+| 19.2 | API accessible | curl http://[tailscale-ip]:19001/v1/health | Returns healthy | ☐ | |
 | 19.3 | Chat works remotely | Send chat message from remote device | Response returns normally | ☐ | |
 | 19.4 | Dynamic API_BASE | Open frontend on remote device | API calls go to correct IP (not localhost) | ☐ | |
 | 19.5 | Gallery works remotely | View gallery from remote device | Images load correctly | ☐ | |
