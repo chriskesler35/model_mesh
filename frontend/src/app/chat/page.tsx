@@ -1722,6 +1722,8 @@ export default function ChatPage() {
 
   // Track pending image tasks: taskId → assistantMessageId
   const pendingImageTasksRef = useRef<Map<string, string | { msgId: string; startedAt: number }>>(new Map())
+  const IMAGE_TASK_SLOW_WARNING_MS = 12 * 60 * 1000
+  const IMAGE_TASK_HARD_TIMEOUT_MS = 45 * 60 * 1000
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -1777,8 +1779,10 @@ export default function ChatPage() {
         const msgId = typeof value === 'string' ? value : value.msgId
         const startedAt = typeof value === 'string' ? now : value.startedAt
 
-        // Expire tasks older than 12 minutes (ComfyUI timeout is 10 min)
-        if (now - startedAt > 12 * 60 * 1000) {
+        const elapsedMs = now - startedAt
+
+        // Hard timeout for truly stuck jobs.
+        if (elapsedMs > IMAGE_TASK_HARD_TIMEOUT_MS) {
           setMessages(prev => prev.map(m =>
             m.id === msgId
               ? { ...m, content: '⏱️ Image generation timed out. Try again.', streaming: false }
@@ -1786,6 +1790,15 @@ export default function ChatPage() {
           ))
           pendingImageTasksRef.current.delete(taskId)
           continue
+        }
+
+        // Soft warning for slow but still valid jobs (e.g., RAM offload).
+        if (elapsedMs > IMAGE_TASK_SLOW_WARNING_MS) {
+          setMessages(prev => prev.map(m =>
+            m.id === msgId && !m.content.includes('still running')
+              ? { ...m, content: '⏳ Still running… this can take longer when ComfyUI offloads to system RAM.' }
+              : m
+          ))
         }
 
         try {
