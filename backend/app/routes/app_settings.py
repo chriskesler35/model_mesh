@@ -23,6 +23,10 @@ DEFAULTS = {
     "comfyui_launch_args": "",
     "default_image_provider": "gemini",
     "default_workflow": "sdxl-standard",
+    "remote_tailscale_frontend_url": "",
+    "remote_tailscale_backend_url": "",
+    "remote_wireguard_frontend_url": "",
+    "remote_wireguard_backend_url": "",
 }
 
 

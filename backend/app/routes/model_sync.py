@@ -107,6 +107,20 @@ LITELLM_MODEL_PREFIXES: dict[str, str] = {
     "github-copilot": "openai/",
 }
 
+NON_VIABLE_CATALOG_TOKENS = (
+    "deprecated",
+    "retired",
+    "sunset",
+    "sunsetting",
+    "end of life",
+    "end-of-life",
+    "eol",
+    "obsolete",
+    "unsupported",
+    "disabled",
+    "unavailable",
+)
+
 
 def _build_litellm_model(provider_name: str, model_id: str) -> str:
     prefix = LITELLM_MODEL_PREFIXES.get((provider_name or "").lower().strip(), "")
@@ -137,6 +151,94 @@ def _safe_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _stringify_catalog_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float, str)):
+        return str(value)
+    if isinstance(value, dict):
+        ordered_keys = (
+            "status",
+            "state",
+            "phase",
+            "reason",
+            "message",
+            "description",
+            "note",
+            "value",
+        )
+        parts = [str(value.get(key)).strip() for key in ordered_keys if value.get(key) not in (None, "")]
+        return " | ".join(part for part in parts if part)
+    if isinstance(value, list):
+        return " | ".join(filter(None, (_stringify_catalog_value(item).strip() for item in value)))
+    return str(value)
+
+
+def _catalog_text_is_non_viable(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    return bool(normalized and any(token in normalized for token in NON_VIABLE_CATALOG_TOKENS))
+
+
+def _catalog_reason_from_raw_item(raw_item: dict[str, Any] | None, provider_name: str, model_id: str) -> Optional[str]:
+    if not isinstance(raw_item, dict):
+        return None
+
+    if raw_item.get("deprecated") is True or raw_item.get("is_deprecated") is True or raw_item.get("isDeprecated") is True:
+        return f"{provider_name} marks {model_id} as deprecated."
+
+    for availability_key in ("active", "is_active", "isActive", "available", "is_available", "enabled"):
+        if availability_key in raw_item and raw_item.get(availability_key) is False:
+            return f"{provider_name} marks {model_id} as unavailable."
+
+    status_fields = (
+        "status",
+        "state",
+        "lifecycle",
+        "lifecycle_state",
+        "lifecycleState",
+        "availability",
+        "deprecation",
+        "deprecation_status",
+        "deprecationStatus",
+    )
+    for field in status_fields:
+        field_text = _stringify_catalog_value(raw_item.get(field)).strip()
+        if _catalog_text_is_non_viable(field_text):
+            return f"{provider_name} catalog status for {model_id}: {field_text}"
+
+    descriptive_fields = (
+        "description",
+        "name",
+        "display_name",
+        "displayName",
+    )
+    for field in descriptive_fields:
+        field_text = _stringify_catalog_value(raw_item.get(field)).strip()
+        if _catalog_text_is_non_viable(field_text):
+            return f"{provider_name} catalog notes for {model_id}: {field_text}"
+
+    return None
+
+
+def _mark_catalog_entry_viability(entry: dict[str, Any], raw_item: dict[str, Any] | None, provider_name: str) -> dict[str, Any]:
+    reason = _catalog_reason_from_raw_item(raw_item, provider_name, entry.get("model_id", "this model"))
+    if reason:
+        entry["deprecated"] = True
+        entry["deprecation_reason"] = reason
+    else:
+        entry["deprecated"] = False
+        entry["deprecation_reason"] = None
+    return entry
+
+
+def get_catalog_model_viability(model_entry: dict[str, Any]) -> tuple[bool, Optional[str], Optional[str]]:
+    if model_entry.get("deprecated"):
+        return False, model_entry.get("deprecation_reason") or "Provider catalog marks this model as no longer viable.", "model_deprecated"
+    return True, None, None
 
 
 def _infer_model_capabilities(model_id: str, supported_methods: Optional[list[str]] = None, modalities: Any = None) -> dict:
@@ -236,7 +338,7 @@ async def _fetch_openrouter_models() -> list[dict[str, Any]]:
             "ctx": _safe_int(item.get("context_length")),
             "caps": _infer_model_capabilities(model_id, modalities=item.get("architecture", {}).get("modality")),
         }
-        enriched = _enrich_with_litellm_metadata("openrouter", entry)
+        enriched = _mark_catalog_entry_viability(_enrich_with_litellm_metadata("openrouter", entry), item, "OpenRouter")
         if _is_catalog_usable(model_id, enriched.get("caps") or {}):
             discovered.append(enriched)
     return discovered
@@ -264,7 +366,11 @@ async def _fetch_openai_compatible_models(base_url: str, api_key: str, provider_
             "ctx": None,
             "caps": _infer_model_capabilities(model_id),
         }
-        enriched = _enrich_with_litellm_metadata(provider_name, entry)
+        enriched = _mark_catalog_entry_viability(
+            _enrich_with_litellm_metadata(provider_name, entry),
+            item,
+            provider_name,
+        )
         if _is_catalog_usable(model_id, enriched.get("caps") or {}):
             discovered.append(enriched)
     return discovered
@@ -293,7 +399,7 @@ async def _fetch_google_models(api_key: str) -> list[dict[str, Any]]:
             "caps": _infer_model_capabilities(model_id, supported_methods=supported_methods),
             "max_output_tokens": _safe_int(item.get("outputTokenLimit")),
         }
-        enriched = _enrich_with_litellm_metadata("google", entry)
+        enriched = _mark_catalog_entry_viability(_enrich_with_litellm_metadata("google", entry), item, "Google")
         if _is_catalog_usable(model_id, enriched.get("caps") or {}):
             discovered.append(enriched)
     return discovered
@@ -322,7 +428,7 @@ async def _fetch_anthropic_models(api_key: str) -> list[dict[str, Any]]:
             "ctx": None,
             "caps": _infer_model_capabilities(model_id),
         }
-        enriched = _enrich_with_litellm_metadata("anthropic", entry)
+        enriched = _mark_catalog_entry_viability(_enrich_with_litellm_metadata("anthropic", entry), item, "Anthropic")
         if _is_catalog_usable(model_id, enriched.get("caps") or {}):
             discovered.append(enriched)
     return discovered
@@ -446,6 +552,19 @@ async def run_model_sync(db: AsyncSession, *, deduplicate_existing: bool = True)
     errors = []
     provider_details: dict[str, dict[str, Any]] = {}
 
+    def mark_model_unavailable(
+        current: Model,
+        *,
+        warning: str,
+        validation_source: str,
+        validation_error: Optional[str] = None,
+    ) -> None:
+        current.is_active = False
+        current.validation_status = "failed"
+        current.validation_source = validation_source
+        current.validation_warning = warning
+        current.validation_error = validation_error
+
     def deactivate_provider_models(
         provider: Provider,
         *,
@@ -453,19 +572,23 @@ async def run_model_sync(db: AsyncSession, *, deduplicate_existing: bool = True)
         validation_source: str,
         validation_error: Optional[str] = None,
         keep_discovered_ids: Optional[set[str]] = None,
+        explicit_reasons: Optional[dict[str, tuple[str, Optional[str]]]] = None,
     ) -> int:
         deactivated = 0
         keep_discovered_ids = keep_discovered_ids or set()
+        explicit_reasons = explicit_reasons or {}
         for (provider_id, existing_model_id), current in existing.items():
             if provider_id != str(provider.id):
                 continue
             if existing_model_id in keep_discovered_ids:
                 continue
-            current.is_active = False
-            current.validation_status = "failed"
-            current.validation_source = validation_source
-            current.validation_warning = warning
-            current.validation_error = validation_error
+            reason_warning, reason_error = explicit_reasons.get(existing_model_id, (warning, validation_error))
+            mark_model_unavailable(
+                current,
+                warning=reason_warning,
+                validation_source=validation_source,
+                validation_error=reason_error,
+            )
             deactivated += 1
         return deactivated
 
@@ -697,7 +820,19 @@ async def run_model_sync(db: AsyncSession, *, deduplicate_existing: bool = True)
         }
         provider.is_active = True
 
+        viable_discovered_ids: set[str] = set()
+        explicit_deactivation_reasons: dict[str, tuple[str, Optional[str]]] = {}
+        deprecated_skipped = 0
+
         for m in models_list:
+            is_viable, viability_warning, viability_error = get_catalog_model_viability(m)
+            if not is_viable:
+                if m.get("model_id"):
+                    explicit_deactivation_reasons[m["model_id"]] = (viability_warning or "Model is no longer viable.", viability_error)
+                deprecated_skipped += 1
+                continue
+
+            viable_discovered_ids.add(m["model_id"])
             if upsert_model(
                 provider, m["model_id"], m["display_name"],
                 m.get("input") or 0.0, m.get("output") or 0.0, m.get("ctx"), m.get("caps") or {"chat": True, "streaming": True},
@@ -717,15 +852,15 @@ async def run_model_sync(db: AsyncSession, *, deduplicate_existing: bool = True)
 
         deactivated_missing = 0
         if source in {"provider_api", "codex_proxy"}:
-            discovered_ids = {m["model_id"] for m in models_list if m.get("model_id")}
             provider_label = provider.display_name or provider_name
             validation_error = "model_not_supported" if provider_name == "github-copilot" else "model_not_in_live_catalog"
             deactivated_missing = deactivate_provider_models(
                 provider,
-                keep_discovered_ids=discovered_ids,
+                keep_discovered_ids=viable_discovered_ids,
                 warning=f"This model is no longer exposed by the live {provider_label} catalog.",
                 validation_source=f"provider_sync:{source}",
                 validation_error=validation_error,
+                explicit_reasons=explicit_deactivation_reasons,
             )
 
         provider_details[provider_name] = {
@@ -734,6 +869,7 @@ async def run_model_sync(db: AsyncSession, *, deduplicate_existing: bool = True)
             "discovered": len(models_list),
             "added": provider_added,
             "skipped": provider_skipped,
+            "deprecated_skipped": deprecated_skipped,
             "deactivated": deactivated_missing,
         }
 

@@ -13,6 +13,24 @@ interface TailscaleInfo {
   instructions?: Record<string, string>
 }
 
+interface NetworkProfile {
+  network: 'tailscale' | 'wireguard'
+  detected_ip: string | null
+  connected: boolean
+  frontend_url: string
+  backend_url: string
+  configured_frontend_url: string
+  configured_backend_url: string
+}
+
+interface NetworkProfilesResponse {
+  hostname: string
+  profiles: {
+    tailscale: NetworkProfile
+    wireguard: NetworkProfile
+  }
+}
+
 interface TelegramStatus {
   configured: boolean
   bot_username?: string | null
@@ -55,6 +73,7 @@ function Card({ icon, title, subtitle, children }: { icon: string; title: string
 
 export function RemoteAccessTab() {
   const [tailscale, setTailscale] = useState<TailscaleInfo | null>(null)
+  const [networkProfiles, setNetworkProfiles] = useState<NetworkProfilesResponse | null>(null)
   const [telegram, setTelegram] = useState<TelegramStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null)
@@ -67,6 +86,12 @@ export function RemoteAccessTab() {
 
   const [saving, setSaving] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+  const [remoteOverrides, setRemoteOverrides] = useState<Record<string, string>>({
+    remote_tailscale_frontend_url: '',
+    remote_tailscale_backend_url: '',
+    remote_wireguard_frontend_url: '',
+    remote_wireguard_backend_url: '',
+  })
 
   const fb = (type: 'ok' | 'err', text: string) => {
     setFeedback({ type, text })
@@ -91,12 +116,22 @@ export function RemoteAccessTab() {
       // If backend came back up, also refresh remote status
       if (res.ok && action !== 'stop') {
         setTimeout(async () => {
-          const [ts, tg] = await Promise.all([
+          const [ts, tg, np] = await Promise.all([
             fetch(`${API_BASE}/v1/remote/tailscale-info`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => null),
             fetch(`${API_BASE}/v1/telegram/status`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => null),
+            fetch(`${API_BASE}/v1/remote/network-profiles`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => null),
           ])
           if (ts) setTailscale(ts)
           if (tg) setTelegram(tg)
+          if (np) {
+            setNetworkProfiles(np)
+            setRemoteOverrides({
+              remote_tailscale_frontend_url: np.profiles?.tailscale?.configured_frontend_url || '',
+              remote_tailscale_backend_url: np.profiles?.tailscale?.configured_backend_url || '',
+              remote_wireguard_frontend_url: np.profiles?.wireguard?.configured_frontend_url || '',
+              remote_wireguard_backend_url: np.profiles?.wireguard?.configured_backend_url || '',
+            })
+          }
         }, 1000)
       }
     } catch (e: any) { fb('err', e.message) }
@@ -108,9 +143,17 @@ export function RemoteAccessTab() {
     Promise.all([
       fetch(`${API_BASE}/v1/remote/tailscale-info`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => null),
       fetch(`${API_BASE}/v1/telegram/status`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => null),
-    ]).then(([ts, tg]) => {
+      fetch(`${API_BASE}/v1/remote/network-profiles`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => null),
+    ]).then(([ts, tg, np]) => {
       setTailscale(ts)
       setTelegram(tg)
+      setNetworkProfiles(np)
+      setRemoteOverrides({
+        remote_tailscale_frontend_url: np?.profiles?.tailscale?.configured_frontend_url || '',
+        remote_tailscale_backend_url: np?.profiles?.tailscale?.configured_backend_url || '',
+        remote_wireguard_frontend_url: np?.profiles?.wireguard?.configured_frontend_url || '',
+        remote_wireguard_backend_url: np?.profiles?.wireguard?.configured_backend_url || '',
+      })
       if (tg?.authorized_chats?.length) setChatIds(tg.authorized_chats.join(', '))
       setLoading(false)
     })
@@ -173,6 +216,26 @@ export function RemoteAccessTab() {
       else fb('err', res.description || 'Send failed')
     } catch (e: any) { fb('err', e.message) }
     finally { setSaving(null) }
+  }
+
+  const saveRemoteSetting = async (key: string) => {
+    setSaving(key)
+    try {
+      await fetch(`${API_BASE}/v1/settings/app/${key}`, {
+        method: 'PUT',
+        headers: AUTH_HEADERS,
+        body: JSON.stringify({ value: remoteOverrides[key] || '' }),
+      })
+      const np = await fetch(`${API_BASE}/v1/remote/network-profiles`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => null)
+      if (np) {
+        setNetworkProfiles(np)
+      }
+      fb('ok', 'Remote URL saved')
+    } catch (e: any) {
+      fb('err', e.message)
+    } finally {
+      setSaving(null)
+    }
   }
 
   const TELEGRAM_COMMANDS = [
@@ -261,6 +324,77 @@ export function RemoteAccessTab() {
           </div>
         ) : (
           <p className="text-sm text-gray-400">Could not load remote status</p>
+        )}
+      </Card>
+
+      {/* Network profiles */}
+      <Card icon="🛜" title="Network Profiles" subtitle="Configure separate URLs for Tailscale and WireGuard">
+        {networkProfiles ? (
+          <div className="space-y-4">
+            {(['tailscale', 'wireguard'] as const).map((network) => {
+              const profile = networkProfiles.profiles[network]
+              const prefix = network === 'tailscale' ? 'remote_tailscale' : 'remote_wireguard'
+              return (
+                <div key={network} className="p-4 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40">
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <h4 className="text-sm font-semibold text-gray-900 dark:text-white capitalize">{network}</h4>
+                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                        Detected IP: {profile.detected_ip || 'Not detected'}
+                      </p>
+                    </div>
+                    <span className={`text-xs px-2 py-1 rounded-full font-medium ${profile.connected ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'}`}>
+                      {profile.connected ? 'Connected' : 'Manual mode'}
+                    </span>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">Frontend URL</label>
+                      <div className="flex gap-2">
+                        <input
+                          value={remoteOverrides[`${prefix}_frontend_url`]}
+                          onChange={e => setRemoteOverrides(prev => ({ ...prev, [`${prefix}_frontend_url`]: e.target.value }))}
+                          placeholder={profile.frontend_url}
+                          className="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white px-3 py-2 text-sm font-mono"
+                        />
+                        <button
+                          onClick={() => saveRemoteSetting(`${prefix}_frontend_url`)}
+                          disabled={saving === `${prefix}_frontend_url`}
+                          className="px-3 py-2 text-xs rounded-lg bg-orange-500 hover:bg-orange-600 text-white disabled:opacity-40"
+                        >
+                          {saving === `${prefix}_frontend_url` ? '...' : 'Save'}
+                        </button>
+                        <CopyButton text={profile.frontend_url} />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">Backend URL</label>
+                      <div className="flex gap-2">
+                        <input
+                          value={remoteOverrides[`${prefix}_backend_url`]}
+                          onChange={e => setRemoteOverrides(prev => ({ ...prev, [`${prefix}_backend_url`]: e.target.value }))}
+                          placeholder={profile.backend_url}
+                          className="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white px-3 py-2 text-sm font-mono"
+                        />
+                        <button
+                          onClick={() => saveRemoteSetting(`${prefix}_backend_url`)}
+                          disabled={saving === `${prefix}_backend_url`}
+                          className="px-3 py-2 text-xs rounded-lg bg-orange-500 hover:bg-orange-600 text-white disabled:opacity-40"
+                        >
+                          {saving === `${prefix}_backend_url` ? '...' : 'Save'}
+                        </button>
+                        <CopyButton text={profile.backend_url} />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          <p className="text-sm text-gray-400">Could not load network profiles</p>
         )}
       </Card>
 

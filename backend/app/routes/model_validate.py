@@ -145,15 +145,21 @@ async def validate_model_config(model_id: str, provider: str) -> dict:
 
     if provider not in {"ollama", "github-copilot"}:
         try:
-            from app.routes.model_sync import discover_provider_models
+            from app.routes.model_sync import discover_provider_models, get_catalog_model_viability
 
             catalog_models, catalog_source = await discover_provider_models(provider)
             if catalog_source in {"provider_api", "codex_proxy"}:
-                catalog_ids = {m.get("model_id") for m in catalog_models if m.get("model_id")}
-                if model_id in catalog_ids:
-                    probe_valid = True
-                    source = "catalog_probe"
-                    warning = None
+                catalog_model = next((m for m in catalog_models if m.get("model_id") == model_id), None)
+                if catalog_model:
+                    is_viable, viability_warning, _ = get_catalog_model_viability(catalog_model)
+                    if is_viable:
+                        probe_valid = True
+                        source = "catalog_probe"
+                        warning = None
+                    else:
+                        probe_valid = False
+                        source = "catalog_probe"
+                        warning = viability_warning
                 else:
                     probe_valid = False
                     warning = f"This model is not exposed by the live {provider} catalog."

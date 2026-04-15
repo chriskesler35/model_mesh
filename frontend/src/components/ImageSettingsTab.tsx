@@ -11,6 +11,19 @@ interface SettingValue {
   updated_at: string | null
 }
 
+interface ComfyEndpoint {
+  url: string
+  status: 'online' | 'offline'
+  queue_running: number
+  queue_pending: number
+  queue_total: number
+}
+
+interface ComfyEndpointsResponse {
+  data: ComfyEndpoint[]
+  active_url?: string | null
+}
+
 const SETTING_FIELDS = [
   {
     key: 'comfyui_dir',
@@ -30,7 +43,7 @@ const SETTING_FIELDS = [
     key: 'comfyui_url',
     label: 'ComfyUI URL',
     placeholder: 'http://localhost:8188',
-    help: 'URL where ComfyUI API is reachable. Can also be set via COMFYUI_URL in .env.',
+    help: 'URL where ComfyUI API is reachable. You can also provide multiple URLs (comma-separated), e.g. http://127.0.0.1:8188,http://127.0.0.1:8189.',
     type: 'url',
   },
   {
@@ -74,17 +87,36 @@ export default function ImageSettingsTab() {
   const [comfyStatus, setComfyStatus] = useState<'online' | 'offline' | 'checking'>('checking')
   const [dirty, setDirty] = useState<Record<string, string>>({})
   const [workflows, setWorkflows] = useState<any[]>([])
+  const [comfyEndpoints, setComfyEndpoints] = useState<ComfyEndpoint[]>([])
+  const [activeComfyUrl, setActiveComfyUrl] = useState<string | null>(null)
+
+  const fetchEndpoints = useCallback(async () => {
+    try {
+      const res: ComfyEndpointsResponse = await fetch(`${API_BASE}/v1/comfyui/endpoints`, { headers: AUTH_HEADERS })
+        .then(r => r.json())
+        .catch(() => ({ data: [], active_url: null } as ComfyEndpointsResponse))
+      setComfyEndpoints(res.data || [])
+      setActiveComfyUrl(res.active_url || null)
+    } catch {
+      // ignore
+    }
+  }, [])
 
   const fetchSettings = useCallback(async () => {
     try {
-      const [settingsRes, statusRes, wfRes] = await Promise.all([
+      const [settingsRes, statusRes, wfRes, endpointsRes] = await Promise.all([
         fetch(`${API_BASE}/v1/settings/app`, { headers: AUTH_HEADERS }).then(r => r.json()),
         fetch(`${API_BASE}/v1/comfyui/status`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ status: 'offline' })),
         fetch(`${API_BASE}/v1/workflows`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+        fetch(`${API_BASE}/v1/comfyui/endpoints`, { headers: AUTH_HEADERS })
+          .then(r => r.json())
+          .catch(() => ({ data: [], active_url: null } as ComfyEndpointsResponse)),
       ])
       setSettings(settingsRes.data || {})
       setComfyStatus(statusRes.status === 'online' ? 'online' : 'offline')
       setWorkflows(wfRes.data || [])
+      setComfyEndpoints(endpointsRes.data || [])
+      setActiveComfyUrl(endpointsRes.active_url || null)
     } catch {
       // ignore
     } finally {
@@ -93,6 +125,12 @@ export default function ImageSettingsTab() {
   }, [])
 
   useEffect(() => { fetchSettings() }, [fetchSettings])
+
+  // Auto-refresh endpoint queue depth every 4 s while the tab is open
+  useEffect(() => {
+    const id = setInterval(() => { fetchEndpoints() }, 4000)
+    return () => clearInterval(id)
+  }, [fetchEndpoints])
 
   const saveSetting = async (key: string) => {
     const value = dirty[key]
@@ -223,6 +261,72 @@ export default function ImageSettingsTab() {
           )
         })}
       </div>
+
+      {/* ComfyUI endpoint health */}
+      {comfyEndpoints.length > 0 && (
+        <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4">
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">ComfyUI Endpoints</h3>
+              <p className="text-xs text-gray-500 mt-0.5">Live queue depth and active routing target.</p>
+            </div>
+            <button
+              onClick={fetchEndpoints}
+              className="px-2.5 py-1 text-xs font-medium rounded-md border border-gray-300 text-gray-600 hover:bg-gray-50 transition-colors"
+            >
+              Refresh
+            </button>
+          </div>
+
+          <div className="space-y-2">
+            {comfyEndpoints.map((ep) => {
+              const isActive = activeComfyUrl === ep.url
+              return (
+                <div
+                  key={ep.url}
+                  className={`rounded-lg border px-3 py-2 ${
+                    isActive
+                      ? 'border-orange-300 bg-orange-50/50 dark:border-orange-700 dark:bg-orange-900/20'
+                      : 'border-gray-200 dark:border-gray-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className={`inline-block w-2 h-2 rounded-full ${ep.status === 'online' ? 'bg-green-500' : 'bg-red-400'}`} />
+                        <span className="text-xs font-mono text-gray-700 dark:text-gray-200 truncate">{ep.url}</span>
+                        {isActive && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 dark:bg-orange-800/40 dark:text-orange-300">active</span>
+                        )}
+                      </div>
+                    </div>
+                    <span className={`text-[11px] px-1.5 py-0.5 rounded ${
+                      ep.status === 'online'
+                        ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
+                        : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
+                    }`}>{ep.status}</span>
+                  </div>
+
+                  <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
+                    <div className="rounded bg-gray-50 dark:bg-gray-700/40 px-2 py-1">
+                      <span className="text-gray-500">Total</span>
+                      <span className="ml-1 font-semibold text-gray-700 dark:text-gray-200">{ep.queue_total}</span>
+                    </div>
+                    <div className="rounded bg-gray-50 dark:bg-gray-700/40 px-2 py-1">
+                      <span className="text-gray-500">Pending</span>
+                      <span className="ml-1 font-semibold text-gray-700 dark:text-gray-200">{ep.queue_pending}</span>
+                    </div>
+                    <div className="rounded bg-gray-50 dark:bg-gray-700/40 px-2 py-1">
+                      <span className="text-gray-500">Running</span>
+                      <span className="ml-1 font-semibold text-gray-700 dark:text-gray-200">{ep.queue_running}</span>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Available workflows */}
       {workflows.length > 0 && (

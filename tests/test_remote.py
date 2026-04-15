@@ -35,6 +35,29 @@ class TestRemoteHealth:
             # Should have some network info
             assert isinstance(data, dict)
 
+    def test_network_profiles(self, client):
+        """GET /v1/remote/network-profiles returns both Tailscale and WireGuard profiles."""
+        r = client.get("/v1/remote/network-profiles")
+        assert r.status_code == 200
+        data = r.json()
+        assert isinstance(data, dict)
+
+        profiles = data.get("profiles")
+        assert isinstance(profiles, dict)
+        assert "tailscale" in profiles
+        assert "wireguard" in profiles
+
+        for key in ("tailscale", "wireguard"):
+            profile = profiles[key]
+            assert isinstance(profile, dict)
+            assert profile.get("network") == key
+            assert "detected_ip" in profile
+            assert "connected" in profile
+            assert "frontend_url" in profile
+            assert "backend_url" in profile
+            assert "configured_frontend_url" in profile
+            assert "configured_backend_url" in profile
+
 
 class TestRemoteSessions:
     """Tests for /v1/remote/sessions CRUD."""

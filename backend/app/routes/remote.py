@@ -8,6 +8,12 @@ from datetime import datetime
 import asyncio
 import logging
 import os
+import socket
+import subprocess
+import re
+
+from app.database import AsyncSessionLocal
+from app.services.app_settings_helper import get_setting
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +60,57 @@ class HealthCheck(BaseModel):
 
 
 START_TIME = datetime.now()
+
+
+def _detect_tailscale_ip() -> Optional[str]:
+    """Detect local Tailscale IPv4 address if available."""
+    try:
+        result = subprocess.run(
+            ["tailscale", "ip", "-4"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            ip = (result.stdout or "").strip().splitlines()
+            return ip[0].strip() if ip else None
+    except Exception:
+        pass
+    return None
+
+
+def _detect_wireguard_ip() -> Optional[str]:
+    """Detect local WireGuard IPv4 address from interface listings.
+
+    Works on Windows by scanning ipconfig output for adapters containing
+    "WireGuard"/"Wintun" and extracting IPv4 values.
+    """
+    try:
+        output = subprocess.run(
+            ["ipconfig"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if output.returncode != 0:
+            return None
+
+        blocks = re.split(r"\r?\n\r?\n", output.stdout or "")
+        for block in blocks:
+            lower = block.lower()
+            if "wireguard" not in lower and "wintun" not in lower:
+                continue
+
+            m = re.search(r"IPv4[^:\n]*:\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})", block, re.IGNORECASE)
+            if m:
+                return m.group(1)
+
+            m2 = re.search(r"([0-9]{1,3}(?:\.[0-9]{1,3}){3})", block)
+            if m2:
+                return m2.group(1)
+    except Exception:
+        pass
+    return None
 
 
 @router.get("/health", response_model=HealthCheck)
@@ -253,27 +310,8 @@ async def send_callback(url: str, data: Dict[str, Any]):
 @router.get("/tailscale-info")
 async def get_tailscale_info():
     """Get Tailscale connection info for remote access."""
-    import socket
-    
     hostname = socket.gethostname()
-    
-    # Try to get Tailscale IP
-    tailscale_ip = None
-    try:
-        # Check for Tailscale interface
-        import subprocess
-        result = subprocess.run(
-            ["tailscale", "ip"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode == 0:
-            ips = result.stdout.strip().split('\n')
-            # IPv4 is usually first
-            tailscale_ip = ips[0] if ips else None
-    except Exception:
-        pass
+    tailscale_ip = _detect_tailscale_ip()
     
     return {
         "hostname": hostname,
@@ -286,4 +324,53 @@ async def get_tailscale_info():
             "tailscale": f"Connect via Tailscale: http://{tailscale_ip or '100.106.217.99'}:3001",
             "local": f"Local access: http://localhost:3001"
         }
+    }
+
+
+@router.get("/network-profiles")
+async def get_network_profiles():
+    """Get remote-access profiles for Tailscale and WireGuard.
+
+    Returns detected IPs plus user-configured override URLs for each network.
+    """
+    hostname = socket.gethostname()
+    tailscale_ip = _detect_tailscale_ip()
+    wireguard_ip = _detect_wireguard_ip()
+
+    async with AsyncSessionLocal() as db:
+        tailscale_frontend = await get_setting("remote_tailscale_frontend_url", db)
+        tailscale_backend = await get_setting("remote_tailscale_backend_url", db)
+        wireguard_frontend = await get_setting("remote_wireguard_frontend_url", db)
+        wireguard_backend = await get_setting("remote_wireguard_backend_url", db)
+
+    def _default_frontend(ip: Optional[str]) -> str:
+        host = ip or hostname
+        return f"http://{host}:3001"
+
+    def _default_backend(ip: Optional[str]) -> str:
+        host = ip or hostname
+        return f"http://{host}:19000"
+
+    return {
+        "hostname": hostname,
+        "profiles": {
+            "tailscale": {
+                "network": "tailscale",
+                "detected_ip": tailscale_ip,
+                "connected": bool(tailscale_ip),
+                "frontend_url": tailscale_frontend or _default_frontend(tailscale_ip),
+                "backend_url": tailscale_backend or _default_backend(tailscale_ip),
+                "configured_frontend_url": tailscale_frontend,
+                "configured_backend_url": tailscale_backend,
+            },
+            "wireguard": {
+                "network": "wireguard",
+                "detected_ip": wireguard_ip,
+                "connected": bool(wireguard_ip),
+                "frontend_url": wireguard_frontend or _default_frontend(wireguard_ip),
+                "backend_url": wireguard_backend or _default_backend(wireguard_ip),
+                "configured_frontend_url": wireguard_frontend,
+                "configured_backend_url": wireguard_backend,
+            },
+        },
     }

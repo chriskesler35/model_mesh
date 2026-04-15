@@ -328,7 +328,7 @@ async def validate_catalog(
             provider = provider_result.scalar_one_or_none()
             provider_cache[provider_key] = provider
 
-    from app.routes.model_sync import discover_provider_models, fetch_ollama_models
+    from app.routes.model_sync import discover_provider_models, fetch_ollama_models, get_catalog_model_viability
 
     for provider_key, provider_models in grouped_models.items():
         provider = provider_cache.get(provider_key)
@@ -353,19 +353,23 @@ async def validate_catalog(
                 provider_summary["processed"] += 1
             continue
 
-        catalog_ids: set[str] | None = None
+        catalog_models_by_id: dict[str, dict] | None = None
         catalog_source: str | None = None
         catalog_error: str | None = None
 
         try:
             if provider_name in _LOCAL_MODEL_PROVIDERS:
                 ollama_models = await fetch_ollama_models(provider.api_base_url or "http://localhost:11434")
-                catalog_ids = {m.get("name") for m in ollama_models if m.get("name")}
+                catalog_models_by_id = {m.get("name"): m for m in ollama_models if m.get("name")}
                 catalog_source = "ollama_catalog"
             else:
                 discovered_models, discovered_source = await discover_provider_models(provider_name)
                 if discovered_source in {"provider_api", "codex_proxy"}:
-                    catalog_ids = {m.get("model_id") for m in discovered_models if m.get("model_id")}
+                    catalog_models_by_id = {
+                        m.get("model_id"): m
+                        for m in discovered_models
+                        if m.get("model_id")
+                    }
                     catalog_source = discovered_source
                 else:
                     catalog_error = f"Could not validate against a live {provider_name} catalog."
@@ -373,14 +377,24 @@ async def validate_catalog(
             catalog_error = f"Could not validate against a live {provider_name} catalog — {type(exc).__name__}."
 
         for model in provider_models:
-            if catalog_ids is not None:
-                if model.model_id in catalog_ids:
-                    validation = {
-                        "valid": True,
-                        "live_verified": True,
-                        "source": "catalog_probe",
-                        "warning": None,
-                    }
+            if catalog_models_by_id is not None:
+                catalog_model = catalog_models_by_id.get(model.model_id)
+                if catalog_model is not None:
+                    is_viable, viability_warning, _ = get_catalog_model_viability(catalog_model)
+                    if is_viable:
+                        validation = {
+                            "valid": True,
+                            "live_verified": True,
+                            "source": "catalog_probe",
+                            "warning": None,
+                        }
+                    else:
+                        validation = {
+                            "valid": False,
+                            "live_verified": False,
+                            "source": f"catalog_probe:{catalog_source}",
+                            "warning": viability_warning,
+                        }
                 else:
                     validation = {
                         "valid": False,

@@ -68,6 +68,8 @@ interface SyncProviderDetail {
   discovered: number
   added: number
   skipped: number
+  deprecated_skipped?: number
+  deactivated?: number
 }
 
 interface SyncRunResult {
@@ -117,6 +119,36 @@ function formatSyncSource(source?: string): string {
   return source.replace(/_/g, ' ')
 }
 
+function groupModelsByProvider(modelList: Model[]): Record<string, Model[]> {
+  return modelList.reduce((acc, model) => {
+    const provider = model.provider_name || 'Unknown'
+    if (!acc[provider]) acc[provider] = []
+    acc[provider].push(model)
+    return acc
+  }, {} as Record<string, Model[]>)
+}
+
+function buildExpandedProviderState(
+  groupMap: Record<string, Model[]>,
+  previous: Record<string, boolean>,
+  getDefault: (provider: string, providerModels: Model[]) => boolean
+): Record<string, boolean> {
+  return Object.fromEntries(
+    Object.entries(groupMap).map(([provider, providerModels]) => [
+      provider,
+      previous[provider] ?? getDefault(provider, providerModels),
+    ])
+  )
+}
+
+function isUnavailableValidation(validation: ValidationResult | null): boolean {
+  const message = validation?.warning?.toLowerCase() || ''
+  return message.includes('deprecated')
+    || message.includes('no longer viable')
+    || message.includes('unavailable')
+    || message.includes('not exposed by the live')
+}
+
 export default function ModelsPage() {
   const [models, setModels] = useState<Model[]>([])
   const [reviewModels, setReviewModels] = useState<Model[]>([])
@@ -137,6 +169,8 @@ export default function ModelsPage() {
   const [catalogValidating, setCatalogValidating] = useState(false)
   const [catalogValidationResult, setCatalogValidationResult] = useState<CatalogValidationResult | null>(null)
   const [showReviewSection, setShowReviewSection] = useState(false)
+  const [expandedValidatedProviders, setExpandedValidatedProviders] = useState<Record<string, boolean>>({})
+  const [expandedReviewProviders, setExpandedReviewProviders] = useState<Record<string, boolean>>({})
   const [formData, setFormData] = useState<{
     model_id: string
     display_name: string
@@ -263,6 +297,20 @@ export default function ModelsPage() {
     }
     fetchData()
   }, [])
+
+  useEffect(() => {
+    const groupedModels = groupModelsByProvider(models)
+    setExpandedValidatedProviders((prev) =>
+      buildExpandedProviderState(groupedModels, prev, (_provider, providerModels) => providerModels.length <= 12)
+    )
+  }, [models])
+
+  useEffect(() => {
+    const groupedModels = groupModelsByProvider(reviewModels)
+    setExpandedReviewProviders((prev) =>
+      buildExpandedProviderState(groupedModels, prev, () => false)
+    )
+  }, [reviewModels])
 
   // Fetch model suggestions when provider changes
   useEffect(() => {
@@ -512,22 +560,17 @@ export default function ModelsPage() {
     )
   }
 
-  // Group models by provider
-  const grouped = models.reduce((acc, model) => {
-    const provider = model.provider_name || 'Unknown'
-    if (!acc[provider]) acc[provider] = []
-    acc[provider].push(model)
-    return acc
-  }, {} as Record<string, Model[]>)
+  const grouped = groupModelsByProvider(models)
+  const reviewGrouped = groupModelsByProvider(reviewModels)
 
-  const reviewGrouped = reviewModels.reduce((acc, model) => {
-    const provider = model.provider_name || 'Unknown'
-    if (!acc[provider]) acc[provider] = []
-    acc[provider].push(model)
-    return acc
-  }, {} as Record<string, Model[]>)
-
-  const renderModelGroups = (groupMap: Record<string, Model[]>, emptyLabel: string) => {
+  const renderModelGroups = (
+    groupMap: Record<string, Model[]>,
+    expandedProviders: Record<string, boolean>,
+    setExpandedProviders: (
+      value: Record<string, boolean> | ((prev: Record<string, boolean>) => Record<string, boolean>)
+    ) => void,
+    emptyLabel: string
+  ) => {
     const entries = Object.entries(groupMap)
     if (entries.length === 0) {
       return (
@@ -537,82 +580,128 @@ export default function ModelsPage() {
       )
     }
 
-    return entries.map(([provider, providerModels]) => (
-      <div key={provider} className="mb-8">
-        <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4 capitalize">{provider}</h2>
-        <div className="bg-white dark:bg-gray-800 shadow sm:rounded-lg">
-          <div className="w-full overflow-x-auto">
-            <table className="min-w-[920px] w-full divide-y divide-gray-200 dark:divide-gray-700">
-              <thead className="bg-gray-50 dark:bg-gray-700">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Model</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Context</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Input Cost</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Output Cost</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Capabilities</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Status</th>
-                  <th className="sticky right-0 z-10 bg-gray-50 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 shadow-[-12px_0_12px_-12px_rgba(15,23,42,0.2)] dark:bg-gray-700 dark:text-gray-300 sm:px-6">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                {providerModels.map((model) => (
-                  <tr key={model.id} className="group hover:bg-gray-50 dark:hover:bg-gray-700">
-                    <td className="px-4 py-4 align-top sm:px-6">
-                      <div className="text-sm font-medium text-gray-900 dark:text-white">{model.display_name || model.model_id}</div>
-                      <div className="max-w-[18rem] break-all text-sm text-gray-500 dark:text-gray-400">{model.model_id}</div>
-                    </td>
-                    <td className="px-4 py-4 whitespace-nowrap align-top sm:px-6"><span className="text-sm text-gray-900 dark:text-white">{formatContext(model.context_window)} tokens</span></td>
-                    <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white align-top sm:px-6">{formatCost(model.cost_per_1m_input)}</td>
-                    <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white align-top sm:px-6">{formatCost(model.cost_per_1m_output)}</td>
-                    <td className="px-4 py-4 align-top sm:px-6">
-                      <div className="flex max-w-[12rem] flex-wrap gap-1">
-                        {Object.entries(model.capabilities || {}).map(([key, value]) => value && (
-                          <span key={key} className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200">{key}</span>
-                        ))}
-                      </div>
-                    </td>
-                    <td className="px-4 py-4 align-top sm:px-6">
-                      <div className="flex max-w-[16rem] flex-col gap-1">
-                        <button
-                          onClick={() => handleToggleActive(model)}
-                          className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium w-fit ${
-                            model.is_active
-                              ? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200'
-                              : 'bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200'
-                          }`}
-                        >
-                          {model.is_active ? 'Active' : 'Inactive'}
-                        </button>
-                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium w-fit ${
-                          model.validation_status === 'validated'
-                            ? 'bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200'
-                            : model.validation_status === 'failed'
-                              ? 'bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200'
-                              : 'bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200'
-                        }`}>
-                          {model.validation_status === 'validated' ? 'Validated' : model.validation_status === 'failed' ? 'Validation failed' : 'Needs review'}
-                        </span>
-                        {(model.validation_warning || model.validation_error) && (
-                          <span className="text-[11px] text-gray-500 dark:text-gray-400 max-w-xs">{model.validation_warning || model.validation_error}</span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="sticky right-0 bg-white px-4 py-4 text-sm align-top shadow-[-12px_0_12px_-12px_rgba(15,23,42,0.2)] transition-colors group-hover:bg-gray-50 dark:bg-gray-800 dark:group-hover:bg-gray-700 sm:px-6">
-                      <div className="flex min-w-[140px] flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
-                        <button onClick={() => handleRevalidateModel(model)} disabled={revalidatingId === model.id} className="whitespace-nowrap text-left text-blue-600 hover:text-blue-900 dark:text-blue-400 dark:hover:text-blue-300 disabled:opacity-50">
-                          {revalidatingId === model.id ? 'Checking…' : 'Revalidate'}
-                        </button>
-                        <button onClick={() => handleDeleteModel(model)} className="whitespace-nowrap text-left text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300">Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+    return (
+      <div className="space-y-6">
+        {entries.length > 1 && (
+          <div className="flex items-center justify-end gap-2">
+            <button
+              onClick={() => setExpandedProviders(Object.fromEntries(entries.map(([provider]) => [provider, true])))}
+              className="inline-flex items-center rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+            >
+              Expand All
+            </button>
+            <button
+              onClick={() => setExpandedProviders(Object.fromEntries(entries.map(([provider]) => [provider, false])))}
+              className="inline-flex items-center rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+            >
+              Collapse All
+            </button>
           </div>
-        </div>
+        )}
+
+        {entries.map(([provider, providerModels]) => {
+          const isExpanded = expandedProviders[provider] ?? true
+
+          return (
+            <div key={provider} className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm dark:border-gray-700 dark:bg-gray-800">
+              <button
+                type="button"
+                onClick={() => setExpandedProviders((prev) => ({ ...prev, [provider]: !isExpanded }))}
+                aria-expanded={isExpanded}
+                className="flex w-full items-center justify-between gap-4 px-4 py-4 text-left hover:bg-gray-50 dark:hover:bg-gray-700 sm:px-6"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-gray-500 dark:text-gray-400">{isExpanded ? '▾' : '▸'}</span>
+                  <div>
+                    <h2 className="text-lg font-medium text-gray-900 dark:text-white capitalize">{provider}</h2>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                      {providerModels.length} {providerModels.length === 1 ? 'model' : 'models'}
+                    </p>
+                  </div>
+                </div>
+                <span className="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">
+                  {isExpanded ? 'Collapse' : 'Expand'}
+                </span>
+              </button>
+
+              {isExpanded && (
+                <div className="border-t border-gray-200 dark:border-gray-700">
+                  <div className="w-full overflow-x-auto">
+                    <table className="min-w-[920px] w-full divide-y divide-gray-200 dark:divide-gray-700">
+                      <thead className="bg-gray-50 dark:bg-gray-700">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Model</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Context</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Input Cost</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Output Cost</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Capabilities</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider sm:px-6">Status</th>
+                          <th className="sticky right-0 z-10 bg-gray-50 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 shadow-[-12px_0_12px_-12px_rgba(15,23,42,0.2)] dark:bg-gray-700 dark:text-gray-300 sm:px-6">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                        {providerModels.map((model) => (
+                          <tr key={model.id} className="group hover:bg-gray-50 dark:hover:bg-gray-700">
+                            <td className="px-4 py-4 align-top sm:px-6">
+                              <div className="text-sm font-medium text-gray-900 dark:text-white">{model.display_name || model.model_id}</div>
+                              <div className="max-w-[18rem] break-all text-sm text-gray-500 dark:text-gray-400">{model.model_id}</div>
+                            </td>
+                            <td className="px-4 py-4 whitespace-nowrap align-top sm:px-6"><span className="text-sm text-gray-900 dark:text-white">{formatContext(model.context_window)} tokens</span></td>
+                            <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white align-top sm:px-6">{formatCost(model.cost_per_1m_input)}</td>
+                            <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white align-top sm:px-6">{formatCost(model.cost_per_1m_output)}</td>
+                            <td className="px-4 py-4 align-top sm:px-6">
+                              <div className="flex max-w-[12rem] flex-wrap gap-1">
+                                {Object.entries(model.capabilities || {}).map(([key, value]) => value && (
+                                  <span key={key} className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200">{key}</span>
+                                ))}
+                              </div>
+                            </td>
+                            <td className="px-4 py-4 align-top sm:px-6">
+                              <div className="flex max-w-[16rem] flex-col gap-1">
+                                <button
+                                  onClick={() => handleToggleActive(model)}
+                                  className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium w-fit ${
+                                    model.is_active
+                                      ? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200'
+                                      : 'bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200'
+                                  }`}
+                                >
+                                  {model.is_active ? 'Active' : 'Inactive'}
+                                </button>
+                                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium w-fit ${
+                                  model.validation_status === 'validated'
+                                    ? 'bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200'
+                                    : model.validation_status === 'failed'
+                                      ? 'bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200'
+                                      : 'bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200'
+                                }`}>
+                                  {model.validation_status === 'validated' ? 'Validated' : model.validation_status === 'failed' ? 'Validation failed' : 'Needs review'}
+                                </span>
+                                {(model.validation_warning || model.validation_error) && (
+                                  <span className="text-[11px] text-gray-500 dark:text-gray-400 max-w-xs">{model.validation_warning || model.validation_error}</span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="sticky right-0 bg-white px-4 py-4 text-sm align-top shadow-[-12px_0_12px_-12px_rgba(15,23,42,0.2)] transition-colors group-hover:bg-gray-50 dark:bg-gray-800 dark:group-hover:bg-gray-700 sm:px-6">
+                              <div className="flex min-w-[140px] flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+                                <button onClick={() => handleRevalidateModel(model)} disabled={revalidatingId === model.id} className="whitespace-nowrap text-left text-blue-600 hover:text-blue-900 dark:text-blue-400 dark:hover:text-blue-300 disabled:opacity-50">
+                                  {revalidatingId === model.id ? 'Checking…' : 'Revalidate'}
+                                </button>
+                                <button onClick={() => handleDeleteModel(model)} className="whitespace-nowrap text-left text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300">Delete</button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )
+        })}
       </div>
-    ))
+    )
   }
 
   return (
@@ -731,6 +820,11 @@ export default function ModelsPage() {
                     <p>
                       Discovered {syncResult.provider_details[name].discovered} · Added {syncResult.provider_details[name].added} · Skipped {syncResult.provider_details[name].skipped}
                     </p>
+                    {(syncResult.provider_details[name].deprecated_skipped || syncResult.provider_details[name].deactivated) && (
+                      <p>
+                        Deprecated skipped {syncResult.provider_details[name].deprecated_skipped || 0} · Hidden {syncResult.provider_details[name].deactivated || 0}
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
@@ -743,13 +837,13 @@ export default function ModelsPage() {
         <div className="font-medium">Validated Catalog</div>
         <div className="mt-1 text-xs opacity-90">{models.length} validated and active models are shown here by default.</div>
       </div>
-      {renderModelGroups(grouped, 'No validated active models yet. Run Validate Catalog to promote live catalog matches.')}
+      {renderModelGroups(grouped, expandedValidatedProviders, setExpandedValidatedProviders, 'No validated active models yet. Run Validate Catalog to promote live catalog matches.')}
 
       <div className="mb-4 mt-10 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
         <div className="flex items-center justify-between gap-3">
           <div>
             <div className="font-medium">Needs Review</div>
-            <div className="mt-1 text-xs opacity-90">{reviewModels.length} models are hidden from the main list because they are unvalidated, inactive, or failed validation.</div>
+            <div className="mt-1 text-xs opacity-90">{reviewModels.length} models are hidden from the main list because they are unvalidated, inactive, deprecated, or failed validation.</div>
           </div>
           <button
             onClick={() => setShowReviewSection((prev) => !prev)}
@@ -759,7 +853,7 @@ export default function ModelsPage() {
           </button>
         </div>
       </div>
-      {showReviewSection && renderModelGroups(reviewGrouped, 'No models need review.')}
+      {showReviewSection && renderModelGroups(reviewGrouped, expandedReviewProviders, setExpandedReviewProviders, 'No models need review.')}
 
       {/* Add Model Modal */}
       {showAddModal && (
@@ -852,7 +946,7 @@ export default function ModelsPage() {
                     <div className="flex items-center gap-2 font-medium">
                       <span>{validation.valid ? '✅' : '❌'}</span>
                       <span className={validation.valid ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}>
-                        {validation.valid ? 'Valid model' : 'Model not found'}
+                        {validation.valid ? 'Valid model' : isUnavailableValidation(validation) ? 'Model unavailable' : 'Model not found'}
                       </span>
                       <span className="text-xs font-normal text-gray-400">via {validation.source}</span>
                     </div>
@@ -890,7 +984,7 @@ export default function ModelsPage() {
                     )}
                     {!validation.valid && (
                       <p className="mt-1 text-xs text-red-600 dark:text-red-400">
-                        This model ID was not recognized by {validation.provider}. Check the ID and try again.
+                        {validation.warning || `This model ID was not recognized by ${validation.provider}. Check the ID and try again.`}
                       </p>
                     )}
                   </div>

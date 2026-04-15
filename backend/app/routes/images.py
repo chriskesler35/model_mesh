@@ -21,7 +21,7 @@ from app.config import settings
 from app.services.app_settings_helper import get_setting
 from app.routes.workflows import find_workflow_path, _convert_editor_to_api, _fetch_object_info_schema
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Tuple
 import os
 
 logger = logging.getLogger(__name__)
@@ -89,6 +89,85 @@ def _extract_comfyui_file_refs(node_output: dict) -> list[dict]:
 # ComfyUI paths are now configurable via Settings > Image Generation
 # Priority: DB settings > .env > defaults (empty = disabled)
 _comfyui_proc: Optional[subprocess.Popen] = None
+_comfyui_rr_index: int = 0
+
+
+def _parse_comfyui_urls(url_value: str) -> List[str]:
+    """Parse configured ComfyUI URL(s) into a normalized list.
+
+    Supports comma/semicolon/newline separated values, e.g.
+    "http://127.0.0.1:8188, http://127.0.0.1:8189".
+    """
+    raw = (url_value or "").strip()
+    if not raw:
+        return ["http://localhost:8188"]
+
+    parts: List[str] = []
+    for chunk in raw.replace(";", ",").replace("\n", ",").split(","):
+        url = chunk.strip().rstrip("/")
+        if url and url not in parts:
+            parts.append(url)
+    return parts or ["http://localhost:8188"]
+
+
+async def _resolve_comfyui_endpoint(configured_url_value: str) -> Optional[str]:
+    """Choose a reachable ComfyUI endpoint using least-load + failover.
+
+    Behavior:
+    - Prefer the least-busy healthy endpoint from configured URL list.
+    - Tie-break by round-robin order for fairness.
+    - Attempt auto-launch only on the first configured endpoint.
+    - Fall back to any endpoint that becomes healthy after launch attempt.
+    """
+    global _comfyui_rr_index
+
+    async def _queue_load(url: str) -> Optional[Tuple[int, int, int]]:
+        """Return (total, pending, running) load from /queue, or None if unhealthy."""
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                r = await client.get(f"{url}/queue")
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            running = len(data.get("queue_running", []) or [])
+            pending = len(data.get("queue_pending", []) or [])
+            return (running + pending, pending, running)
+        except Exception:
+            return None
+
+    urls = _parse_comfyui_urls(configured_url_value)
+    if not urls:
+        return None
+
+    start = _comfyui_rr_index % len(urls)
+    _comfyui_rr_index += 1
+    ordered = urls[start:] + urls[:start]
+
+    candidates: List[Tuple[Tuple[int, int, int], str]] = []
+    for url in ordered:
+        load = await _queue_load(url)
+        if load is not None:
+            candidates.append((load, url))
+
+    if candidates:
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]
+
+    primary = urls[0]
+    if await ensure_comfyui(primary):
+        return primary
+
+    candidates = []
+    for url in ordered:
+        load = await _queue_load(url)
+        if load is not None:
+            candidates.append((load, url))
+
+    if candidates:
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]
+
+    return None
 
 
 async def _get_comfyui_paths():
@@ -155,10 +234,8 @@ async def launch_comfyui(url: str = "http://localhost:8188") -> bool:
             str(comfyui_python), "main.py",
             "--listen", "0.0.0.0",
             "--default-device", "0",  # primary GPU, keeps others visible for overflow
-            "--highvram",               # maximize VRAM usage, offload only when needed
-            "--async-offload", "2",   # async offload across 2 streams when needed
-            "--cuda-malloc",            # faster CUDA memory allocation
-            "--fast",                   # enable fast-path optimizations
+            # Safer default profile: avoid aggressive VRAM flags to reduce OOM risk
+            # for larger/multi-mask inpaint workflows.
             "--preview-method", "auto",
             "--enable-cors-header", "*",
         ]
@@ -1407,19 +1484,21 @@ async def generate_image(
                 )
                 
             elif request.model == "comfyui-local":
-                comfyui_url = await get_setting("comfyui_url", db)
+                configured_comfyui_url = await get_setting("comfyui_url", db)
                 comfyui_dir = await get_setting("comfyui_dir", db)
 
                 # Try ComfyUI; fall back to Gemini on any failure (unreachable, timeout, error)
                 comfyui_failed = False
                 comfyui_error = ""
                 try:
-                    comfyui_available = await ensure_comfyui(comfyui_url)
-                    if not comfyui_available:
-                        raise Exception("ComfyUI not reachable after auto-launch attempt")
+                    active_comfyui_url = await _resolve_comfyui_endpoint(configured_comfyui_url)
+                    if not active_comfyui_url:
+                        raise Exception(
+                            f"ComfyUI not reachable at any configured URL: {configured_comfyui_url}"
+                        )
                     result = await generate_with_comfyui(
                         prompt=request.prompt,
-                        comfyui_url=comfyui_url,
+                        comfyui_url=active_comfyui_url,
                         workflow_id=request.workflow_id,
                         comfyui_dir=comfyui_dir,
                     )
@@ -1737,20 +1816,24 @@ async def generate_variation(
             # NO silent fallback: if user picks ComfyUI and it fails, they see the real error.
             # (Fallback used to hide ComfyUI problems behind confusing Gemini errors.)
             _ensure_comfyui_png_source(source_mime, "variations")
-            comfyui_url = await get_setting("comfyui_url", db)
+            configured_comfyui_url = await get_setting("comfyui_url", db)
             comfyui_dir = await get_setting("comfyui_dir", db)
             chosen_workflow = (request.workflow_id if request and request.workflow_id else None) or "sdxl-img2img"
 
-            comfyui_available = await ensure_comfyui(comfyui_url)
-            if not comfyui_available:
+            active_comfyui_url = await _resolve_comfyui_endpoint(configured_comfyui_url)
+            if not active_comfyui_url:
                 raise HTTPException(
                     status_code=503,
-                    detail=f"ComfyUI not reachable at {comfyui_url}. Start ComfyUI, check the URL in Settings, or pick Gemini as the variation model."
+                    detail=(
+                        "ComfyUI not reachable at configured URL(s): "
+                        f"{configured_comfyui_url}. Start ComfyUI, check the URL in Settings, "
+                        "or pick Gemini as the variation model."
+                    )
                 )
             result = await generate_img2img_with_comfyui(
                 source_bytes=source_bytes,
                 prompt=prompt or "high quality variation",
-                comfyui_url=comfyui_url,
+                comfyui_url=active_comfyui_url,
                 comfyui_dir=comfyui_dir,
                 workflow_id=chosen_workflow,
                 source_mime=source_mime,
@@ -1970,17 +2053,19 @@ async def edit_image(req: ImageEditRequest, db: AsyncSession = Depends(get_db)):
 
     # Try original model first (same priority as variations endpoint)
     if preferred_model == "comfyui-local":
-        comfyui_url = await get_setting("comfyui_url", db)
+        configured_comfyui_url = await get_setting("comfyui_url", db)
         comfyui_dir = await get_setting("comfyui_dir", db)
         try:
             _ensure_comfyui_png_source(source_mime, "edits")
-            comfyui_available = await ensure_comfyui(comfyui_url)
-            if not comfyui_available:
-                raise Exception("ComfyUI not reachable")
+            active_comfyui_url = await _resolve_comfyui_endpoint(configured_comfyui_url)
+            if not active_comfyui_url:
+                raise Exception(
+                    f"ComfyUI not reachable at configured URL(s): {configured_comfyui_url}"
+                )
             result = await generate_img2img_with_comfyui(
                 source_bytes=source_bytes,
                 prompt=req.prompt,
-                comfyui_url=comfyui_url,
+                comfyui_url=active_comfyui_url,
                 workflow_id=chosen_workflow,
                 comfyui_dir=comfyui_dir,
                 source_mime=source_mime,

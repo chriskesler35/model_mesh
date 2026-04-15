@@ -25,6 +25,36 @@ _CONTROL_WIDGETS = {"fixed", "increment", "decrement", "randomize"}
 _OBJECT_INFO_CACHE: dict[str, dict[str, list[str]]] = {}
 
 
+def _parse_comfyui_urls(url_value: str) -> List[str]:
+    """Parse one or more ComfyUI base URLs from settings."""
+    raw = (url_value or "").strip()
+    if not raw:
+        return ["http://localhost:8188"]
+
+    urls: List[str] = []
+    for chunk in raw.replace(";", ",").replace("\n", ",").split(","):
+        url = chunk.strip().rstrip("/")
+        if url and url not in urls:
+            urls.append(url)
+    return urls or ["http://localhost:8188"]
+
+
+async def _get_running_comfyui_url(db: AsyncSession, timeout: float = 3.0) -> Optional[str]:
+    """Return the first configured ComfyUI URL that responds to /system_stats."""
+    configured = await get_setting("comfyui_url", db)
+    urls = _parse_comfyui_urls(configured)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for url in urls:
+            try:
+                r = await client.get(f"{url}/system_stats")
+                if r.status_code == 200:
+                    return url
+            except Exception:
+                continue
+    return None
+
+
 async def _fetch_object_info_schema(comfyui_url: str) -> dict[str, list[str]]:
     """Fetch the ordered required-input names for every node class from ComfyUI.
 
@@ -275,16 +305,20 @@ async def get_workflow(workflow_id: str):
 
 
 @router.get("/comfyui/checkpoints", response_model=CheckpointsResponse)
-async def get_checkpoints():
+async def get_checkpoints(db: AsyncSession = Depends(get_db)):
     """Query ComfyUI for available checkpoints and UNET models."""
     checkpoints: List[str] = []
     unet_models: List[str] = []
 
     try:
+        comfyui_url = await _get_running_comfyui_url(db, timeout=5.0)
+        if not comfyui_url:
+            return CheckpointsResponse(checkpoints=[], unet_models=[], status="offline")
+
         async with httpx.AsyncClient(timeout=5.0) as client:
             # Standard checkpoints
             try:
-                r = await client.get("http://localhost:8188/object_info/CheckpointLoaderSimple")
+                r = await client.get(f"{comfyui_url}/object_info/CheckpointLoaderSimple")
                 if r.status_code == 200:
                     info = r.json()
                     ckpt_input = info.get("CheckpointLoaderSimple", {}).get("input", {}).get("required", {})
@@ -300,7 +334,7 @@ async def get_checkpoints():
 
             # Flux-style UNET models
             try:
-                r = await client.get("http://localhost:8188/object_info/UNETLoader")
+                r = await client.get(f"{comfyui_url}/object_info/UNETLoader")
                 if r.status_code == 200:
                     info = r.json()
                     unet_input = info.get("UNETLoader", {}).get("input", {}).get("required", {})
@@ -324,13 +358,89 @@ class LorasResponse(BaseModel):
     status: str  # "online" or "offline"
 
 
+class ComfyUIEndpointStatus(BaseModel):
+    url: str
+    status: str  # "online" or "offline"
+    queue_running: int
+    queue_pending: int
+    queue_total: int
+
+
+class ComfyUIEndpointsResponse(BaseModel):
+    data: List[ComfyUIEndpointStatus]
+    active_url: Optional[str] = None
+
+
+@router.get("/comfyui/endpoints", response_model=ComfyUIEndpointsResponse)
+async def comfyui_endpoints(db: AsyncSession = Depends(get_db)):
+    """Return live health + queue depth for all configured ComfyUI URLs."""
+    configured = await get_setting("comfyui_url", db)
+    urls = _parse_comfyui_urls(configured)
+    results: List[ComfyUIEndpointStatus] = []
+
+    async with httpx.AsyncClient(timeout=3.0) as client:
+        for url in urls:
+            try:
+                stats_resp = await client.get(f"{url}/system_stats")
+                if stats_resp.status_code != 200:
+                    results.append(
+                        ComfyUIEndpointStatus(
+                            url=url,
+                            status="offline",
+                            queue_running=0,
+                            queue_pending=0,
+                            queue_total=0,
+                        )
+                    )
+                    continue
+
+                running = 0
+                pending = 0
+                queue_resp = await client.get(f"{url}/queue")
+                if queue_resp.status_code == 200:
+                    queue_data = queue_resp.json()
+                    running = len(queue_data.get("queue_running", []) or [])
+                    pending = len(queue_data.get("queue_pending", []) or [])
+
+                results.append(
+                    ComfyUIEndpointStatus(
+                        url=url,
+                        status="online",
+                        queue_running=running,
+                        queue_pending=pending,
+                        queue_total=running + pending,
+                    )
+                )
+            except Exception:
+                results.append(
+                    ComfyUIEndpointStatus(
+                        url=url,
+                        status="offline",
+                        queue_running=0,
+                        queue_pending=0,
+                        queue_total=0,
+                    )
+                )
+
+    online = [r for r in results if r.status == "online"]
+    active_url = None
+    if online:
+        active_url = sorted(online, key=lambda r: (r.queue_total, r.queue_pending, r.queue_running))[0].url
+
+    return ComfyUIEndpointsResponse(data=results, active_url=active_url)
+
+
 @router.get("/comfyui/loras", response_model=LorasResponse)
-async def get_loras():
+async def get_loras(db: AsyncSession = Depends(get_db)):
     """Query ComfyUI for available LoRA models."""
     loras: List[str] = []
     try:
+        comfyui_url = await _get_running_comfyui_url(db, timeout=5.0)
+        if not comfyui_url:
+            return LorasResponse(loras=[], status="offline")
+
         async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get("http://localhost:8188/object_info/LoraLoader")
+            r = await client.get(f"{comfyui_url}/object_info/LoraLoader")
             if r.status_code == 200:
                 info = r.json()
                 lora_input = info.get("LoraLoader", {}).get("input", {}).get("required", {})
@@ -346,15 +456,20 @@ async def get_loras():
 
 
 @router.get("/comfyui/status")
-async def comfyui_status():
+async def comfyui_status(db: AsyncSession = Depends(get_db)):
     """Check if ComfyUI is running and get system stats."""
     try:
+        comfyui_url = await _get_running_comfyui_url(db, timeout=3.0)
+        if not comfyui_url:
+            return {"status": "offline", "system_stats": None}
+
         async with httpx.AsyncClient(timeout=3.0) as client:
-            r = await client.get("http://localhost:8188/system_stats")
+            r = await client.get(f"{comfyui_url}/system_stats")
             if r.status_code == 200:
                 stats = r.json()
                 return {
                     "status": "online",
+                    "url": comfyui_url,
                     "system_stats": stats,
                 }
     except Exception:
