@@ -84,8 +84,8 @@ async def _run_image_gen(task_id: str, params: dict):
 
             # Import image gen functions
             from app.routes.images import (
-                ensure_comfyui, generate_with_comfyui,
-                generate_with_gemini_imagen, IMAGE_STORAGE
+                ensure_comfyui, generate_with_comfyui, _resolve_comfyui_endpoint,
+                generate_with_gemini_imagen, IMAGE_STORAGE, _get_comfyui_poll_timeout_seconds
             )
             from app.services.app_settings_helper import get_setting as _get_setting
 
@@ -93,13 +93,15 @@ async def _run_image_gen(task_id: str, params: dict):
             used_model = model
 
             if model == "comfyui-local":
-                comfyui_url = await _get_setting("comfyui_url", db)
+                configured_comfyui_url = await _get_setting("comfyui_url", db)
                 comfyui_dir = await _get_setting("comfyui_dir", db)
+                poll_timeout_seconds = await _get_comfyui_poll_timeout_seconds(db)
+                active_comfyui_url = await _resolve_comfyui_endpoint(configured_comfyui_url)
                 task.user_message = "Checking ComfyUI…"
                 task.progress = 20
                 await db.commit()
 
-                comfyui_available = await ensure_comfyui(comfyui_url)
+                comfyui_available = bool(active_comfyui_url) and await ensure_comfyui(active_comfyui_url)
                 if comfyui_available:
                     task.user_message = f"Generating with ComfyUI ({workflow_id or 'sdxl-standard'})…"
                     task.progress = 40
@@ -127,10 +129,11 @@ async def _run_image_gen(task_id: str, params: dict):
                     try:
                         result = await generate_with_comfyui(
                             prompt=prompt,
-                            comfyui_url=comfyui_url,
+                            comfyui_url=active_comfyui_url,
                             workflow_id=workflow_id,
                             comfyui_dir=comfyui_dir,
                             progress_cb=_report_progress,
+                            poll_timeout_seconds=poll_timeout_seconds,
                         )
                     except Exception as comfy_err:
                         err_detail = str(comfy_err)

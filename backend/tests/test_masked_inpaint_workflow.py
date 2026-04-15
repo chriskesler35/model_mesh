@@ -195,6 +195,69 @@ def test_masked_inpaint_skips_mask_refinement_when_controls_are_zero():
     assert result["6"]["inputs"]["images"] == [composite_id, 0]
 
 
+def test_masked_inpaint_uses_single_mask_path_without_secondary_mask_requirements():
+    workflow = {
+        "1": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "sdxl.safetensors"},
+        },
+        "2": {
+            "class_type": "LoadImage",
+            "inputs": {"image": "old_source.png"},
+        },
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "latent_image": ["4", 0],
+                "denoise": 0.65,
+            },
+        },
+        "4": {
+            "class_type": "VAEEncode",
+            "inputs": {"pixels": ["2", 0], "vae": ["1", 2]},
+        },
+        "5": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["3", 0], "vae": ["1", 2]},
+        },
+        "6": {
+            "class_type": "SaveImage",
+            "inputs": {"images": ["5", 0], "filename_prefix": "pytest"},
+        },
+    }
+    node_schema = {
+        "ImageCompositeMasked": ["destination", "source", "x", "y", "resize_source", "mask"],
+    }
+
+    result = _convert_workflow_to_masked_inpaint(
+        copy.deepcopy(workflow),
+        uploaded_image_name="fresh_source.png",
+        uploaded_mask_name="single_mask.png",
+        denoise=0.4,
+        node_schema=node_schema,
+        mask_grow=0,
+        mask_feather=0,
+    )
+
+    load_mask_nodes = [
+        node for node in result.values()
+        if isinstance(node, dict) and node.get("class_type") == "LoadImageMask"
+    ]
+    assert len(load_mask_nodes) == 1
+    assert load_mask_nodes[0]["inputs"]["image"] == "single_mask.png"
+
+    composite_id, composite_node = _find_node_by_type(result, "ImageCompositeMasked")
+    assert composite_node["inputs"]["mask"] == [
+        next(
+            nid
+            for nid, node in result.items()
+            if isinstance(node, dict) and node.get("class_type") == "LoadImageMask"
+        ),
+        0,
+    ]
+    assert result["6"]["inputs"]["images"] == [composite_id, 0]
+
+
 def test_existing_img2img_workflow_updates_denoise_on_sampler():
     workflow = {
         "1": {

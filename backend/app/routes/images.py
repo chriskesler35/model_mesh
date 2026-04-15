@@ -643,6 +643,7 @@ async def generate_with_comfyui(
     checkpoint: str = None,
     lora: str = None,
     lora_strength: float = 1.0,
+    poll_timeout_seconds: Optional[int] = None,
 ) -> dict:
     """Generate an image using ComfyUI.
 
@@ -739,8 +740,9 @@ async def generate_with_comfyui(
                     _stream_comfyui_progress(comfyui_url, prompt_id, workflow, progress_cb, ws_stop_event)
                 )
 
-            # Poll for completion — 10 minutes max (model loading + generation on RTX 3060)
-            max_poll = 600
+            # Poll for completion — allow longer runs when ComfyUI is offloading
+            # to system RAM under heavy workflows/masking.
+            max_poll = _clamp_poll_timeout_seconds(poll_timeout_seconds, 1800)
             for attempt in range(max_poll):
                 await asyncio.sleep(1)
                 if attempt > 0 and attempt % 30 == 0:
@@ -942,6 +944,43 @@ def _resolve_denoise(value: Optional[float], default: float) -> float:
     if denoise < 0.0 or denoise > 1.0:
         raise HTTPException(status_code=422, detail="denoise must be between 0.0 and 1.0")
     return denoise
+
+
+def _as_bool(raw: Optional[str]) -> bool:
+    """Parse truthy app setting values like 1/true/yes/on."""
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _clamp_poll_timeout_seconds(value: Optional[int], default: int) -> int:
+    """Clamp ComfyUI poll timeout between 60s and 6h, with fallback default."""
+    if value is None:
+        return default
+    try:
+        timeout = int(value)
+    except Exception:
+        return default
+    if timeout < 60:
+        return 60
+    if timeout > 21600:
+        return 21600
+    return timeout
+
+
+async def _get_comfyui_poll_timeout_seconds(
+    db: Optional[AsyncSession] = None,
+    default_seconds: int = 1800,
+    long_load_seconds: int = 5400,
+) -> int:
+    """Resolve ComfyUI poll timeout from explicit value or long-load mode toggle."""
+    timeout_raw = await get_setting("comfyui_poll_timeout_seconds", db)
+    if str(timeout_raw or "").strip():
+        return _clamp_poll_timeout_seconds(timeout_raw, default_seconds)
+
+    long_mode_raw = await get_setting("comfyui_long_load_mode", db)
+    if _as_bool(long_mode_raw):
+        return _clamp_poll_timeout_seconds(long_load_seconds, long_load_seconds)
+
+    return _clamp_poll_timeout_seconds(default_seconds, default_seconds)
 
 
 def _resolve_mask_grow(value: Optional[int], default: int = 8) -> int:
@@ -1235,6 +1274,7 @@ async def generate_img2img_with_comfyui(
     mask_grow: int = 8,
     mask_feather: float = 6.0,
     progress_cb=None,
+    poll_timeout_seconds: Optional[int] = None,
 ) -> dict:
     """Run an img2img variation via ComfyUI.
 
@@ -1377,7 +1417,7 @@ async def generate_img2img_with_comfyui(
 
             # Poll history — up to 30 minutes. Img2img can legitimately take
             # much longer than txt2img on a memory-pressured local ComfyUI.
-            max_poll = 1800
+            max_poll = _clamp_poll_timeout_seconds(poll_timeout_seconds, 1800)
             for attempt in range(max_poll):
                 await asyncio.sleep(1)
                 if attempt > 0 and attempt % 30 == 0:
@@ -1501,6 +1541,7 @@ async def generate_image(
                         comfyui_url=active_comfyui_url,
                         workflow_id=request.workflow_id,
                         comfyui_dir=comfyui_dir,
+                        poll_timeout_seconds=await _get_comfyui_poll_timeout_seconds(db),
                     )
                 except Exception as comfy_err:
                     comfyui_failed = True
@@ -1842,6 +1883,7 @@ async def generate_variation(
                 denoise=denoise,
                 mask_grow=mask_grow,
                 mask_feather=mask_feather,
+                poll_timeout_seconds=await _get_comfyui_poll_timeout_seconds(db),
             )
         else:
             raise HTTPException(
@@ -2074,6 +2116,7 @@ async def edit_image(req: ImageEditRequest, db: AsyncSession = Depends(get_db)):
                 denoise=denoise,
                 mask_grow=mask_grow,
                 mask_feather=mask_feather,
+                poll_timeout_seconds=await _get_comfyui_poll_timeout_seconds(db),
             )
             used_model = "comfyui-local"
         except Exception as comfy_err:
