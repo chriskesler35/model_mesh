@@ -47,6 +47,8 @@ class PipelineCreate(BaseModel):
     method_id: str                              # 'bmad' | 'gsd' | 'superpowers'
     task: str
     auto_approve: bool = False
+    interaction_mode: str = "autonomous"               # 'interactive' | 'autonomous'
+    delegate_qa_to_agent: bool = False                  # autonomous surrogate for user Q&A
     model_overrides: Optional[Dict[str, str]] = None   # {phase_name: model_id}
     approvers: Optional[List[str]] = None              # list of user IDs
     approval_policy: Optional[str] = "any"             # 'any', 'majority', 'all'
@@ -72,6 +74,60 @@ class PipelineMessage(BaseModel):
 class PipelinePhaseModelUpdate(BaseModel):
     phase_index: int
     model_id: str
+
+
+def _apply_interaction_mode_to_phases(
+    phases: List[Dict[str, Any]],
+    interaction_mode: str,
+    delegate_qa_to_agent: bool,
+) -> List[Dict[str, Any]]:
+    """Inject interaction-mode instructions into method phases.
+
+    - interactive: force requirements discovery output to include explicit
+      unanswered questions for the human user.
+    - autonomous + delegate_qa_to_agent: produce a visible surrogate Q&A block
+      with inferred user answers and confidence levels.
+    """
+    mode = (interaction_mode or "autonomous").strip().lower()
+    delegated = bool(delegate_qa_to_agent)
+
+    if mode not in ("interactive", "autonomous"):
+        raise HTTPException(status_code=400, detail="interaction_mode must be 'interactive' or 'autonomous'")
+
+    updated: List[Dict[str, Any]] = []
+    for phase in phases:
+        p = dict(phase)
+        p["interaction_mode"] = mode
+        p["delegate_qa_to_agent"] = delegated
+
+        if p.get("name") == "Analyst":
+            base_prompt = p.get("system_prompt", "")
+            if mode == "interactive":
+                p["system_prompt"] = (
+                    f"{base_prompt}\n\n"
+                    "# Interaction mode: INTERACTIVE USER DISCOVERY\n"
+                    "You must surface a clear Q&A set for the human reviewer before implementation proceeds.\n"
+                    "Do not invent missing user decisions. Mark unknowns explicitly.\n\n"
+                    "Add these fields to your JSON output:\n"
+                    "- clarifying_questions: [{id, question, why_it_matters}]\n"
+                    "- open_questions_for_user: [id]\n"
+                    "- assumed_answers: []\n"
+                )
+            elif delegated:
+                p["system_prompt"] = (
+                    f"{base_prompt}\n\n"
+                    "# Interaction mode: AUTONOMOUS SURROGATE Q&A\n"
+                    "Generate visible Q&A as if an end user answered, so the conversation remains auditable.\n"
+                    "Use reasonable assumptions and label confidence clearly.\n\n"
+                    "Add these fields to your JSON output:\n"
+                    "- clarifying_questions: [{id, question, why_it_matters}]\n"
+                    "- assumed_answers: [{question_id, answer, confidence: high|medium|low, rationale}]\n"
+                    "- open_questions_for_user: [id]  # only if uncertainty is too high\n"
+                )
+
+        updated.append(p)
+
+    return updated
 
 
 # ─── Event helpers ────────────────────────────────────────────────────────────
@@ -374,6 +430,9 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
         p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
         if not p:
             logger.error(f"_run_phase: pipeline {pipeline_id} not found")
+            return
+        if p.status in ("paused", "cancelled"):
+            logger.info("_run_phase: pipeline %s is %s; skipping phase launch", pipeline_id, p.status)
             return
         phases = p.phases or []
         initial_task = p.initial_task
@@ -1182,6 +1241,8 @@ async def _advance_to_next(pipeline_id: str, _current_index: int = -1):
         )).scalar_one_or_none()
         if not p:
             return
+        if p.status in ("paused", "cancelled"):
+            return
         phases = p.phases or []
         if not phases:
             await _db_update_pipeline(
@@ -1561,6 +1622,17 @@ async def create_pipeline(body: PipelineCreate, request: Request, db: AsyncSessi
             existing = phase.get("system_prompt", "")
             phase["system_prompt"] = f"{existing}\n\n---\n\n# Additional method instructions (from stack)\n{stacked_prompt}"
 
+    template_phases = _apply_interaction_mode_to_phases(
+        template_phases,
+        interaction_mode=body.interaction_mode,
+        delegate_qa_to_agent=body.delegate_qa_to_agent,
+    )
+
+    effective_auto_approve = body.auto_approve
+    if (body.interaction_mode or "autonomous").strip().lower() == "interactive":
+        # Interactive mode must pause at each phase handoff for user engagement.
+        effective_auto_approve = False
+
     # Determine creator user ID
     user = getattr(request.state, "user", None)
     creator_id = user.get("id", "owner") if user else "owner"
@@ -1579,7 +1651,7 @@ async def create_pipeline(body: PipelineCreate, request: Request, db: AsyncSessi
         phases=template_phases,
         current_phase_index=0,
         status="pending",
-        auto_approve=body.auto_approve,
+        auto_approve=effective_auto_approve,
         approvers=body.approvers or [],
         approval_policy=policy,
         created_by=creator_id,
@@ -1598,7 +1670,9 @@ async def create_pipeline(body: PipelineCreate, request: Request, db: AsyncSessi
     _push(pipeline_id, "pipeline_created",
           method_id=body.method_id,
           phases=[{"name": p["name"], "role": p["role"], "model": p.get("model")} for p in template_phases],
-          auto_approve=body.auto_approve)
+          auto_approve=effective_auto_approve,
+          interaction_mode=(body.interaction_mode or "autonomous").strip().lower(),
+          delegate_qa_to_agent=bool(body.delegate_qa_to_agent))
 
     # Kick off all root phases (phases with no dependencies)
     await _advance_to_next(pipeline_id)
@@ -2190,6 +2264,39 @@ async def cancel_pipeline(pipeline_id: str, db: AsyncSession = Depends(get_db)):
     await _db_update_pipeline(pipeline_id, status="cancelled", completed_at=datetime.utcnow())
     _push(pipeline_id, "pipeline_done", message="Pipeline cancelled.", status="cancelled")
     return {"ok": True}
+
+
+@router.post("/{pipeline_id}/pause", dependencies=[Depends(verify_api_key)])
+async def pause_pipeline(pipeline_id: str, db: AsyncSession = Depends(get_db)):
+    from app.models.pipeline import Pipeline
+
+    p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
+    if not p:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+    if p.status in ("completed", "failed", "cancelled"):
+        raise HTTPException(status_code=409, detail=f"Cannot pause a pipeline in status '{p.status}'")
+    if p.status == "paused":
+        return {"ok": True, "status": "paused"}
+
+    await _db_update_pipeline(pipeline_id, status="paused")
+    _push(pipeline_id, "pipeline_paused", message="Pipeline paused by user.", status="paused")
+    return {"ok": True, "status": "paused"}
+
+
+@router.post("/{pipeline_id}/resume", dependencies=[Depends(verify_api_key)])
+async def resume_pipeline(pipeline_id: str, db: AsyncSession = Depends(get_db)):
+    from app.models.pipeline import Pipeline
+
+    p = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
+    if not p:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+    if p.status != "paused":
+        raise HTTPException(status_code=409, detail=f"Pipeline is not paused (current status: '{p.status}')")
+
+    await _db_update_pipeline(pipeline_id, status="running")
+    _push(pipeline_id, "pipeline_resumed", message="Pipeline resumed.", status="running")
+    await _advance_to_next(pipeline_id)
+    return {"ok": True, "status": "running"}
 
 
 @router.delete("/{pipeline_id}", dependencies=[Depends(verify_api_key)])

@@ -46,6 +46,9 @@ Produce a JSON artifact with this exact shape, inside a ```json fenced block:
   "features": ["<concrete feature 1>", "<concrete feature 2>"],
   "constraints": ["<tech/time/scope constraint>"],
   "assumptions": ["<assumption you are making that the user should confirm>"],
+    "clarifying_questions": [{"id": "Q1", "question": "<question>", "why_it_matters": "<impact>"}],
+    "assumed_answers": [{"question_id": "Q1", "answer": "<answer>", "confidence": "high|medium|low", "rationale": "<why>"}],
+    "open_questions_for_user": ["Q1"],
   "out_of_scope": ["<things explicitly NOT part of this>"],
   "success_criteria": ["<measurable outcome>"]
 }

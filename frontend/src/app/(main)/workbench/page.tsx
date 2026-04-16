@@ -55,6 +55,8 @@ export default function WorkbenchListPage() {
   const [asPipeline, setAsPipeline] = useState(false)
   const [pipelineMethod, setPipelineMethod] = useState<string>('bmad')
   const [autoApprove, setAutoApprove] = useState(false)
+  const [interactionMode, setInteractionMode] = useState<'interactive' | 'autonomous'>('interactive')
+  const [delegateQaToAgent, setDelegateQaToAgent] = useState(true)
   // Active method stack from Methods page
   const [activeStack, setActiveStack] = useState<string[]>([])
   const [activeStackName, setActiveStackName] = useState<string>('')
@@ -210,7 +212,9 @@ export default function WorkbenchListPage() {
             session_id: session.id,
             method_id: activeStack.length > 1 ? 'stack' : pipelineMethod,
             task: task.trim(),
-            auto_approve: autoApprove,
+            auto_approve: interactionMode === 'interactive' ? false : autoApprove,
+            interaction_mode: interactionMode,
+            delegate_qa_to_agent: interactionMode === 'autonomous' ? delegateQaToAgent : false,
             model_overrides: Object.keys(effectiveOverrides).length > 0 ? effectiveOverrides : undefined,
           }),
         })
@@ -401,6 +405,40 @@ export default function WorkbenchListPage() {
                     <div className="text-xs text-indigo-700 dark:text-indigo-300">
                       Specialist agents hand off to each other through approval gates. <b>All phases use the Model you selected below</b> — customize per-phase if needed.
                     </div>
+                    <div className="rounded-lg border border-indigo-200 dark:border-indigo-800 bg-white/80 dark:bg-gray-900/30 px-3 py-2 space-y-2">
+                      <div className="text-[11px] font-semibold uppercase tracking-wider text-indigo-700 dark:text-indigo-300">Engagement mode</div>
+                      <label className="flex items-center gap-2 text-xs text-indigo-900 dark:text-indigo-200">
+                        <input
+                          type="radio"
+                          name="interactionMode"
+                          checked={interactionMode === 'interactive'}
+                          onChange={() => setInteractionMode('interactive')}
+                          className="text-indigo-600 focus:ring-indigo-400"
+                        />
+                        Interactive user Q&A (recommended)
+                      </label>
+                      <label className="flex items-center gap-2 text-xs text-indigo-900 dark:text-indigo-200">
+                        <input
+                          type="radio"
+                          name="interactionMode"
+                          checked={interactionMode === 'autonomous'}
+                          onChange={() => setInteractionMode('autonomous')}
+                          className="text-indigo-600 focus:ring-indigo-400"
+                        />
+                        Autonomous surrogate Q&A
+                      </label>
+                      {interactionMode === 'autonomous' && (
+                        <label className="flex items-center gap-2 text-[11px] text-indigo-800 dark:text-indigo-200 pl-5">
+                          <input
+                            type="checkbox"
+                            checked={delegateQaToAgent}
+                            onChange={e => setDelegateQaToAgent(e.target.checked)}
+                            className="rounded text-indigo-600 focus:ring-indigo-400"
+                          />
+                          Let the agent answer methodology questions as a surrogate user (visible in artifacts)
+                        </label>
+                      )}
+                    </div>
                     <div className="text-[11px] text-indigo-800 dark:text-indigo-200 bg-white/70 dark:bg-gray-900/30 border border-indigo-200 dark:border-indigo-800 rounded-lg px-3 py-2">
                       This opens the supervisor-style pipeline view, not the standard chat thread. You will watch a live activity feed, send guidance between phases, and approve or reject artifacts as work moves forward.
                     </div>
@@ -431,8 +469,9 @@ export default function WorkbenchListPage() {
                     )}
                     <label className="flex items-center gap-2 text-xs text-indigo-900 dark:text-indigo-200">
                       <input type="checkbox" checked={autoApprove} onChange={e => setAutoApprove(e.target.checked)}
+                        disabled={interactionMode === 'interactive'}
                         className="rounded text-indigo-600 focus:ring-indigo-400" />
-                      Auto-approve each phase
+                      Auto-approve each phase {interactionMode === 'interactive' ? '(disabled in interactive mode)' : ''}
                     </label>
                     {phasePreview.length > 0 && (() => {
                       const unresolved = phasePreview.filter(ph => !ph.resolved_model)

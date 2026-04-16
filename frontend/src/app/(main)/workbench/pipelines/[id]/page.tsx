@@ -56,7 +56,7 @@ interface Pipeline {
   method_id: string
   phases: PhaseDef[]
   current_phase_index: number
-  status: 'pending' | 'running' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled'
+  status: 'pending' | 'running' | 'paused' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled'
   auto_approve: boolean
   initial_task: string
   created_at?: string
@@ -97,6 +97,7 @@ const ROLE_AVATARS: Record<string, { icon: string; color: string }> = {
 const STATUS_STYLE: Record<string, { bg: string; text: string; ring: string; label: string }> = {
   pending:            { bg: 'bg-gray-50 dark:bg-gray-800',         text: 'text-gray-500',   ring: 'ring-gray-200 dark:ring-gray-700',   label: 'Pending' },
   running:            { bg: 'bg-blue-50 dark:bg-blue-900/20',      text: 'text-blue-600',   ring: 'ring-blue-300 dark:ring-blue-700',   label: 'Running' },
+  paused:             { bg: 'bg-slate-100 dark:bg-slate-800',      text: 'text-slate-700',  ring: 'ring-slate-300 dark:ring-slate-600', label: 'Paused' },
   awaiting_approval:  { bg: 'bg-amber-50 dark:bg-amber-900/20',    text: 'text-amber-700',  ring: 'ring-amber-300 dark:ring-amber-700', label: 'Awaiting approval' },
   approved:           { bg: 'bg-green-50 dark:bg-green-900/20',    text: 'text-green-700',  ring: 'ring-green-300 dark:ring-green-700', label: 'Approved' },
   rejected:           { bg: 'bg-red-50 dark:bg-red-900/20',        text: 'text-red-700',    ring: 'ring-red-300 dark:ring-red-700',     label: 'Rejected (re-running)' },
@@ -1170,6 +1171,18 @@ export default function PipelinePage() {
     })
     refetch()
   }
+  const pausePipeline = async () => {
+    await fetch(`${apiBase}/v1/workbench/pipelines/${pipelineId}/pause`, {
+      method: 'POST', headers: authHeaders,
+    })
+    refetch()
+  }
+  const resumePipeline = async () => {
+    await fetch(`${apiBase}/v1/workbench/pipelines/${pipelineId}/resume`, {
+      method: 'POST', headers: authHeaders,
+    })
+    refetch()
+  }
   const retryPipeline = async () => {
     await fetch(`${apiBase}/v1/workbench/pipelines/${pipelineId}/retry`, {
       method: 'POST', headers: authHeaders,
@@ -1308,6 +1321,18 @@ export default function PipelinePage() {
             <button onClick={retryPipeline}
               className="px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-500 hover:bg-indigo-600 text-white">
               ↻ Retry phase {pipeline.current_phase_index + 1}
+            </button>
+          )}
+          {pipeline.status === 'running' && (
+            <button onClick={pausePipeline}
+              className="px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/60">
+              Pause
+            </button>
+          )}
+          {pipeline.status === 'paused' && (
+            <button onClick={resumePipeline}
+              className="px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-700 hover:bg-slate-800 text-white">
+              Resume
             </button>
           )}
           {(pipeline.status === 'running' || pipeline.status === 'awaiting_approval' || pipeline.status === 'pending') && (
