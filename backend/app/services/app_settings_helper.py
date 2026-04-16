@@ -14,7 +14,7 @@ _DEFAULTS = {
     "comfyui_url": "http://localhost:8188",
     "comfyui_gpu_devices": "0",
     "comfyui_launch_args": "",
-    "comfyui_poll_timeout_seconds": "1800",
+    "comfyui_poll_timeout_seconds": "10800",
     "comfyui_long_load_mode": "0",
     "default_image_provider": "gemini",
     "default_workflow": "sdxl-standard",

@@ -973,20 +973,25 @@ def _resolve_img2img_poll_timeout_seconds(
     """Resolve img2img poll timeout, extending masked runs by default.
 
     Masked inpaint workflows (especially FLUX + multi-region masks) can run
-    significantly longer than plain img2img and may exceed the base 30-minute
-    window. Keep non-masked behavior unchanged, but enforce a safer minimum for
-    masked runs.
+    significantly longer than plain img2img and may exceed even 90 minutes on
+    memory-constrained systems:
+      - Sampling alone: 28 steps × ~95s = ~44 min
+      - VAE decode (heavily offloaded): can add another 20-30 min
+      - Total observed: up to ~1h45m on a single masked FLUX run
+
+    Enforce a 3-hour minimum for masked runs so VAE decode is never cut off.
+    Keep non-masked behavior unchanged.
     """
     timeout = _clamp_poll_timeout_seconds(poll_timeout_seconds, 1800)
-    if has_mask and timeout < 5400:
-        return 5400
+    if has_mask and timeout < 10800:
+        return 10800
     return timeout
 
 
 async def _get_comfyui_poll_timeout_seconds(
     db: Optional[AsyncSession] = None,
     default_seconds: int = 1800,
-    long_load_seconds: int = 5400,
+    long_load_seconds: int = 10800,
 ) -> int:
     """Resolve ComfyUI poll timeout from explicit value or long-load mode toggle."""
     timeout_raw = await get_setting("comfyui_poll_timeout_seconds", db)
