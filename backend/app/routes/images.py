@@ -966,6 +966,23 @@ def _clamp_poll_timeout_seconds(value: Optional[int], default: int) -> int:
     return timeout
 
 
+def _resolve_img2img_poll_timeout_seconds(
+    poll_timeout_seconds: Optional[int],
+    has_mask: bool,
+) -> int:
+    """Resolve img2img poll timeout, extending masked runs by default.
+
+    Masked inpaint workflows (especially FLUX + multi-region masks) can run
+    significantly longer than plain img2img and may exceed the base 30-minute
+    window. Keep non-masked behavior unchanged, but enforce a safer minimum for
+    masked runs.
+    """
+    timeout = _clamp_poll_timeout_seconds(poll_timeout_seconds, 1800)
+    if has_mask and timeout < 5400:
+        return 5400
+    return timeout
+
+
 async def _get_comfyui_poll_timeout_seconds(
     db: Optional[AsyncSession] = None,
     default_seconds: int = 1800,
@@ -1415,9 +1432,12 @@ async def generate_img2img_with_comfyui(
                     _stream_comfyui_progress(comfyui_url, prompt_id, workflow, progress_cb, ws_stop_event)
                 )
 
-            # Poll history — up to 30 minutes. Img2img can legitimately take
-            # much longer than txt2img on a memory-pressured local ComfyUI.
-            max_poll = _clamp_poll_timeout_seconds(poll_timeout_seconds, 1800)
+            # Poll history. Masked img2img can legitimately run much longer
+            # than plain img2img/txt2img on local ComfyUI.
+            max_poll = _resolve_img2img_poll_timeout_seconds(
+                poll_timeout_seconds,
+                has_mask=uploaded_mask_name is not None,
+            )
             for attempt in range(max_poll):
                 await asyncio.sleep(1)
                 if attempt > 0 and attempt % 30 == 0:
