@@ -3,9 +3,12 @@
 import uuid
 import json
 import time
+import asyncio
+from typing import Any, Dict
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_memory
@@ -21,6 +24,60 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["chat"], dependencies=[Depends(verify_api_key), Depends(check_rate_limit)])
 
+# Ephemeral per-conversation workflow gating state.
+# Keyed by conversation_id string.
+_workflow_session_state: Dict[str, Dict[str, Any]] = {}
+
+
+def _get_workflow_state(conversation_id: str) -> Dict[str, Any]:
+    state = _workflow_session_state.get(conversation_id)
+    if state is None:
+        state = {
+            "chat_only": False,              # user said scope does NOT warrant a project
+            "scope_prompt_pending": False,   # awaiting yes/no for "project or regular chat?"
+            "pending_trigger": None,         # cached trigger match while waiting for yes/no
+        }
+        _workflow_session_state[conversation_id] = state
+    return state
+
+
+def _system_completion(
+    *,
+    content: str,
+    conversation_id: str,
+    actual_model: str,
+    workflow_trigger: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    modelmesh: Dict[str, Any] = {
+        "persona_used": "system",
+        "actual_model": actual_model,
+        "estimated_cost": 0.0,
+        "provider": "system",
+    }
+    if workflow_trigger is not None:
+        modelmesh["workflow_trigger"] = workflow_trigger
+
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+        "object": "chat.completion",
+        "conversation_id": conversation_id,
+        "model": "system",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": content,
+            },
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        },
+        "modelmesh": modelmesh,
+    }
+
 
 @router.post("/chat/completions")
 async def chat_completions(
@@ -29,6 +86,9 @@ async def chat_completions(
     memory = Depends(get_memory)
 ):
     """OpenAI-compatible chat completions endpoint."""
+
+    # Resolve conversation ID early so workflow gating state can persist per chat session.
+    conv_id = str(request.conversation_id) if request.conversation_id else str(uuid.uuid4())
 
     # 0. Check for chat commands (model management, help, etc.)
     last_user_msg = next(
@@ -40,108 +100,97 @@ async def chat_completions(
         parsed_command = parse_chat_command(last_user_msg)
         if parsed_command:
             from app.services.chat_commands.dispatcher import dispatch_command
-            # Generate a conversation_id if needed
-            conv_id = request.conversation_id or str(uuid.uuid4())
             command_response = await dispatch_command(
                 parsed_command, db, conversation_id=conv_id,
             )
             logger.info(f"Chat command handled: {parsed_command['action']} {parsed_command['entity_type']}")
-            return {
-                "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
-                "object": "chat.completion",
-                "conversation_id": conv_id,
-                "model": "system",
-                "choices": [{
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": command_response,
-                    },
-                    "finish_reason": "stop",
-                }],
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },
-                "modelmesh": {
-                    "persona_used": "system",
-                    "actual_model": "command_executor",
-                    "estimated_cost": 0.0,
-                    "provider": "system",
-                },
-            }
+            return _system_completion(
+                content=command_response,
+                conversation_id=conv_id,
+                actual_model="command_executor",
+            )
 
         # No explicit command matched — check for workflow triggers
         from app.services.chat_commands.workflow_commands import (
             detect_workflow_trigger,
             handle_workflow_trigger,
             handle_suggest_pipeline,
+            is_affirmative_reply,
+            is_negative_reply,
+            is_explicit_project_intent,
         )
-        trigger_match = await detect_workflow_trigger(last_user_msg, db)
-        if trigger_match:
-            conv_id = request.conversation_id or str(uuid.uuid4())
-            suggestion = await handle_workflow_trigger(
-                last_user_msg, trigger_match, db, conversation_id=conv_id,
-            )
-            return {
-                "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
-                "object": "chat.completion",
-                "conversation_id": conv_id,
-                "model": "system",
-                "choices": [{
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": suggestion,
-                    },
-                    "finish_reason": "stop",
-                }],
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },
-                "modelmesh": {
-                    "persona_used": "system",
-                    "actual_model": "workflow_detector",
-                    "estimated_cost": 0.0,
-                    "provider": "system",
-                    "workflow_trigger": trigger_match,
-                },
-            }
+        wf_state = _get_workflow_state(conv_id)
 
-        # No trigger match — check if it's complex enough to suggest a pipeline
-        pipeline_suggestion = await handle_suggest_pipeline(
-            last_user_msg, db, conversation_id=request.conversation_id,
-        )
-        if pipeline_suggestion:
-            conv_id = request.conversation_id or str(uuid.uuid4())
-            return {
-                "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
-                "object": "chat.completion",
-                "conversation_id": conv_id,
-                "model": "system",
-                "choices": [{
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": pipeline_suggestion,
-                    },
-                    "finish_reason": "stop",
-                }],
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },
-                "modelmesh": {
-                    "persona_used": "system",
-                    "actual_model": "workflow_detector",
-                    "estimated_cost": 0.0,
-                    "provider": "system",
-                },
-            }
+        # If we previously asked whether this should become a project, consume yes/no.
+        if wf_state.get("scope_prompt_pending"):
+            if is_negative_reply(last_user_msg):
+                wf_state["chat_only"] = True
+                wf_state["scope_prompt_pending"] = False
+                wf_state["pending_trigger"] = None
+                return _system_completion(
+                    content=(
+                        "Understood. I'll keep this conversation in regular chat mode and won't "
+                        "start a project workflow unless you explicitly ask to start one."
+                    ),
+                    conversation_id=conv_id,
+                    actual_model="workflow_detector",
+                )
+            if is_affirmative_reply(last_user_msg):
+                pending_trigger = wf_state.get("pending_trigger")
+                wf_state["chat_only"] = False
+                wf_state["scope_prompt_pending"] = False
+                wf_state["pending_trigger"] = None
+                if pending_trigger:
+                    suggestion = await handle_workflow_trigger(
+                        last_user_msg, pending_trigger, db, conversation_id=conv_id,
+                    )
+                    return _system_completion(
+                        content=suggestion,
+                        conversation_id=conv_id,
+                        actual_model="workflow_detector",
+                        workflow_trigger=pending_trigger,
+                    )
+
+        explicit_project_intent = is_explicit_project_intent(last_user_msg)
+        if not (wf_state.get("chat_only") and not explicit_project_intent):
+            trigger_match = await detect_workflow_trigger(last_user_msg, db)
+            if trigger_match:
+                # Explicit intent -> offer workflow immediately.
+                if explicit_project_intent:
+                    suggestion = await handle_workflow_trigger(
+                        last_user_msg, trigger_match, db, conversation_id=conv_id,
+                    )
+                    return _system_completion(
+                        content=suggestion,
+                        conversation_id=conv_id,
+                        actual_model="workflow_detector",
+                        workflow_trigger=trigger_match,
+                    )
+
+                # Non-explicit request -> ask if this should be project-scoped first.
+                wf_state["scope_prompt_pending"] = True
+                wf_state["pending_trigger"] = trigger_match
+                return _system_completion(
+                    content=(
+                        "This could be handled as a full project workflow. "
+                        "Do you want to treat this as a project?\n\n"
+                        "Reply **yes** to use project workflow, or **no** to keep regular chat mode for this session."
+                    ),
+                    conversation_id=conv_id,
+                    actual_model="workflow_detector",
+                    workflow_trigger=trigger_match,
+                )
+
+            # Suggest pipeline only for explicit project intent language.
+            pipeline_suggestion = await handle_suggest_pipeline(
+                last_user_msg, db, conversation_id=conv_id,
+            )
+            if pipeline_suggestion:
+                return _system_completion(
+                    content=pipeline_suggestion,
+                    conversation_id=conv_id,
+                    actual_model="workflow_detector",
+                )
 
     # 1. Resolve persona
     resolver = PersonaResolver(db)
@@ -179,7 +228,6 @@ async def chat_completions(
     # If no model assigned, try to get a default model
     if not primary_model:
         # Get first active model as fallback
-        from sqlalchemy import select
         from app.models import Model
         result = await db.execute(
             select(Model).where(Model.is_active == True).limit(1)
@@ -199,9 +247,8 @@ async def chat_completions(
             )
     
     # 2. Handle conversation ID
-    conversation_id = request.conversation_id
-    if not conversation_id:
-        conversation_id = await memory.create_conversation_id()
+    conversation_id = conv_id
+    if request.conversation_id is None:
         # Auto-title from first user message
         first_user = next((m.content for m in request.messages if m.role == "user"), None)
         auto_title = None
@@ -392,42 +439,58 @@ async def _sync_response(
                 logger.warning(f"Failed to inject memory context: {e}")
                 # Continue without context
 
-        # Get response from router (non-streaming returns a dict/object)
-        response = await router_service.route_request(
-            persona, primary_model, fallback_model,
-            msg_dicts, conversation_id, stream=False,
-            temperature=request.temperature,
-            max_tokens=request.max_tokens
-        )
-
-        # Extract content and usage from LiteLLM response
+        # Get response from router (non-streaming returns a dict/object).
+        # Bound request time to keep chat responsive when upstream model calls stall.
+        response = None
         full_content = ""
         input_tokens = 0
         output_tokens = 0
+        llm_timeout_fallback = False
 
-        if hasattr(response, 'choices') and response.choices and len(response.choices) > 0:
-            choice = response.choices[0]
-            if hasattr(choice, 'message') and choice.message:
-                full_content = choice.message.content or ""
-            else:
-                logger.warning(f"Unexpected response format: {response}")
-                full_content = str(response)
-        else:
-            logger.warning(f"No choices in response: {response}")
-            # Try to extract content from raw response
-            if hasattr(response, 'content'):
-                full_content = response.content or ""
-            elif isinstance(response, str):
-                full_content = response
-            else:
-                full_content = "No response generated"
+        try:
+            response = await asyncio.wait_for(
+                router_service.route_request(
+                    persona, primary_model, fallback_model,
+                    msg_dicts, conversation_id, stream=False,
+                    temperature=request.temperature,
+                    max_tokens=request.max_tokens
+                ),
+                timeout=45,
+            )
+        except asyncio.TimeoutError:
+            llm_timeout_fallback = True
+            logger.warning("Sync chat completion timed out for conversation %s", conversation_id)
+            full_content = (
+                "I’m still processing that and hit a response timeout. "
+                "Please try again, or break the request into smaller steps."
+            )
 
-        # Extract actual token usage if available
-        if hasattr(response, 'usage') and response.usage:
-            input_tokens = response.usage.prompt_tokens or 0
-            output_tokens = response.usage.completion_tokens or 0
-        else:
-            # Fallback to estimation
+        # Extract content and usage from LiteLLM response when available.
+        if not llm_timeout_fallback and response is not None:
+            if hasattr(response, 'choices') and response.choices and len(response.choices) > 0:
+                choice = response.choices[0]
+                if hasattr(choice, 'message') and choice.message:
+                    full_content = choice.message.content or ""
+                else:
+                    logger.warning(f"Unexpected response format: {response}")
+                    full_content = str(response)
+            else:
+                logger.warning(f"No choices in response: {response}")
+                # Try to extract content from raw response
+                if hasattr(response, 'content'):
+                    full_content = response.content or ""
+                elif isinstance(response, str):
+                    full_content = response
+                else:
+                    full_content = "No response generated"
+
+            # Extract actual token usage if available
+            if hasattr(response, 'usage') and response.usage:
+                input_tokens = response.usage.prompt_tokens or 0
+                output_tokens = response.usage.completion_tokens or 0
+
+        # Fallback token estimation (also used by timeout fallback path)
+        if input_tokens == 0 and output_tokens == 0:
             input_tokens = model_client.estimate_tokens(msg_dicts, primary_model) if primary_model else 0
             output_tokens = len(full_content) // 4 if full_content else 0
 

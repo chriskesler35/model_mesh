@@ -1557,6 +1557,7 @@ export default function ChatPage() {
   const [titleValue, setTitleValue] = useState('')
   const [shareModal, setShareModal] = useState<{ url: string; expires_at: string | null } | null>(null)
   const [sharing, setSharing] = useState(false)
+  const [promotingProject, setPromotingProject] = useState(false)
   const [loadingMessages, setLoadingMessages] = useState(false)
   const [userExists, setUserExists] = useState(true)   // assume true until checked
   const [aiName, setAiName] = useState('Aria')
@@ -2399,6 +2400,41 @@ export default function ChatPage() {
     await renameConv(activeConvId, titleValue.trim())
   }
 
+  const promoteToProject = async () => {
+    if (!activeConvId) {
+      addToast({ type: 'error', title: 'No conversation selected', message: 'Open a conversation first.', autoClose: 3000 })
+      return
+    }
+    const suggestedName = (activeConv?.title || 'Project from chat').trim()
+    const projectName = window.prompt('Project name', suggestedName)
+    if (!projectName || !projectName.trim()) return
+
+    setPromotingProject(true)
+    try {
+      const res = await fetch(`${API_BASE}/v1/projects/promote/conversation/${activeConvId}`, {
+        method: 'POST',
+        headers: { ...AUTH_HEADERS, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: projectName.trim(),
+          template: 'blank',
+          include_transcript: true,
+          sandbox_mode: 'full',
+        }),
+      })
+      if (!res.ok) {
+        const errText = await res.text()
+        throw new Error(errText || 'Failed to promote conversation')
+      }
+      const project = await res.json()
+      addToast({ type: 'success', title: 'Project created', message: `Promoted to ${project.name}`, autoClose: 2500 })
+      window.location.href = `/projects/${project.id}`
+    } catch (e: any) {
+      addToast({ type: 'error', title: 'Promotion failed', message: e?.message || 'Could not create project from chat', autoClose: 5000 })
+    } finally {
+      setPromotingProject(false)
+    }
+  }
+
   // ── Keyboard shortcuts ────────────────────────────────────────────────────
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -2513,6 +2549,16 @@ export default function ChatPage() {
             />
             {activeConv?.keep_forever && (
               <span title="Kept forever" className="text-xs">♾️</span>
+            )}
+            {activeConvId && (
+              <button
+                title="Promote this chat to a project"
+                disabled={promotingProject}
+                onClick={promoteToProject}
+                className="text-xs px-2 py-1 rounded-md border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-300 transition-colors disabled:opacity-60"
+              >
+                {promotingProject ? 'Promoting…' : 'Promote to Project'}
+              </button>
             )}
             {activeConvId && (
               <button

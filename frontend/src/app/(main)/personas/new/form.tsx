@@ -49,20 +49,37 @@ export default function PersonaForm() {
     }
   })
   const [loading, setLoading] = useState(!!personaId)
+  const [modelsLoading, setModelsLoading] = useState(true)
   const [saving, setSaving] = useState(false)
 
-  useEffect(() => {
-    async function fetchData() {
-      try {
-        const modelsRes = await fetch(`${API_BASE}/v1/models?active_only=true&usable_only=true&validated_only=true&chat_only=true`, {
-          headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
-        })
-        const modelsData = await modelsRes.json()
-        setModels(modelsData.data || [])
+  const fetchAllEligibleModels = async (): Promise<Model[]> => {
+    const pageSize = 250
+    let offset = 0
+    let hasMore = true
+    const all: Model[] = []
 
+    while (hasMore) {
+      const res = await fetch(
+        `${API_BASE}/v1/models?active_only=true&usable_only=true&chat_only=true&limit=${pageSize}&offset=${offset}`,
+        { headers: AUTH_HEADERS }
+      )
+      const data = await res.json()
+      const page: Model[] = data.data || []
+      all.push(...page)
+      hasMore = Boolean(data.has_more)
+      offset += pageSize
+      if (page.length === 0) break
+    }
+
+    return all
+  }
+
+  useEffect(() => {
+    async function fetchPersona() {
+      try {
         if (personaId) {
           const personaRes = await fetch(`${API_BASE}/v1/personas/${personaId}`, {
-            headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
+            headers: AUTH_HEADERS
           })
           const personaData = await personaRes.json()
           setPersona(personaData)
@@ -73,7 +90,37 @@ export default function PersonaForm() {
         setLoading(false)
       }
     }
-    fetchData()
+
+    async function fetchModelsInBackground() {
+      setModelsLoading(true)
+      try {
+        const allModels = await fetchAllEligibleModels()
+        setModels(allModels)
+
+        // Non-blocking best-effort refresh if local Ollama inventory drifted from DB.
+        try {
+          const statusRes = await fetch(`${API_BASE}/v1/models/sync/status`, { headers: AUTH_HEADERS })
+          if (statusRes.ok) {
+            const statusData = await statusRes.json()
+            const ollama = statusData?.ollama
+            if (ollama?.reachable && Number(ollama.model_count || 0) !== Number(ollama.in_db || 0)) {
+              await fetch(`${API_BASE}/v1/models/sync`, { method: 'POST', headers: AUTH_HEADERS })
+              const refreshedModels = await fetchAllEligibleModels()
+              setModels(refreshedModels)
+            }
+          }
+        } catch {
+          // Non-fatal: keep already loaded model options.
+        }
+      } catch (e) {
+        console.error('Failed to fetch model options:', e)
+      } finally {
+        setModelsLoading(false)
+      }
+    }
+
+    fetchPersona()
+    fetchModelsInBackground()
   }, [personaId])
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -89,8 +136,8 @@ export default function PersonaForm() {
       const res = await fetch(url, {
         method,
         headers: {
+          ...AUTH_HEADERS,
           'Content-Type': 'application/json',
-          'Authorization': 'Bearer modelmesh_local_dev_key'
         },
         body: JSON.stringify(persona)
       })
@@ -164,9 +211,13 @@ export default function PersonaForm() {
           <div className="mt-4 space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700">Primary Model</label>
+              {modelsLoading && (
+                <p className="mt-1 text-xs text-gray-500">Loading model options...</p>
+              )}
               <select
                 value={persona.primary_model_id || ''}
                 onChange={(e) => setPersona({ ...persona, primary_model_id: e.target.value || undefined })}
+                disabled={modelsLoading}
                 className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
               >
                 <option value="">Select a model</option>
@@ -182,6 +233,7 @@ export default function PersonaForm() {
               <select
                 value={persona.fallback_model_id || ''}
                 onChange={(e) => setPersona({ ...persona, fallback_model_id: e.target.value || undefined })}
+                disabled={modelsLoading}
                 className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
               >
                 <option value="">No fallback</option>

@@ -82,12 +82,12 @@ def _detect_tailscale_ip() -> Optional[str]:
 def _detect_wireguard_ip() -> Optional[str]:
     """Detect local WireGuard IPv4 address from interface listings.
 
-    Works on Windows by scanning ipconfig output for adapters containing
-    "WireGuard"/"Wintun" and extracting IPv4 values.
+    Works on Windows by scanning `ipconfig /all` output for adapters whose
+    block contains WireGuard/Wintun markers, then extracting IPv4 values.
     """
     try:
         output = subprocess.run(
-            ["ipconfig"],
+            ["ipconfig", "/all"],
             capture_output=True,
             text=True,
             timeout=5,

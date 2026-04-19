@@ -4,12 +4,17 @@ import uuid
 import json
 import shutil
 import logging
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from app.middleware.auth import verify_api_key
+from app.database import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from app.models import Conversation, Message
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +77,63 @@ class ProjectUpdate(BaseModel):
     description: Optional[str] = None
     agents: Optional[List[str]] = None
     sandbox_mode: Optional[str] = None  # "restricted" | "full"
+
+
+class PromoteConversationRequest(BaseModel):
+    name: Optional[str] = None
+    path: Optional[str] = None
+    template: str = "blank"
+    include_transcript: bool = True
+    sandbox_mode: str = "full"
+
+
+def _safe_slug(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", (value or "project").strip().lower())
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug or "project"
+
+
+def _promoted_projects_root() -> Path:
+    return _DATA_DIR / "promoted-projects"
+
+
+def _build_chat_intake_markdown(
+    conversation_title: str,
+    conversation_id: str,
+    message_count: int,
+    transcript: list[Message],
+) -> str:
+    lines: list[str] = []
+    lines.append(f"# Chat Intake: {conversation_title}")
+    lines.append("")
+    lines.append("## Metadata")
+    lines.append(f"- Conversation ID: {conversation_id}")
+    lines.append(f"- Exported At (UTC): {datetime.utcnow().isoformat()}")
+    lines.append(f"- Message Count: {message_count}")
+    lines.append("")
+
+    # Simple structured summary for downstream workflows.
+    user_msgs = [m for m in transcript if (m.role or "").lower() == "user"]
+    assistant_msgs = [m for m in transcript if (m.role or "").lower() == "assistant"]
+    kickoff = (user_msgs[0].content.strip() if user_msgs else "").replace("\n", " ")[:500]
+    latest = (assistant_msgs[-1].content.strip() if assistant_msgs else "").replace("\n", " ")[:500]
+
+    lines.append("## Extracted Context")
+    lines.append(f"- Initial User Goal: {kickoff or 'N/A'}")
+    lines.append(f"- Latest Assistant Direction: {latest or 'N/A'}")
+    lines.append("")
+
+    lines.append("## Full Transcript")
+    lines.append("")
+    for idx, msg in enumerate(transcript, start=1):
+        role = (msg.role or "unknown").upper()
+        created = msg.created_at.isoformat() if getattr(msg, "created_at", None) else "unknown"
+        lines.append(f"### {idx}. {role} ({created})")
+        lines.append("")
+        lines.append(msg.content or "")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -137,6 +199,95 @@ async def create_project(body: ProjectCreate):
         "created_at": datetime.utcnow().isoformat(),
         "updated_at": datetime.utcnow().isoformat(),
         "scaffolded": scaffold,
+    }
+
+    projects[project_id] = project
+    _save_projects(projects)
+    return project
+
+
+@router.post("/promote/conversation/{conversation_id}")
+async def promote_conversation_to_project(
+    conversation_id: str,
+    body: PromoteConversationRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a project directly from an existing conversation and persist a chat intake artifact."""
+    try:
+        conv_uuid = uuid.UUID(conversation_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    conv_result = await db.execute(select(Conversation).where(Conversation.id == conv_uuid))
+    conv = conv_result.scalar_one_or_none()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    msg_result = await db.execute(
+        select(Message)
+        .where(Message.conversation_id == conv_uuid)
+        .order_by(Message.created_at.asc())
+    )
+    transcript = list(msg_result.scalars().all())
+
+    suggested_name = (body.name or conv.title or f"Project from chat {str(conv.id)[:8]}").strip()
+    slug = _safe_slug(suggested_name)
+
+    if body.path:
+        project_path = Path(body.path)
+    else:
+        ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        project_path = _promoted_projects_root() / f"{slug}-{ts}"
+
+    projects = _load_projects()
+    if project_path.exists() and any(project_path.iterdir()):
+        scaffold = False
+    else:
+        project_path.mkdir(parents=True, exist_ok=True)
+        scaffold = True
+
+    project_id = str(uuid.uuid4())
+    name_slug = _safe_slug(suggested_name)
+
+    if scaffold:
+        template = TEMPLATES.get(body.template, TEMPLATES["blank"])
+        for filename, content in template.items():
+            file_path = project_path / filename
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            rendered = content.format(name=suggested_name, name_slug=name_slug)
+            file_path.write_text(rendered, encoding="utf-8")
+
+    intake_path = project_path / "CHAT-INTAKE.md"
+    if body.include_transcript:
+        intake_md = _build_chat_intake_markdown(
+            conversation_title=conv.title or suggested_name,
+            conversation_id=str(conv.id),
+            message_count=len(transcript),
+            transcript=transcript,
+        )
+        intake_path.write_text(intake_md, encoding="utf-8")
+
+    project = {
+        "id": project_id,
+        "name": suggested_name,
+        "path": str(project_path.resolve()),
+        "template": body.template,
+        "description": (
+            f"Promoted from chat conversation '{conv.title or 'Untitled conversation'}' "
+            f"({len(transcript)} messages)."
+        ),
+        "agents": [],
+        "sandbox_mode": body.sandbox_mode if body.sandbox_mode in ("restricted", "full") else "full",
+        "created_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.utcnow().isoformat(),
+        "scaffolded": scaffold,
+        "source": {
+            "type": "conversation",
+            "conversation_id": str(conv.id),
+            "conversation_title": conv.title,
+            "message_count": len(transcript),
+            "intake_file": "CHAT-INTAKE.md" if body.include_transcript else None,
+        },
     }
 
     projects[project_id] = project

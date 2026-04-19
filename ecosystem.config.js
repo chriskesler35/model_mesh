@@ -30,10 +30,10 @@ module.exports = {
     },
     {
       name: 'devforgeai-frontend',
-      script: 'node_modules/next/dist/bin/next',
-      args: 'dev -p 3001',
+      script: process.platform === 'win32' ? 'npm.cmd' : 'npm',
+      args: 'run dev',
       cwd: './frontend',
-      interpreter: 'node',
+      interpreter: 'none',
       watch: false,
       autorestart: true,
       restart_delay: 2000,

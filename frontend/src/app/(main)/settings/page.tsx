@@ -304,7 +304,7 @@ function ApiKeysTab() {
         : (data.message || 'Refresh runtime status after finishing the login flow.')
 
       addToast({
-        type: codexStatus?.usable ? 'success' : (data.started ? 'info' : 'warning'),
+        type: codexStatus?.usable ? 'success' : 'info',
         title: data.started ? 'Codex login started' : 'Codex already connected',
         message: toastMessage,
         autoClose: 6500,

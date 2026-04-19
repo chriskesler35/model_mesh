@@ -92,6 +92,11 @@ class ModelClient:
             kwargs["api_base"] = get_codex_proxy_base_url()
             if codex_proxy_rejects_temperature(model.model_id):
                 kwargs.pop("temperature", None)
+        elif provider_name == "openai-codex":
+            # The provider record is synced with the local Codex proxy base URL,
+            # but when we are not actively routing through that proxy we must
+            # fall back to the standard OpenAI-compatible endpoint.
+            kwargs["api_base"] = "https://api.openai.com/v1"
         elif provider_name == "github-copilot":
             # Copilot accepts the stored GitHub OAuth token directly.
             from app.services.command_executor import get_first_github_token

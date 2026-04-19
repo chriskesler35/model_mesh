@@ -95,35 +95,83 @@ def _apply_interaction_mode_to_phases(
         raise HTTPException(status_code=400, detail="interaction_mode must be 'interactive' or 'autonomous'")
 
     updated: List[Dict[str, Any]] = []
+    # Apply discovery guidance to kickoff/root phases across all methods,
+    # including custom methods, so behavior matches in-IDE kickoff patterns.
+    root_phase_names = {
+        ph.get("name")
+        for ph in phases
+        if not (ph.get("depends_on") or [])
+    }
+
     for phase in phases:
         p = dict(phase)
         p["interaction_mode"] = mode
         p["delegate_qa_to_agent"] = delegated
 
-        if p.get("name") == "Analyst":
+        if p.get("name") in root_phase_names:
             base_prompt = p.get("system_prompt", "")
+            artifact_type = (p.get("artifact_type") or "md").lower()
             if mode == "interactive":
-                p["system_prompt"] = (
-                    f"{base_prompt}\n\n"
-                    "# Interaction mode: INTERACTIVE USER DISCOVERY\n"
-                    "You must surface a clear Q&A set for the human reviewer before implementation proceeds.\n"
-                    "Do not invent missing user decisions. Mark unknowns explicitly.\n\n"
-                    "Add these fields to your JSON output:\n"
-                    "- clarifying_questions: [{id, question, why_it_matters}]\n"
-                    "- open_questions_for_user: [id]\n"
-                    "- assumed_answers: []\n"
-                )
+                if artifact_type == "json":
+                    p["system_prompt"] = (
+                        f"{base_prompt}\n\n"
+                        "# Interaction mode: INTERACTIVE USER DISCOVERY\n"
+                        "You must surface a clear Q&A set for the human reviewer before implementation proceeds.\n"
+                        "Do not invent missing user decisions. Mark unknowns explicitly.\n\n"
+                        "Add these fields to your JSON output:\n"
+                        "- clarifying_questions: [{id, question, why_it_matters}]\n"
+                        "- open_questions_for_user: [id]\n"
+                        "- assumed_answers: []\n"
+                    )
+                elif artifact_type == "code":
+                    p["system_prompt"] = (
+                        f"{base_prompt}\n\n"
+                        "# Interaction mode: INTERACTIVE USER DISCOVERY\n"
+                        "Before any FILE: or CMD: blocks, include a short DISCOVERY section in markdown with:\n"
+                        "- Clarifying questions (numbered)\n"
+                        "- Open questions for user\n"
+                        "- Explicitly empty assumed answers list\n"
+                        "If critical requirements are unknown, keep implementation minimal/safe and call out the blockers clearly.\n"
+                    )
+                else:  # md/other
+                    p["system_prompt"] = (
+                        f"{base_prompt}\n\n"
+                        "# Interaction mode: INTERACTIVE USER DISCOVERY\n"
+                        "Your output must include these sections:\n"
+                        "## Clarifying Questions\n"
+                        "## Open Questions For User\n"
+                        "## Assumed Answers (leave empty in interactive mode)\n"
+                    )
             elif delegated:
-                p["system_prompt"] = (
-                    f"{base_prompt}\n\n"
-                    "# Interaction mode: AUTONOMOUS SURROGATE Q&A\n"
-                    "Generate visible Q&A as if an end user answered, so the conversation remains auditable.\n"
-                    "Use reasonable assumptions and label confidence clearly.\n\n"
-                    "Add these fields to your JSON output:\n"
-                    "- clarifying_questions: [{id, question, why_it_matters}]\n"
-                    "- assumed_answers: [{question_id, answer, confidence: high|medium|low, rationale}]\n"
-                    "- open_questions_for_user: [id]  # only if uncertainty is too high\n"
-                )
+                if artifact_type == "json":
+                    p["system_prompt"] = (
+                        f"{base_prompt}\n\n"
+                        "# Interaction mode: AUTONOMOUS SURROGATE Q&A\n"
+                        "Generate visible Q&A as if an end user answered, so the conversation remains auditable.\n"
+                        "Use reasonable assumptions and label confidence clearly.\n\n"
+                        "Add these fields to your JSON output:\n"
+                        "- clarifying_questions: [{id, question, why_it_matters}]\n"
+                        "- assumed_answers: [{question_id, answer, confidence: high|medium|low, rationale}]\n"
+                        "- open_questions_for_user: [id]  # only if uncertainty is too high\n"
+                    )
+                elif artifact_type == "code":
+                    p["system_prompt"] = (
+                        f"{base_prompt}\n\n"
+                        "# Interaction mode: AUTONOMOUS SURROGATE Q&A\n"
+                        "Before any FILE: or CMD: blocks, include a DISCOVERY section with:\n"
+                        "- Clarifying questions\n"
+                        "- Assumed answers with confidence (high|medium|low) and rationale\n"
+                        "- Open questions for user only when uncertainty is too high\n"
+                    )
+                else:  # md/other
+                    p["system_prompt"] = (
+                        f"{base_prompt}\n\n"
+                        "# Interaction mode: AUTONOMOUS SURROGATE Q&A\n"
+                        "Your output must include these sections:\n"
+                        "## Clarifying Questions\n"
+                        "## Assumed Answers (with confidence + rationale)\n"
+                        "## Open Questions For User (only high-uncertainty blockers)\n"
+                    )
 
         updated.append(p)
 

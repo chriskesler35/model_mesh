@@ -24,6 +24,12 @@ Start-Sleep -Seconds 2
 $backendPort = if (Test-PortListening $preferredBackendPort) { $fallbackBackendPort } else { $preferredBackendPort }
 $backendUrl = "http://localhost:$backendPort"
 
+# Clean stale Next.js cache to avoid chunk mismatch errors after restarts.
+$nextCacheDir = Join-Path $root "frontend\.next\cache"
+if (Test-Path $nextCacheDir) {
+    try { Remove-Item $nextCacheDir -Recurse -Force -ErrorAction Stop } catch {}
+}
+
 # Backend
 $backendProc = Start-Process `
     -FilePath (Join-Path $root "backend\venv\Scripts\python.exe") `

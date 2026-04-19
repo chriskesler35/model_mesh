@@ -21,10 +21,61 @@ from app.config import settings
 from app.services.app_settings_helper import get_setting
 from app.routes.workflows import find_workflow_path, _convert_editor_to_api, _fetch_object_info_schema
 from pydantic import BaseModel
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Any, Dict
+from datetime import datetime as _dt
 import os
 
 logger = logging.getLogger(__name__)
+
+# ─── Async Job Store ──────────────────────────────────────────────────────────
+# Lightweight in-memory store for background generation jobs.
+# Survives the request lifecycle so the frontend can poll progress even after
+# the originating fetch returns a job_id immediately.
+_JOB_STORE: Dict[str, Dict[str, Any]] = {}
+
+
+def _job_create(job_id: str, kind: str, source_image_id: str = None) -> dict:
+    job: Dict[str, Any] = {
+        "id": job_id,
+        "kind": kind,               # "variation" | "generation"
+        "status": "pending",        # pending | running | complete | error
+        "step": 0,
+        "max_steps": 0,
+        "message": "Queued…",
+        "source_image_id": source_image_id,
+        "result_id": None,          # set on completion
+        "error": None,
+        "created_at": _dt.utcnow().isoformat() + "Z",
+        "updated_at": _dt.utcnow().isoformat() + "Z",
+    }
+    _JOB_STORE[job_id] = job
+    return job
+
+
+def _job_update(job_id: str, **kwargs) -> None:
+    job = _JOB_STORE.get(job_id)
+    if job:
+        job.update(kwargs)
+        job["updated_at"] = _dt.utcnow().isoformat() + "Z"
+
+
+def _make_job_progress_cb(job_id: str):
+    """Return an async progress_cb that writes step info into the job store."""
+    import re as _re
+    _step_pat = _re.compile(r"Sampling step (\d+)/(\d+)")
+
+    async def _cb(message: str, percent: int | None) -> None:
+        updates: Dict[str, Any] = {"status": "running", "message": message}
+        m = _step_pat.match(message)
+        if m:
+            updates["step"] = int(m.group(1))
+            updates["max_steps"] = int(m.group(2))
+        elif percent is not None:
+            updates["step"] = percent
+            updates["max_steps"] = 100
+        _job_update(job_id, **updates)
+
+    return _cb
 
 
 async def _stop_comfyui_progress_task(ws_stop_event: "asyncio.Event", ws_task) -> None:
@@ -384,9 +435,8 @@ async def generate_with_gemini_imagen(prompt: str, api_key: str, size: str = "10
             "contents": [{"parts": [{"text": gen_prompt}]}],
             "generationConfig": {
                 "responseModalities": ["IMAGE"],
-            }
+            },
         }
-
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
 
@@ -1812,6 +1862,153 @@ class ImageVariationRequest(BaseModel):
     fast_mask: Optional[bool] = False  # If True, use optimized settings: denoise=0.4, mask_grow=0, mask_feather=0
 
 
+@router.get("/jobs/{job_id}")
+async def get_job_status(job_id: str):
+    """Return current status and progress for a background generation job."""
+    job = _JOB_STORE.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@router.post("/{image_id}/variations/async")
+async def generate_variation_async(
+    image_id: str,
+    request: Optional[ImageVariationRequest] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Queue a variation as a background job. Returns job_id immediately."""
+    original = IMAGE_STORAGE.get(image_id)
+    if not original:
+        found_on_disk = any(
+            (_IMAGE_DIR / f"{image_id}.{ext}").exists()
+            for ext in ("png", "jpg", "jpeg", "webp")
+        )
+        if not found_on_disk:
+            raise HTTPException(status_code=404, detail="Original image not found")
+        original = {"prompt": "", "model": "gemini-imagen", "size": "1024x1024", "format": "png"}
+
+    comfyui_url_cfg = await get_setting("comfyui_url", db)
+    comfyui_dir = await get_setting("comfyui_dir", db)
+    poll_timeout = await _get_comfyui_poll_timeout_seconds(db)
+
+    job_id = str(uuid.uuid4())
+    _job_create(job_id, "variation", source_image_id=image_id)
+
+    req_prompt = (request.prompt if request else None)
+    req_model = (request.model if request else None)
+    req_size = (request.size if request else None)
+    req_format = (request.format if request else None)
+    req_denoise = (request.denoise if request else None)
+    req_mask_grow = (request.mask_grow if request else None)
+    req_mask_feather = (request.mask_feather if request else None)
+    req_fast_mask = (request.fast_mask if request else False)
+    req_mask_base64 = (request.mask_base64 if request else None)
+    req_mask_mime = (request.mask_mime if request else "image/png") or "image/png"
+    req_workflow_id = (request.workflow_id if request else None)
+
+    async def _run():
+        try:
+            _job_update(job_id, status="running", message="Starting…")
+            prompt = req_prompt or original.get("prompt") or ""
+            model = req_model or original.get("model") or "gemini-imagen"
+            size = req_size or original.get("size", "1024x1024")
+            fmt = req_format or original.get("format", "png")
+            denoise = _resolve_denoise(req_denoise, 0.65)
+            mask_grow = _resolve_mask_grow(req_mask_grow, 8)
+            mask_feather = _resolve_mask_feather(req_mask_feather, 6.0)
+            if req_fast_mask and req_mask_base64:
+                denoise, mask_grow, mask_feather = 0.4, 0, 0.0
+
+            mask_bytes = None
+            if req_mask_base64:
+                try:
+                    mask_bytes = base64.b64decode(req_mask_base64)
+                except Exception as exc:
+                    _job_update(job_id, status="error", error=f"Invalid mask_base64: {exc}")
+                    return
+
+            source_bytes = None
+            source_mime = "image/png"
+            for ext in ("png", "jpg", "jpeg", "webp"):
+                p = _IMAGE_DIR / f"{image_id}.{ext}"
+                if p.exists():
+                    source_bytes = p.read_bytes()
+                    source_mime = "image/jpeg" if ext == "jpg" else f"image/{ext}"
+                    break
+            if not source_bytes:
+                _job_update(job_id, status="error", error="Source image file not found on disk")
+                return
+
+            result = None
+            if model == "gemini-imagen":
+                api_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+                           or getattr(settings, "gemini_api_key", None))
+                if not api_key:
+                    _job_update(job_id, status="error", error="GEMINI_API_KEY not configured")
+                    return
+                source_b64 = base64.b64encode(source_bytes).decode()
+                if prompt.strip() and not prompt.startswith("Uploaded:"):
+                    variation_prompt = (
+                        f"Create a subtle variation of this image. Keep the overall "
+                        f"subject, composition, and style the same, but introduce small "
+                        f"differences in details, lighting, or pose. Original concept: {prompt}"
+                    )
+                else:
+                    variation_prompt = (
+                        "Create a subtle variation of this image. Keep the overall "
+                        "subject, composition, and style the same, but introduce small "
+                        "differences in details, lighting, or pose."
+                    )
+                result = await _gemini_image_edit(source_b64, source_mime, variation_prompt, api_key)
+            elif model == "comfyui-local":
+                _ensure_comfyui_png_source(source_mime, "variations")
+                chosen_workflow = req_workflow_id or "sdxl-img2img"
+                active_url = await _resolve_comfyui_endpoint(comfyui_url_cfg)
+                if not active_url:
+                    _job_update(job_id, status="error", error=f"ComfyUI not reachable at {comfyui_url_cfg}")
+                    return
+                progress_cb = _make_job_progress_cb(job_id)
+                result = await generate_img2img_with_comfyui(
+                    source_bytes=source_bytes,
+                    prompt=prompt or "high quality variation",
+                    comfyui_url=active_url,
+                    comfyui_dir=comfyui_dir,
+                    workflow_id=chosen_workflow,
+                    source_mime=source_mime,
+                    mask_bytes=mask_bytes,
+                    mask_mime=req_mask_mime,
+                    denoise=denoise,
+                    mask_grow=mask_grow,
+                    mask_feather=mask_feather,
+                    poll_timeout_seconds=poll_timeout,
+                    progress_cb=progress_cb,
+                )
+            else:
+                _job_update(job_id, status="error", error=f"Model '{model}' does not support variations")
+                return
+
+            variation_id = str(uuid.uuid4())
+            IMAGE_STORAGE[variation_id] = {
+                "base64": result["base64"],
+                "prompt": prompt,
+                "revised_prompt": result.get("revised_prompt"),
+                "format": fmt,
+                "size": size,
+                "model": model,
+                "negative_prompt": original.get("negative_prompt"),
+                "variation_of": image_id,
+            }
+            _store_image(variation_id, IMAGE_STORAGE[variation_id])
+            _job_update(job_id, status="complete", result_id=variation_id, step=100, max_steps=100, message="Done")
+        except Exception as exc:
+            logger.error("Background variation job %s failed: %s", job_id, exc)
+            _job_update(job_id, status="error", error=str(exc))
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id, "status": "pending"}
+
+
 @router.post("/{image_id}/variations", response_model=ImageListResponse)
 async def generate_variation(
     image_id: str,
@@ -2074,7 +2271,150 @@ async def _gemini_image_edit(source_base64: str, source_mime: str, prompt: str, 
 
 
 @router.post("/edit", response_model=ImageListResponse)
-async def edit_image(req: ImageEditRequest, db: AsyncSession = Depends(get_db)):
+@router.post("/edit/async")
+async def edit_image_async(req: ImageEditRequest, db: AsyncSession = Depends(get_db)):
+    """Queue an image edit as a background job. Returns job_id immediately."""
+    # Resolve source image up front so we can 404 early
+    source_b64 = req.source_base64
+    source_mime = req.source_mime or "image/png"
+    source_image_id = req.source_image_id
+
+    if source_image_id:
+        if source_image_id in IMAGE_STORAGE:
+            stored = IMAGE_STORAGE[source_image_id]
+            source_b64 = stored.get("base64") or _load_image_base64(
+                source_image_id, stored.get("format", "png"))
+            fmt = stored.get("format", "png")
+            source_mime = f"image/{fmt}" if fmt != "jpg" else "image/jpeg"
+        else:
+            source_b64 = _load_image_base64(source_image_id)
+            if not source_b64:
+                raise HTTPException(status_code=404, detail="Source image not found")
+
+    if not source_b64:
+        raise HTTPException(status_code=400, detail="Provide either source_image_id or source_base64")
+
+    job_id = str(uuid.uuid4())
+    _job_create(job_id, "edit", source_image_id=source_image_id)
+
+    # Capture all request fields for closure
+    _req_prompt = req.prompt
+    _req_model = req.model
+    _req_size = req.size
+    _req_workflow_id = req.workflow_id
+    _req_denoise = req.denoise
+    _req_mask_grow = req.mask_grow
+    _req_mask_feather = req.mask_feather
+    _req_mask_base64 = req.mask_base64
+    _req_mask_mime = req.mask_mime or "image/png"
+    _req_source_b64 = source_b64
+    _req_source_mime = source_mime
+
+    # Determine original model/workflow from stored metadata
+    original_model = None
+    original_workflow_id = None
+    if source_image_id and source_image_id in IMAGE_STORAGE:
+        _st = IMAGE_STORAGE[source_image_id]
+        original_model = _st.get("model")
+        original_workflow_id = _st.get("workflow_id")
+
+    configured_comfyui_url = await get_setting("comfyui_url", db)
+    comfyui_dir = await get_setting("comfyui_dir", db)
+    poll_timeout = await _get_comfyui_poll_timeout_seconds(db)
+
+    async def _run():
+        try:
+            _job_update(job_id, status="running", message="Starting…")
+            preferred_model = _req_model or original_model
+            chosen_workflow = _req_workflow_id or original_workflow_id or "sdxl-img2img"
+            denoise = _resolve_denoise(_req_denoise, 0.45)
+            mask_grow = _resolve_mask_grow(_req_mask_grow, 8)
+            mask_feather = _resolve_mask_feather(_req_mask_feather, 6.0)
+
+            mask_bytes = None
+            if _req_mask_base64:
+                try:
+                    mask_bytes = base64.b64decode(_req_mask_base64)
+                except Exception as exc:
+                    _job_update(job_id, status="error", error=f"Invalid mask_base64: {exc}")
+                    return
+
+            try:
+                source_bytes = base64.b64decode(_req_source_b64)
+            except Exception as exc:
+                _job_update(job_id, status="error", error=f"Invalid source image: {exc}")
+                return
+
+            result = None
+            used_model = preferred_model or original_model
+
+            if preferred_model == "comfyui-local":
+                progress_cb = _make_job_progress_cb(job_id)
+                try:
+                    _ensure_comfyui_png_source(_req_source_mime, "edits")
+                    active_comfyui_url = await _resolve_comfyui_endpoint(configured_comfyui_url)
+                    if not active_comfyui_url:
+                        raise Exception(
+                            f"ComfyUI not reachable at configured URL(s): {configured_comfyui_url}"
+                        )
+                    result = await generate_img2img_with_comfyui(
+                        source_bytes=source_bytes,
+                        prompt=_req_prompt,
+                        comfyui_url=active_comfyui_url,
+                        workflow_id=chosen_workflow,
+                        comfyui_dir=comfyui_dir,
+                        source_mime=_req_source_mime,
+                        mask_bytes=mask_bytes,
+                        mask_mime=_req_mask_mime,
+                        denoise=denoise,
+                        mask_grow=mask_grow,
+                        mask_feather=mask_feather,
+                        poll_timeout_seconds=poll_timeout,
+                        progress_cb=progress_cb,
+                    )
+                    used_model = "comfyui-local"
+                except Exception as comfy_err:
+                    logger.warning(f"ComfyUI failed for async edit, falling back to Gemini: {comfy_err}")
+                    used_model = None
+
+            if result is None:
+                api_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+                           or getattr(settings, "gemini_api_key", None))
+                if not api_key:
+                    _job_update(job_id, status="error", error="Gemini API key required for image editing")
+                    return
+                _job_update(job_id, status="running", message="Sending to Gemini…")
+                result = await _gemini_image_edit(_req_source_b64, _req_source_mime, _req_prompt, api_key)
+                used_model = "gemini-image-edit"
+
+            # Store result
+            new_image_id = str(uuid.uuid4())
+            fmt = result.get("mime_type", "image/png").split("/")[-1]
+            if fmt == "jpeg":
+                fmt = "jpg"
+            size_str = _req_size or "1024x1024"
+            width, height = map(int, size_str.split("x")) if "x" in size_str else (1024, 1024)
+            _store_image(new_image_id, {
+                "base64": result["base64"],
+                "prompt": _req_prompt,
+                "revised_prompt": result.get("revised_prompt"),
+                "format": fmt,
+                "size": size_str,
+                "model": used_model,
+                "workflow_id": chosen_workflow if used_model == "comfyui-local" else original_workflow_id,
+                "source_image_id": source_image_id,
+            })
+            _job_update(job_id, status="complete", result_image_id=new_image_id,
+                        message="Done", step=1, max_steps=1)
+        except Exception as exc:
+            logger.exception(f"Async edit job {job_id} failed")
+            _job_update(job_id, status="error", error=str(exc))
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id, "status": "pending"}
+
+
+async def edit_image(req: ImageEditRequest, db: AsyncSession = Depends(get_db)):  # noqa: C901
     """Edit an image using AI — upload a photo and describe what you want."""
 
     # Get source image base64

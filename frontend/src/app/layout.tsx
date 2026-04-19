@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import './globals.css'
 import ToastProvider from './ToastProvider'
+import ChunkErrorRecovery from './ChunkErrorRecovery'
 import { AuthProvider } from '@/contexts/AuthContext'
 
 export const metadata: Metadata = {
@@ -32,6 +33,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="h-full">
       <body className="bg-gray-50 dark:bg-gray-900 h-full overflow-hidden">
+        <ChunkErrorRecovery />
         <AuthProvider>
           <ToastProvider>
             {children}

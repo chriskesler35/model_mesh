@@ -17,6 +17,35 @@ from app.models.custom_method import CustomMethod
 
 logger = logging.getLogger(__name__)
 
+_AFFIRMATIVE_RE = re.compile(r"^\s*(yes|y|yeah|yep|sure|ok|okay|proceed|go ahead|start|do it)\b", re.IGNORECASE)
+_NEGATIVE_RE = re.compile(r"^\s*(no|n|nope|nah|not now|don't|do not|skip|cancel)\b", re.IGNORECASE)
+
+# Explicit project-intent language that should permit workflow engagement.
+_EXPLICIT_PROJECT_INTENT_PATTERNS: list[re.Pattern] = [
+    re.compile(r"\b(start|begin|kick\s*off|launch)\s+(a\s+)?(new\s+)?project\b", re.IGNORECASE),
+    re.compile(r"\b(create|build|develop|make)\s+(a\s+)?(new\s+)?project\b", re.IGNORECASE),
+    re.compile(r"\b(start|begin|kick\s*off|launch)\s+(building|developing|creating)\b", re.IGNORECASE),
+    re.compile(r"\b(let'?s|lets)\s+(build|create|start|develop)\b", re.IGNORECASE),
+]
+
+
+def is_affirmative_reply(message: str) -> bool:
+    """Return True when the message looks like an explicit positive confirmation."""
+    return bool(_AFFIRMATIVE_RE.match((message or "").strip()))
+
+
+def is_negative_reply(message: str) -> bool:
+    """Return True when the message looks like an explicit negative confirmation."""
+    return bool(_NEGATIVE_RE.match((message or "").strip()))
+
+
+def is_explicit_project_intent(message: str) -> bool:
+    """Detect explicit user intent to start project workflow mode."""
+    text = (message or "").strip()
+    if not text:
+        return False
+    return any(p.search(text) for p in _EXPLICIT_PROJECT_INTENT_PATTERNS)
+
 # ── Built-in method trigger keywords ─────────────────────────────────────────
 # Built-in methods don't store trigger_keywords in the DB, so we define them here.
 _BUILTIN_TRIGGERS: dict[str, list[str]] = {
@@ -191,6 +220,9 @@ async def handle_suggest_pipeline(
 
     Returns None if the message doesn't look complex enough.
     """
+    if not is_explicit_project_intent(message):
+        return None
+
     tokens = _tokenize(message)
     # Heuristic: message with 15+ words and action-oriented language
     complexity_markers = {

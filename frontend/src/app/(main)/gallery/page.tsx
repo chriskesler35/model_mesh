@@ -35,9 +35,16 @@ interface Workflow {
 }
 
 interface LocalComfyJob {
-  id: string
+  id: string           // local UUID used to de-dupe in UI
+  jobId: string        // backend job_id returned by /async endpoint
   kind: 'variation' | 'edit'
+  sourceImageId: string
   startedAt: number
+  step: number
+  maxSteps: number
+  message: string
+  status: 'pending' | 'running' | 'complete' | 'error'
+  error?: string
 }
 
 const PAGE_SIZE = 50
@@ -89,14 +96,38 @@ export default function GalleryPage() {
   const isGenerating = useCallback((imageId: string) => generatingIds.includes(imageId), [generatingIds])
 
   const beginLocalComfyJob = useCallback((kind: 'variation' | 'edit') => {
-    const jobId = `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    setLocalComfyJobs(prev => [...prev, { id: jobId, kind, startedAt: Date.now() }])
-    return jobId
+    const localId = `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    return localId
+  }, [])
+
+  const registerJob = useCallback((localId: string, jobId: string, kind: 'variation' | 'edit', sourceImageId: string) => {
+    const job: LocalComfyJob = {
+      id: localId,
+      jobId,
+      kind,
+      sourceImageId,
+      startedAt: Date.now(),
+      step: 0,
+      maxSteps: 0,
+      message: 'Queued…',
+      status: 'pending',
+    }
+    setLocalComfyJobs(prev => [...prev, job])
+    // Persist to localStorage so state survives navigation
+    try {
+      const stored = JSON.parse(localStorage.getItem('comfy_active_jobs') || '[]')
+      stored.push(job)
+      localStorage.setItem('comfy_active_jobs', JSON.stringify(stored))
+    } catch {}
   }, [])
 
   const finishLocalComfyJob = useCallback((jobId: string | null) => {
     if (!jobId) return
     setLocalComfyJobs(prev => prev.filter(job => job.id !== jobId))
+    try {
+      const stored: LocalComfyJob[] = JSON.parse(localStorage.getItem('comfy_active_jobs') || '[]')
+      localStorage.setItem('comfy_active_jobs', JSON.stringify(stored.filter(j => j.id !== jobId)))
+    } catch {}
   }, [])
 
   useEffect(() => {
@@ -114,6 +145,79 @@ export default function GalleryPage() {
     const intervalId = window.setInterval(updateElapsed, 500)
     return () => window.clearInterval(intervalId)
   }, [localComfyJobs])
+
+  // Moved to component scope so all handlers can call it
+  // Restore any active jobs from localStorage when the Gallery mounts (survives navigation)
+  useEffect(() => {
+    try {
+      const stored: LocalComfyJob[] = JSON.parse(localStorage.getItem('comfy_active_jobs') || '[]')
+      const active = stored.filter(j => j.status !== 'complete' && j.status !== 'error')
+      if (active.length > 0) {
+        setLocalComfyJobs(active)
+        // Immediately mark as "in-progress" for UI
+        setGeneratingIds(active.map(j => j.sourceImageId))
+      }
+    } catch {}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Poll backend for progress updates on all active async jobs
+  const fetchImagesRef = useRef<(p?: number) => Promise<void>>()
+
+  useEffect(() => {
+    const activeJobs = localComfyJobs.filter(j => j.status !== 'complete' && j.status !== 'error')
+    if (activeJobs.length === 0) return
+
+    let cancelled = false
+    const poll = async () => {
+      for (const job of activeJobs) {
+        if (cancelled) return
+        try {
+          const res = await fetch(`${API_BASE}/v1/images/jobs/${job.jobId}`, { headers: AUTH_HEADERS })
+          if (!res.ok) continue
+          const data = await res.json()
+
+          setLocalComfyJobs(prev => prev.map(j =>
+            j.id === job.id
+              ? { ...j, step: data.step ?? j.step, maxSteps: data.max_steps ?? j.maxSteps, message: data.message ?? j.message, status: data.status }
+              : j
+          ))
+          // Persist updated state to localStorage
+          try {
+            const stored: LocalComfyJob[] = JSON.parse(localStorage.getItem('comfy_active_jobs') || '[]')
+            localStorage.setItem('comfy_active_jobs', JSON.stringify(
+              stored.map(j => j.id === job.id ? { ...j, step: data.step, maxSteps: data.max_steps, message: data.message, status: data.status } : j)
+            ))
+          } catch {}
+
+          if (data.status === 'complete') {
+            // Job finished — clean up and refresh gallery
+            setGeneratingIds(prev => prev.filter(id => id !== job.sourceImageId))
+            setLocalComfyJobs(prev => prev.filter(j => j.id !== job.id))
+            try {
+              const stored: LocalComfyJob[] = JSON.parse(localStorage.getItem('comfy_active_jobs') || '[]')
+              localStorage.setItem('comfy_active_jobs', JSON.stringify(stored.filter(j => j.id !== job.id)))
+            } catch {}
+            fetchImagesRef.current?.(0)
+          } else if (data.status === 'error') {
+            setGeneratingIds(prev => prev.filter(id => id !== job.sourceImageId))
+            setLocalComfyJobs(prev => prev.filter(j => j.id !== job.id))
+            try {
+              const stored: LocalComfyJob[] = JSON.parse(localStorage.getItem('comfy_active_jobs') || '[]')
+              localStorage.setItem('comfy_active_jobs', JSON.stringify(stored.filter(j => j.id !== job.id)))
+            } catch {}
+            alert(`Generation failed: ${data.error || 'Unknown error'}`)
+          }
+        } catch {}
+      }
+    }
+
+    poll()
+    const interval = window.setInterval(poll, 2000)
+    return () => { cancelled = true; window.clearInterval(interval) }
+  // Re-run when job list changes (jobs added/removed) but not on every step update
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localComfyJobs.map(j => j.id + j.status).join(',')])
 
   // Moved to component scope so all handlers can call it
   const fetchImages = useCallback(async (pageNum: number = 0) => {
@@ -135,6 +239,10 @@ export default function GalleryPage() {
       setLoading(false)
     }
   }, [])
+
+  useEffect(() => {
+    fetchImagesRef.current = fetchImages
+  }, [fetchImages])
 
   useEffect(() => {
     fetchImages(page)
@@ -408,62 +516,6 @@ export default function GalleryPage() {
     }
   }
 
-  const editImage = async (image: Image, prompt: string) => {
-    if (!prompt.trim()) return
-    const maskBase64 = exportProtectionMask()
-    if (variationModel === 'comfyui-local' && image.format.toLowerCase() !== 'png') {
-      alert('ComfyUI edits currently require a PNG source image. Re-upload or convert this image to PNG, or switch to Gemini.')
-      return
-    }
-    if (maskBase64 && variationModel !== 'comfyui-local') {
-      alert('Protected-area masking currently requires the ComfyUI (Local) model.')
-      return
-    }
-    const isLocal = variationModel === 'comfyui-local'
-    const localJobId = isLocal ? beginLocalComfyJob('edit') : null
-    setEditing(true)
-    try {
-      const body: any = {
-        source_image_id: image.id,
-        prompt: prompt.trim(),
-        model: variationModel,
-      }
-      if (variationModel === 'comfyui-local') {
-        body.workflow_id = variationWorkflow
-        body.denoise = localDenoise
-        if (maskBase64) {
-          body.mask_grow = maskGrow
-          body.mask_feather = maskFeather
-        }
-      }
-      if (maskBase64) {
-        body.mask_base64 = maskBase64
-        body.mask_mime = 'image/png'
-      }
-      const response = await fetch(`${API_BASE}/v1/images/edit`, {
-        method: 'POST',
-        headers: AUTH_HEADERS,
-        body: JSON.stringify(body)
-      })
-      const data = await response.json()
-      if (!response.ok) throw new Error(data.detail || 'Edit failed')
-      if (data.data?.[0]) {
-        clearProtectionMask()
-        setProtectMaskEnabled(false)
-        setEditingImage(null)
-        setEditPrompt('')
-        setSelectedImage(null)
-        setPage(0)
-        await fetchImages(0)
-      }
-    } catch (e: any) {
-      alert('Edit failed: ' + e.message)
-    } finally {
-      finishLocalComfyJob(localJobId)
-      setEditing(false)
-    }
-  }
-
   const handleUpload = async (file: File) => {
     const reader = new FileReader()
     reader.onload = async () => {
@@ -509,8 +561,112 @@ export default function GalleryPage() {
     }
   }
 
+  const editImage = async (image: Image, prompt: string) => {
+    if (!prompt.trim()) return
+    const maskBase64 = exportProtectionMask()
+    if (variationModel === 'comfyui-local' && image.format.toLowerCase() !== 'png') {
+      alert('ComfyUI edits currently require a PNG source image. Re-upload or convert this image to PNG, or switch to Gemini.')
+      return
+    }
+    if (maskBase64 && variationModel !== 'comfyui-local') {
+      alert('Protected-area masking currently requires the ComfyUI (Local) model.')
+      return
+    }
+    const isLocal = variationModel === 'comfyui-local'
+
+    const body: any = {
+      source_image_id: image.id,
+      prompt: prompt.trim(),
+      model: variationModel,
+    }
+    if (isLocal) {
+      body.workflow_id = variationWorkflow
+      body.denoise = localDenoise
+      if (maskBase64) {
+        body.mask_grow = maskGrow
+        body.mask_feather = maskFeather
+      }
+    }
+    if (maskBase64) {
+      body.mask_base64 = maskBase64
+      body.mask_mime = 'image/png'
+    }
+
+    if (isLocal) {
+      // ── Async path: returns job_id immediately, polling handles completion ──
+      setEditing(true)
+      const localId = beginLocalComfyJob('edit')
+      try {
+        const res = await fetch(`${API_BASE}/v1/images/edit/async`, {
+          method: 'POST',
+          headers: AUTH_HEADERS,
+          body: JSON.stringify(body),
+        })
+        if (res.status === 404) {
+          // Backward-compatible fallback for backends without /edit/async
+          const syncRes = await fetch(`${API_BASE}/v1/images/edit`, {
+            method: 'POST',
+            headers: AUTH_HEADERS,
+            body: JSON.stringify(body),
+          })
+          const syncData = await syncRes.json()
+          if (!syncRes.ok) throw new Error(syncData.detail || 'Edit failed')
+          if (syncData.data?.[0]) {
+            clearProtectionMask()
+            setProtectMaskEnabled(false)
+            setEditingImage(null)
+            setEditPrompt('')
+            setSelectedImage(null)
+            setPage(0)
+            await fetchImages(0)
+          }
+          finishLocalComfyJob(localId)
+          setEditing(false)
+          return
+        }
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.detail || 'Edit failed')
+        clearProtectionMask()
+        setProtectMaskEnabled(false)
+        setEditingImage(null)
+        setEditPrompt('')
+        setSelectedImage(null)
+        registerJob(localId, data.job_id, 'edit', image.id)
+      } catch (e: any) {
+        console.error('Failed to queue edit:', e)
+        alert('Edit failed: ' + e.message)
+        finishLocalComfyJob(localId)
+        setEditing(false)
+      }
+    } else {
+      // ── Sync path for Gemini ──
+      setEditing(true)
+      try {
+        const response = await fetch(`${API_BASE}/v1/images/edit`, {
+          method: 'POST',
+          headers: AUTH_HEADERS,
+          body: JSON.stringify(body),
+        })
+        const data = await response.json()
+        if (!response.ok) throw new Error(data.detail || 'Edit failed')
+        if (data.data?.[0]) {
+          clearProtectionMask()
+          setProtectMaskEnabled(false)
+          setEditingImage(null)
+          setEditPrompt('')
+          setSelectedImage(null)
+          setPage(0)
+          await fetchImages(0)
+        }
+      } catch (e: any) {
+        alert('Edit failed: ' + e.message)
+      } finally {
+        setEditing(false)
+      }
+    }
+  }
+
   const generateVariation = async (imageId: string, modelId?: string) => {
-    setGeneratingIds(prev => prev.includes(imageId) ? prev : [...prev, imageId])
     const chosenModel = modelId || variationModel
     const isLocal = chosenModel === 'comfyui-local'
     const maskBase64 = selectedImage?.id === imageId ? exportProtectionMask() : null
@@ -518,54 +674,90 @@ export default function GalleryPage() {
 
     if (isLocal && sourceImage?.format.toLowerCase() !== 'png') {
       alert('ComfyUI variations currently require a PNG source image. Re-upload or convert this image to PNG, or switch to Gemini.')
-      setGeneratingIds(prev => prev.filter(id => id !== imageId))
       return
     }
-
     if (maskBase64 && !isLocal) {
       alert('Protected-area masking currently requires the ComfyUI (Local) model.')
-      setGeneratingIds(prev => prev.filter(id => id !== imageId))
       return
     }
 
-    const localJobId = isLocal ? beginLocalComfyJob('variation') : null
-
-    try {
-      const body: any = { model: chosenModel }
-      // Include workflow_id only when using ComfyUI (Gemini ignores it)
-      if (isLocal && variationWorkflow) {
-        body.workflow_id = variationWorkflow
-        body.denoise = localDenoise
-        if (maskBase64) {
-          body.mask_grow = maskGrow
-          body.mask_feather = maskFeather
-        }
-      }
+    const body: any = { model: chosenModel }
+    if (isLocal && variationWorkflow) {
+      body.workflow_id = variationWorkflow
+      body.denoise = localDenoise
       if (maskBase64) {
-        body.mask_base64 = maskBase64
-        body.mask_mime = 'image/png'
+        body.mask_grow = maskGrow
+        body.mask_feather = maskFeather
       }
-      const response = await fetch(`${API_BASE}/v1/images/${imageId}/variations`, {
-        method: 'POST',
-        headers: AUTH_HEADERS,
-        body: JSON.stringify(body)
-      })
-      const data = await response.json()
-      if (!response.ok) throw new Error(data.detail || 'Failed to generate variation')
-      if (data.data?.[0]) {
-        // Variations are saved to data/images/ — refresh to pull in the new file + keep sort order
+    }
+    if (maskBase64) {
+      body.mask_base64 = maskBase64
+      body.mask_mime = 'image/png'
+    }
+
+    if (isLocal) {
+      // Async path: returns job_id immediately, polling handles completion.
+      setGeneratingIds(prev => prev.includes(imageId) ? prev : [...prev, imageId])
+      const localId = beginLocalComfyJob('variation')
+      try {
+        const res = await fetch(`${API_BASE}/v1/images/${imageId}/variations/async`, {
+          method: 'POST',
+          headers: AUTH_HEADERS,
+          body: JSON.stringify(body),
+        })
+        if (res.status === 404) {
+          const syncRes = await fetch(`${API_BASE}/v1/images/${imageId}/variations`, {
+            method: 'POST',
+            headers: AUTH_HEADERS,
+            body: JSON.stringify(body),
+          })
+          const syncData = await syncRes.json()
+          if (!syncRes.ok) throw new Error(syncData.detail || 'Failed to generate variation')
+          if (syncData.data?.[0]) {
+            clearProtectionMask()
+            setProtectMaskEnabled(false)
+            setPage(0)
+            await fetchImages(0)
+            setSelectedImage(null)
+          }
+          setGeneratingIds(prev => prev.filter(id => id !== imageId))
+          return
+        }
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.detail || 'Failed to queue variation')
         clearProtectionMask()
         setProtectMaskEnabled(false)
-        setPage(0)
-        await fetchImages(0)
         setSelectedImage(null)
+        registerJob(localId, data.job_id, 'variation', imageId)
+      } catch (e: any) {
+        console.error('Failed to queue variation:', e)
+        alert('Variation failed: ' + e.message)
+        setGeneratingIds(prev => prev.filter(id => id !== imageId))
       }
-    } catch (e: any) {
-      console.error('Failed to generate variation:', e)
-      alert('Variation failed: ' + e.message)
-    } finally {
-      finishLocalComfyJob(localJobId)
-      setGeneratingIds(prev => prev.filter(id => id !== imageId))
+    } else {
+      // Sync path for Gemini.
+      setGeneratingIds(prev => prev.includes(imageId) ? prev : [...prev, imageId])
+      try {
+        const res = await fetch(`${API_BASE}/v1/images/${imageId}/variations`, {
+          method: 'POST',
+          headers: AUTH_HEADERS,
+          body: JSON.stringify(body),
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.detail || 'Failed to generate variation')
+        if (data.data?.[0]) {
+          clearProtectionMask()
+          setProtectMaskEnabled(false)
+          setPage(0)
+          await fetchImages(0)
+          setSelectedImage(null)
+        }
+      } catch (e: any) {
+        console.error('Failed to generate variation:', e)
+        alert('Variation failed: ' + e.message)
+      } finally {
+        setGeneratingIds(prev => prev.filter(id => id !== imageId))
+      }
     }
   }
 
@@ -676,81 +868,73 @@ export default function GalleryPage() {
       </div>
 
       {/* Queue-aware status for local ComfyUI work */}
-      {localComfyJobs.length > 0 && (() => {
-        const steps = [
-          { label: 'Uploading source image to ComfyUI', hint: 'Sending your image to the local ComfyUI instance' },
-          { label: 'Loading workflow & model', hint: 'Loading the checkpoint, LoRA, and VAE (slowest on first run — model has to load into VRAM)' },
-          { label: 'Running local generation', hint: 'ComfyUI is processing one job at a time on the GPU. Additional requests wait in its queue.' },
-          { label: 'Decoding & saving image', hint: 'VAE decode → PNG → saved to data/images/' },
-        ]
-        let activeStep = 0
-        if (localQueueElapsed >= 3) activeStep = 1
-        if (localQueueElapsed >= 15) activeStep = 2
-        if (localQueueElapsed >= 45) activeStep = 3
-        const queuedCount = Math.max(0, localComfyJobs.length - 1)
-        const editCount = localComfyJobs.filter(job => job.kind === 'edit').length
-        const variationCount = localComfyJobs.filter(job => job.kind === 'variation').length
-        return (
-          <div className="mb-4 rounded-xl border-2 border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-900/20 p-4">
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-2">
-                <div className="flex gap-1">
-                  {[0,1,2].map(i => (
-                    <span key={i} className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce" style={{ animationDelay: `${i*0.15}s` }} />
-                  ))}
-                </div>
-                <span className="text-sm font-semibold text-indigo-900 dark:text-indigo-100">
-                  Local ComfyUI queue active
-                </span>
-              </div>
-              <span className="text-xs text-indigo-700 dark:text-indigo-300 font-mono">
-                {localQueueElapsed}s elapsed
-              </span>
-            </div>
-            <p className="text-xs text-indigo-700 dark:text-indigo-300 mb-3">
-              {variationCount > 0 && editCount > 0
-                ? `${variationCount} variation${variationCount === 1 ? '' : 's'} and ${editCount} edit${editCount === 1 ? '' : 's'} are in flight from this browser session.`
-                : variationCount > 0
-                  ? `${variationCount} local variation${variationCount === 1 ? '' : 's'} are in flight from this browser session.`
-                  : `${editCount} local edit${editCount === 1 ? '' : 's'} are in flight from this browser session.`}
-              {' '}
-              {queuedCount > 0
-                ? `ComfyUI is processing one now and has ${queuedCount} additional request${queuedCount === 1 ? '' : 's'} queued. Results will arrive one at a time as each job finishes.`
-                : 'ComfyUI is processing this request now. Any additional local edits or variations you start will be queued and delivered over time.'}
-            </p>
-            <div className="space-y-1.5">
-              {steps.map((s, i) => {
-                const done = i < activeStep
-                const active = i === activeStep
-                return (
-                  <div key={i} className="flex items-start gap-2 text-xs">
-                    <span className={`flex-shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold mt-0.5 ${
-                      done ? 'bg-green-500 text-white' :
-                      active ? 'bg-indigo-500 text-white animate-pulse' :
-                      'bg-gray-200 dark:bg-gray-700 text-gray-400'
-                    }`}>
-                      {done ? '✓' : i + 1}
+      {localComfyJobs.length > 0 && (
+        <div className="mb-4 space-y-3">
+          {localComfyJobs.map(job => {
+            const hasSteps = job.maxSteps > 0
+            const pct = hasSteps ? Math.round((job.step / job.maxSteps) * 100) : 0
+            const isSampling = job.message.startsWith('Sampling step')
+            return (
+              <div key={job.id} className="rounded-xl border-2 border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-900/20 p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <div className="flex gap-1">
+                      {[0,1,2].map(i => (
+                        <span key={i} className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce" style={{ animationDelay: `${i*0.15}s` }} />
+                      ))}
+                    </div>
+                    <span className="text-sm font-semibold text-indigo-900 dark:text-indigo-100">
+                      ComfyUI {job.kind} in progress
                     </span>
-                    <div className="flex-1 min-w-0">
-                      <div className={`font-medium ${
-                        done ? 'text-green-700 dark:text-green-400 line-through opacity-70' :
-                        active ? 'text-indigo-900 dark:text-indigo-100' :
-                        'text-gray-400 dark:text-gray-500'
-                      }`}>
-                        {s.label}
-                      </div>
-                      {active && (
-                        <div className="text-[11px] text-indigo-600 dark:text-indigo-400 mt-0.5 italic">{s.hint}</div>
-                      )}
+                  </div>
+                  <span className="text-xs text-indigo-700 dark:text-indigo-300 font-mono">
+                    {localQueueElapsed}s elapsed
+                  </span>
+                </div>
+
+                {/* Status message */}
+                <p className="text-xs text-indigo-800 dark:text-indigo-200 mb-2 font-medium">
+                  {job.message}
+                </p>
+
+                {/* Real progress bar (shown once sampling starts) */}
+                {isSampling && (
+                  <div className="mb-2">
+                    <div className="flex justify-between text-[11px] text-indigo-600 dark:text-indigo-400 mb-1">
+                      <span>Step {job.step} of {job.maxSteps}</span>
+                      <span>{pct}%</span>
+                    </div>
+                    <div className="w-full bg-indigo-200 dark:bg-indigo-800 rounded-full h-2">
+                      <div
+                        className="bg-indigo-500 h-2 rounded-full transition-all duration-300"
+                        style={{ width: `${pct}%` }}
+                      />
                     </div>
                   </div>
-                )
-              })}
-            </div>
-          </div>
-        )
-      })()}
+                )}
 
+                {/* Pipeline phase indicators */}
+                {!isSampling && (
+                  <div className="space-y-1">
+                    {[
+                      { label: 'Uploading image & loading workflow', active: job.status === 'pending' || (job.status === 'running' && job.step === 0 && !isSampling) },
+                      { label: 'Loading model into VRAM', active: job.status === 'running' && job.message.toLowerCase().includes('load') },
+                      { label: 'Waiting for sampler…', active: job.status === 'running' && !isSampling },
+                    ].map((phase, i) => (
+                      <div key={i} className="flex items-center gap-2 text-xs">
+                        <span className={`flex-shrink-0 w-3 h-3 rounded-full ${phase.active ? 'bg-indigo-500 animate-pulse' : 'bg-gray-300 dark:bg-gray-600'}`} />
+                        <span className={phase.active ? 'text-indigo-900 dark:text-indigo-100 font-medium' : 'text-gray-400 dark:text-gray-500'}>
+                          {phase.label}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
       {/* Upload Zone */}
       <div
         onDrop={handleDrop}

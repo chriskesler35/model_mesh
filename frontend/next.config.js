@@ -1,4 +1,4 @@
-const backendPort = process.env.DEVFORGEAI_BACKEND_PORT || '19001'
+const backendPort = process.env.DEVFORGEAI_BACKEND_PORT || '19000'
 const rawBackendUrl = process.env.NEXT_PUBLIC_API_URL || `http://localhost:${backendPort}`
 const backendUrl = rawBackendUrl.replace(/\/+$/, '')
 

@@ -1088,13 +1088,27 @@ export default function PipelinePage() {
 
   const fetchModels = useCallback(async () => {
     try {
-      const res = await fetch(
-        `${apiBase}/v1/models?active_only=true&usable_only=true&validated_only=true`,
-        { headers: authHeaders },
-      )
-      const payload = await readApiPayload(res)
-      if (!res.ok) throw new Error(getApiErrorMessage(payload, res.status))
-      setModels(Array.isArray(payload?.data) ? payload.data : [])
+      const allModels: ModelOption[] = []
+      const limit = 250
+      let offset = 0
+
+      while (true) {
+        const res = await fetch(
+          `${apiBase}/v1/models?limit=${limit}&offset=${offset}&active_only=true&usable_only=true&validated_only=true&chat_only=true`,
+          { headers: authHeaders },
+        )
+        const payload = await readApiPayload(res)
+        if (!res.ok) throw new Error(getApiErrorMessage(payload, res.status))
+
+        const page = Array.isArray(payload?.data) ? payload.data : []
+        allModels.push(...page)
+
+        if (page.length < limit) break
+        offset += limit
+      }
+
+      const uniqueModels = Array.from(new Map(allModels.map(model => [model.model_id, model])).values())
+      setModels(uniqueModels)
     } catch (e: any) {
       setActionError(e.message || 'Failed to load available models')
     }
@@ -1109,6 +1123,11 @@ export default function PipelinePage() {
   useEffect(() => {
     fetchModels()
   }, [fetchModels])
+
+  useEffect(() => {
+    if (!changeModelRun) return
+    fetchModels()
+  }, [changeModelRun, fetchModels])
 
   // SSE subscription
   useEffect(() => {

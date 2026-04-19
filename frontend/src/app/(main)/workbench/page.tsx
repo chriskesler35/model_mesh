@@ -14,7 +14,18 @@ const AGENT_ICONS: Record<string, string> = {
 interface Session { id: string; task: string; agent_type: string; model: string; status: string; created_at: string }
 interface Model { id: string; model_id: string; display_name?: string; provider_name?: string }
 interface PipelineSummary { id: string; method_id: string; initial_task: string; status: string; current_phase_index: number; phases: any[]; auto_approve: boolean; created_at: string }
-interface ProjectSummary { id: string; name: string; path?: string }
+interface ProjectSummary {
+  id: string
+  name: string
+  path?: string
+  source?: {
+    type: string
+    conversation_id?: string
+    conversation_title?: string
+    message_count?: number
+    intake_file?: string | null
+  }
+}
 
 async function readApiPayload(res: Response) {
   const text = await res.text()
@@ -63,6 +74,8 @@ export default function WorkbenchListPage() {
   const [phasePreview, setPhasePreview] = useState<Array<{name: string; role: string; default_model: string; artifact_type: string; has_agent?: boolean; agent_name?: string | null; has_persona?: boolean; persona_name?: string | null; resolved_model?: string | null; resolved_via?: string | null}>>([])
   const [modelOverrides, setModelOverrides] = useState<Record<string, string>>({})
   const [customizeModels, setCustomizeModels] = useState(false)
+  const [isPromotedProject, setIsPromotedProject] = useState(false)
+  const [taskAutoFilled, setTaskAutoFilled] = useState(false)
 
   const fetchSessions = useCallback(async () => {
     const apiBase = getApiBase()
@@ -83,15 +96,17 @@ export default function WorkbenchListPage() {
   useEffect(() => {
     const params = new URLSearchParams(typeof window !== 'undefined' ? window.location.search : '')
     const pid = searchParams?.get('project') || params.get('project')
-    const agentType = searchParams?.get('agent_type') || params.get('agent_type')
+    const qAgentType = searchParams?.get('agent_type') || params.get('agent_type')
     if (pid) setProjectId(pid)
-    if (agentType) setAgentType(agentType)
-    if (pid || agentType) setShowNew(true)
+    if (qAgentType) setAgentType(qAgentType)
+    if (pid || qAgentType) setShowNew(true)
   }, [searchParams])
 
   useEffect(() => {
     if (!projectId) {
       setProjectName('')
+      setIsPromotedProject(false)
+      setTaskAutoFilled(false)
       return
     }
 
@@ -100,8 +115,50 @@ export default function WorkbenchListPage() {
 
     fetch(`${apiBase}/v1/projects/${projectId}`, { headers: authHeaders })
       .then(r => r.ok ? r.json() : null)
-      .then((project: ProjectSummary | null) => {
+      .then(async (project: ProjectSummary | null) => {
         setProjectName(project?.name || '')
+        const src = project?.source
+        if (src?.type === 'conversation') {
+          setIsPromotedProject(true)
+          setAgentType('planner')
+          // Attempt to read the intake file for richer task context
+          let taskText = ''
+          if (src.intake_file) {
+            try {
+              const fr = await fetch(
+                `${apiBase}/v1/projects/${projectId}/files/read?file_path=${encodeURIComponent(src.intake_file)}`,
+                { headers: authHeaders },
+              )
+              if (fr.ok) {
+                const fd = await fr.json()
+                const content: string = fd.content || ''
+                const goalMatch = content.match(/- Initial User Goal:\s*(.+)/i)
+                const dirMatch = content.match(/- Latest Assistant Direction:\s*(.+)/i)
+                const goal = goalMatch?.[1]?.trim() || ''
+                const direction = dirMatch?.[1]?.trim() || ''
+                const parts = [
+                  `Review CHAT-INTAKE.md and create a detailed project plan.\n`,
+                  goal ? `**Initial Goal:** ${goal}\n` : '',
+                  direction && direction !== 'N/A' ? `**Latest Direction:** ${direction}\n` : '',
+                  `\nSource: Promoted from "${src.conversation_title || 'chat'}" (${src.message_count ?? 0} messages)`,
+                  `Full context: See CHAT-INTAKE.md in project root.`,
+                ]
+                taskText = parts.filter(Boolean).join('\n')
+              }
+            } catch { /* fall through to metadata-only task */ }
+          }
+          if (!taskText) {
+            taskText = [
+              `Review CHAT-INTAKE.md and create a detailed project plan.\n`,
+              `Source: Promoted from "${src.conversation_title || 'chat'}" (${src.message_count ?? 0} messages)`,
+              `Full context: See CHAT-INTAKE.md in project root.`,
+            ].join('\n')
+          }
+          setTask(taskText)
+          setTaskAutoFilled(true)
+        } else {
+          setIsPromotedProject(false)
+        }
       })
       .catch(() => setProjectName(''))
   }, [projectId])
@@ -146,24 +203,55 @@ export default function WorkbenchListPage() {
       .catch(() => setPhasePreview([]))
   }, [asPipeline, pipelineMethod])
 
-  // Fetch available models for the dropdown
+  // Fetch available models for the dropdown.
+  // Always refresh when opening the modal and paginate to avoid missing newer entries.
   useEffect(() => {
-    if (!showNew || models.length > 0) return
+    if (!showNew) return
     const apiBase = getApiBase()
     const authHeaders = getAuthHeaders()
-    setLoadingModels(true)
-    fetch(`${apiBase}/v1/models?limit=100&active_only=true&usable_only=true&validated_only=true&chat_only=true`, { headers: authHeaders })
-      .then(r => r.json())
-      .then(d => {
-        const list: Model[] = (d.data || []).filter((m: any) =>
-          m.capabilities?.chat !== false && !m.capabilities?.image_generation
-        )
-        setModels(list)
-        // Default to first chat-capable model
-        if (list.length > 0 && !model) setModel(list[0].model_id)
-      })
-      .catch(() => {})
-      .finally(() => setLoadingModels(false))
+    let cancelled = false
+
+    const fetchModels = async () => {
+      setLoadingModels(true)
+      try {
+        const all: Model[] = []
+        const limit = 250
+        let offset = 0
+
+        while (true) {
+          const res = await fetch(
+            `${apiBase}/v1/models?limit=${limit}&offset=${offset}&active_only=true&usable_only=true&chat_only=true`,
+            { headers: authHeaders },
+          )
+          const d = await res.json().catch(() => ({ data: [] }))
+          const page: Model[] = (d.data || []).filter((m: any) =>
+            m.capabilities?.chat !== false && !m.capabilities?.image_generation,
+          )
+          all.push(...page)
+
+          const got = (d.data || []).length
+          if (got < limit) break
+          offset += limit
+        }
+
+        if (cancelled) return
+
+        const unique = Array.from(new Map(all.map(m => [m.model_id, m])).values())
+        setModels(unique)
+
+        // Preserve selected model if still present; otherwise pick first available.
+        if (unique.length > 0 && !unique.some(m => m.model_id === model)) {
+          setModel(unique[0].model_id)
+        }
+      } catch {
+        if (!cancelled) setModels([])
+      } finally {
+        if (!cancelled) setLoadingModels(false)
+      }
+    }
+
+    fetchModels()
+    return () => { cancelled = true }
   }, [showNew])
 
   const createSession = async () => {
@@ -361,14 +449,14 @@ export default function WorkbenchListPage() {
 
       {showNew && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-          <div className="w-full max-w-lg bg-white dark:bg-gray-900 rounded-2xl shadow-2xl overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
+          <div className="w-full max-w-lg bg-white dark:bg-gray-900 rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
+            <div className="px-6 py-4 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between flex-shrink-0">
               <h2 className="text-base font-semibold text-gray-900 dark:text-white">New Workbench Session</h2>
-              <button onClick={() => setShowNew(false)} className="text-gray-400 hover:text-gray-600">
+              <button onClick={() => { setShowNew(false); setIsPromotedProject(false); setTaskAutoFilled(false) }} className="text-gray-400 hover:text-gray-600">
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
             </div>
-            <div className="px-6 py-5 space-y-4">
+            <div className="px-6 py-5 space-y-4 overflow-y-auto flex-1">
               {projectId && (
                 <div className="rounded-lg border border-orange-200 dark:border-orange-700 bg-orange-50 dark:bg-orange-900/20 px-3 py-2 text-xs text-orange-700 dark:text-orange-300">
                   <div className="flex items-center gap-2">
@@ -385,9 +473,20 @@ export default function WorkbenchListPage() {
                   )}
                 </div>
               )}
+              {isPromotedProject && taskAutoFilled && (
+                <div className="rounded-lg border border-purple-200 dark:border-purple-700 bg-purple-50 dark:bg-purple-900/20 px-3 py-2 text-xs text-purple-700 dark:text-purple-300">
+                  <div className="flex items-center gap-2">
+                    <span>💬</span>
+                    <span className="font-medium">Task pre-filled from promoted chat context — edit freely</span>
+                  </div>
+                  <div className="mt-1 pl-6 text-[11px] text-purple-600/90 dark:text-purple-300/90">
+                    Agent defaulted to <strong>Planner</strong> · CHAT-INTAKE.md has the full transcript
+                  </div>
+                </div>
+              )}
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Task</label>
-                <textarea value={task} onChange={e => setTask(e.target.value)} rows={4}
+                <textarea value={task} onChange={e => setTask(e.target.value)} rows={isPromotedProject ? 6 : 4}
                   placeholder="Describe what you want to build or accomplish..."
                   className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 resize-none" />
               </div>
@@ -587,7 +686,7 @@ export default function WorkbenchListPage() {
                 </div>
               </div>
             </div>
-            <div className="px-6 py-4 border-t border-gray-100 dark:border-gray-800 flex gap-3 justify-end">
+            <div className="px-6 py-4 border-t border-gray-100 dark:border-gray-800 flex gap-3 justify-end flex-shrink-0">
               <button onClick={() => setShowNew(false)}
                 className="px-4 py-2 text-sm font-medium rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50">Cancel</button>
               <button onClick={createSession} disabled={!task.trim() || creating}

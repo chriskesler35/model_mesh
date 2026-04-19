@@ -470,6 +470,10 @@ async def process_telegram_command(chat_id: int, text: str):
         command = parts[0].split("@", 1)[0].lower()
         args = parts[1] if len(parts) > 1 else ""
     else:
+        # Check if this looks like a status/progress query about the app
+        if _is_status_query(text):
+            await handle_status_query(chat_id, text)
+            return
         # If the user recently uploaded an image, treat follow-up text as an edit prompt.
         command = "/image" if chat_id in _telegram_pending_images else "/chat"
         args = text
