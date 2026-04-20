@@ -44,7 +44,8 @@ _event_logs: Dict[str, List[dict]]    = {}
 # ─── Schemas ──────────────────────────────────────────────────────────────────
 class PipelineCreate(BaseModel):
     session_id: str
-    method_id: str                              # 'bmad' | 'gsd' | 'superpowers'
+    method_id: str                              # e.g. bmad | gsd | superpowers | specaudit | mvp-loop | custom_method_id
+    stack_override: Optional[List[str]] = None  # explicit launcher-selected stack order
     task: str
     auto_approve: bool = False
     interaction_mode: str = "autonomous"               # 'interactive' | 'autonomous'
@@ -325,12 +326,80 @@ def _extract_code_files(text: str) -> List[dict]:
     return _parse_files(text)
 
 
+def _json_value_to_markdown(value: Any, level: int = 2, name: Optional[str] = None) -> str:
+    """Render JSON data into readable markdown for human review.
+
+    The structured JSON remains the source of truth for downstream phases.
+    This markdown companion exists purely for approver readability.
+    """
+    heading = "#" * max(2, min(level, 6))
+
+    if isinstance(value, dict):
+        parts: List[str] = []
+        if name:
+            parts.append(f"{heading} {name}")
+        if not value:
+            parts.append("(empty object)")
+            return "\n\n".join(parts)
+
+        scalar_lines: List[str] = []
+        nested_parts: List[str] = []
+        for key, item in value.items():
+            label = str(key).replace("_", " ").strip().title()
+            if isinstance(item, (dict, list)):
+                nested_parts.append(_json_value_to_markdown(item, level + 1, label))
+            else:
+                scalar_lines.append(f"- **{label}:** {item}")
+
+        if scalar_lines:
+            parts.append("\n".join(scalar_lines))
+        if nested_parts:
+            parts.extend(part for part in nested_parts if part)
+        return "\n\n".join(part for part in parts if part)
+
+    if isinstance(value, list):
+        parts = []
+        if name:
+            parts.append(f"{heading} {name}")
+        if not value:
+            parts.append("(empty list)")
+            return "\n\n".join(parts)
+
+        simple_values = all(not isinstance(item, (dict, list)) for item in value)
+        if simple_values:
+            parts.append("\n".join(f"- {item}" for item in value))
+            return "\n\n".join(parts)
+
+        rendered_items: List[str] = []
+        for idx, item in enumerate(value, start=1):
+            item_name = f"Item {idx}"
+            rendered_items.append(_json_value_to_markdown(item, level + 1, item_name))
+        parts.extend(rendered_items)
+        return "\n\n".join(part for part in parts if part)
+
+    if name:
+        return f"{heading} {name}\n\n{value}"
+    return str(value)
+
+
+def _json_artifact_review_markdown(data: Any) -> str:
+    if data is None:
+        return "## Review Preview\n\nNo structured JSON content was parsed from this phase."
+    rendered = _json_value_to_markdown(data, level=2)
+    return rendered or "## Review Preview\n\nNo structured JSON content was parsed from this phase."
+
+
 def _build_artifact(phase_def: dict, raw_response: str) -> dict:
     """Convert raw LLM text into the structured artifact for this phase type."""
     atype = phase_def.get("artifact_type", "md")
     if atype == "json":
         data = _extract_json_artifact(raw_response)
-        return {"type": "json", "data": data, "raw": raw_response}
+        return {
+            "type": "json",
+            "data": data,
+            "review_markdown": _json_artifact_review_markdown(data),
+            "raw": raw_response,
+        }
     elif atype == "code":
         files = _extract_code_files(raw_response)
         return {"type": "code", "files": files, "raw": raw_response}
@@ -471,7 +540,7 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
     from app.models.pipeline import Pipeline, PhaseRun
     from app.services.model_client import ModelClient
     from app.services.identity_context import build_identity_context
-    from app.routes.workbench import _build_runtime_model_chain, _humanize_model_error, _should_failover_error
+    from app.routes.workbench import _build_runtime_model_chain, _humanize_model_error, _should_failover_error, _resolve_model
 
     # Load pipeline
     async with AsyncSessionLocal() as db:
@@ -626,7 +695,6 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
         try:
             from app.models.agent import Agent
             from app.models.persona import Persona
-            from app.models.model import Model as ModelORM
             from sqlalchemy import func as sqlfunc
 
             async with AsyncSessionLocal() as db:
@@ -653,19 +721,19 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
                             if persona.system_prompt:
                                 extra_prompts.append(f"# Persona: {persona.name}\n{persona.system_prompt}")
                             if persona.primary_model_id:
-                                m = (await db.execute(select(ModelORM).where(ModelORM.id == persona.primary_model_id))).scalar_one_or_none()
-                                if m:
-                                    resolved_model = m.model_id
+                                primary_resolved, _ = await _resolve_model(str(persona.primary_model_id))
+                                if primary_resolved:
+                                    resolved_model = primary_resolved.model_id
                                     resolved_via = f"agent '{agent.name}' → persona '{persona.name}'"
                             if persona.fallback_model_id:
-                                fm = (await db.execute(select(ModelORM).where(ModelORM.id == persona.fallback_model_id))).scalar_one_or_none()
-                                if fm:
-                                    explicit_fallback_models.append(str(fm.id))
+                                fallback_resolved, _ = await _resolve_model(str(persona.fallback_model_id))
+                                if fallback_resolved:
+                                    explicit_fallback_models.append(str(fallback_resolved.id))
                     # Fallback: agent's own model_id if no persona
                     if not resolved_model and agent.model_id:
-                        m = (await db.execute(select(ModelORM).where(ModelORM.id == agent.model_id))).scalar_one_or_none()
-                        if m:
-                            resolved_model = m.model_id
+                        direct_resolved, _ = await _resolve_model(str(agent.model_id))
+                        if direct_resolved:
+                            resolved_model = direct_resolved.model_id
                             resolved_via = f"agent '{agent.name}' (direct model)"
                     if extra_prompts:
                         resolved_system_prompt = "\n\n".join(extra_prompts)
@@ -676,16 +744,16 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
                         select(Persona).where(sqlfunc.lower(Persona.name) == phase_name.lower())
                     )).scalar_one_or_none()
                     if persona and persona.primary_model_id:
-                        m = (await db.execute(select(ModelORM).where(ModelORM.id == persona.primary_model_id))).scalar_one_or_none()
-                        if m:
-                            resolved_model = m.model_id
+                        primary_resolved, _ = await _resolve_model(str(persona.primary_model_id))
+                        if primary_resolved:
+                            resolved_model = primary_resolved.model_id
                             resolved_via = f"persona '{persona.name}' (name match, no agent)"
                             if persona.system_prompt:
                                 resolved_system_prompt = f"# Persona: {persona.name}\n{persona.system_prompt}"
                         if persona.fallback_model_id:
-                            fm = (await db.execute(select(ModelORM).where(ModelORM.id == persona.fallback_model_id))).scalar_one_or_none()
-                            if fm:
-                                explicit_fallback_models.append(str(fm.id))
+                            fallback_resolved, _ = await _resolve_model(str(persona.fallback_model_id))
+                            if fallback_resolved:
+                                explicit_fallback_models.append(str(fallback_resolved.id))
         except Exception as e:
             logger.warning(f"Phase '{phase_name}' resolution lookup failed: {e}")
 
@@ -693,6 +761,11 @@ async def _run_phase(pipeline_id: str, phase_index: int, retry_count: int = 0, m
         logger.info(f"Phase '{phase_name}' → {resolved_via} → model '{resolved_model}'")
 
     model_id = phase_def.get("model") or resolved_model or phase_def.get("default_model") or "claude-sonnet-4-6"
+    # Normalize any UUID/model reference to the provider-facing model_id string.
+    # This protects phase execution if a caller accidentally passes a DB UUID.
+    normalized_model, _ = await _resolve_model(str(model_id))
+    if normalized_model:
+        model_id = normalized_model.model_id
     persona_system_prompt = resolved_system_prompt  # used below when composing the phase system prompt
 
     # Resolve max_retries from phase_def if not passed explicitly
@@ -1495,7 +1568,6 @@ async def preview_phases(method_id: str):
     from app.services.phase_templates import get_phases_for_method, list_supported_methods
     from app.models.agent import Agent
     from app.models.persona import Persona
-    from app.models.model import Model as ModelORM
     try:
         phases = get_phases_for_method(method_id)
     except KeyError:
@@ -1504,6 +1576,7 @@ async def preview_phases(method_id: str):
             detail=f"Method '{method_id}' not supported. Available: {list_supported_methods()}"
         )
 
+    from app.routes.workbench import _resolve_model
     from sqlalchemy import func as sqlfunc
     async with AsyncSessionLocal() as db:
         # All active agents keyed by method_phase
@@ -1520,10 +1593,7 @@ async def preview_phases(method_id: str):
         persona_by_id = {str(p.id): p for p in persona_rows}
         persona_by_name = {p.name.lower(): p for p in persona_rows}
 
-        model_rows = (await db.execute(select(ModelORM))).scalars().all()
-        model_by_id = {str(m.id): m for m in model_rows}
-
-    def chain_info(phase_name: str) -> dict:
+    async def chain_info(phase_name: str) -> dict:
         """Resolve the agent → persona → model chain for this phase."""
         result = {
             "has_agent": False, "agent_name": None,
@@ -1542,14 +1612,14 @@ async def preview_phases(method_id: str):
                     result["has_persona"] = True
                     result["persona_name"] = persona.name
                     if persona.primary_model_id:
-                        m = model_by_id.get(str(persona.primary_model_id))
+                        m, _ = await _resolve_model(str(persona.primary_model_id))
                         if m:
                             result["resolved_model"] = m.model_id
                             result["resolved_via"] = "agent→persona"
                             return result
             # 1b. Agent -> direct model
             if agent.model_id:
-                m = model_by_id.get(str(agent.model_id))
+                m, _ = await _resolve_model(str(agent.model_id))
                 if m:
                     result["resolved_model"] = m.model_id
                     result["resolved_via"] = "agent→model"
@@ -1560,7 +1630,7 @@ async def preview_phases(method_id: str):
             result["has_persona"] = True
             result["persona_name"] = persona.name
             if persona.primary_model_id:
-                m = model_by_id.get(str(persona.primary_model_id))
+                m, _ = await _resolve_model(str(persona.primary_model_id))
                 if m:
                     result["resolved_model"] = m.model_id
                     result["resolved_via"] = "persona name-match"
@@ -1568,21 +1638,25 @@ async def preview_phases(method_id: str):
         # 3. Nothing resolved — frontend will show template default
         return result
 
-    return {
-        "method_id": method_id,
-        "phases": [
+    phase_rows = []
+    for p in phases:
+        info = await chain_info(p["name"])
+        phase_rows.append(
             {
                 "name": p["name"],
                 "role": p["role"],
                 "default_model": p["default_model"],
                 "artifact_type": p["artifact_type"],
                 "depends_on": p.get("depends_on", []),
-                **chain_info(p["name"]),
+                **info,
                 # Back-compat for existing frontend code
                 "persona_model": None,  # replaced by resolved_model
             }
-            for p in phases
-        ],
+        )
+
+    return {
+        "method_id": method_id,
+        "phases": phase_rows,
     }
 
 
@@ -1600,10 +1674,14 @@ async def create_pipeline(body: PipelineCreate, request: Request, db: AsyncSessi
     from app.routes.methods import _load_state as _load_method_state, BUILT_IN_METHODS, _build_stack_prompt
     effective_method_id = body.method_id
     stacked_prompt = ""  # extra prompt from non-primary stacked methods
+    requested_stack = [m for m in (body.stack_override or []) if m != "standard"]
+    invalid_stack = [m for m in requested_stack if m not in BUILT_IN_METHODS]
+    if invalid_stack:
+        raise HTTPException(status_code=400, detail=f"Unknown methods in stack_override: {invalid_stack}")
 
     if body.method_id in ("stack", "active"):
         method_state = _load_method_state()
-        stack = method_state.get("active_stack", [])
+        stack = requested_stack or method_state.get("active_stack", [])
         primary = stack[0] if stack else method_state.get("active_method", "standard")
         effective_method_id = primary
         # Build stacked prompt from non-primary methods
@@ -1611,11 +1689,11 @@ async def create_pipeline(body: PipelineCreate, request: Request, db: AsyncSessi
         if non_primary:
             stacked_prompt = _build_stack_prompt(non_primary)
             logger.info(f"Pipeline using stack: primary={primary}, also applying: {non_primary}")
-    elif body.method_id in ("bmad", "gsd", "superpowers"):
+    elif body.method_id in ("bmad", "gsd", "superpowers", "specaudit", "mvp-loop"):
         # Explicit single method — still check if there are stacked methods
-        # that should layer on top
+        # that should layer on top.
         method_state = _load_method_state()
-        stack = method_state.get("active_stack", [])
+        stack = requested_stack or method_state.get("active_stack", [])
         if len(stack) > 1 and body.method_id in stack:
             non_primary = [m for m in stack if m != body.method_id]
             if non_primary:
@@ -1657,13 +1735,15 @@ async def create_pipeline(body: PipelineCreate, request: Request, db: AsyncSessi
             f"Attach the session to a project for the full workflow."
         )
 
-    # Apply per-phase model overrides if provided
+    # Apply only explicit per-phase model overrides from the user.
+    # If no override is provided, keep phase model unset so runtime resolution
+    # can follow phase binding -> agent -> persona -> template default.
     overrides = body.model_overrides or {}
     for phase in template_phases:
         if phase["name"] in overrides:
             phase["model"] = overrides[phase["name"]]
         else:
-            phase["model"] = phase.get("default_model")
+            phase.pop("model", None)
         # Inject stacked method prompts into each phase so secondary methods
         # (e.g., GTrack "commit after every change") apply to all phases.
         if stacked_prompt:
@@ -2445,6 +2525,8 @@ async def stream_pipeline(pipeline_id: str, request: Request):
         )).scalars().all()
         init_payload = {**p.to_dict(), "phase_runs": [r.to_dict() for r in runs]}
 
+    active_statuses = {"pending", "running", "paused", "awaiting_approval"}
+
     async def event_generator() -> AsyncGenerator[str, None]:
         yield f"data: {json.dumps({'type':'init','payload':init_payload})}\n\n"
 
@@ -2454,10 +2536,19 @@ async def stream_pipeline(pipeline_id: str, request: Request):
             for evt in _event_logs.get(pipeline_id, []):
                 yield f"data: {json.dumps(evt)}\n\n"
                 await asyncio.sleep(0.02)
-            # Final synthetic done if terminal
+            # Terminal pipelines should emit one final done event and end.
             if p.status in ("completed", "failed", "cancelled"):
                 yield f"data: {json.dumps({'type':'pipeline_done','payload':{'status':p.status}})}\n\n"
-            return
+                return
+
+            # Non-terminal pipelines must keep the stream alive. Otherwise the
+            # browser auto-reconnects and the UI flickers connecting/reconnecting.
+            if p.status in active_statuses:
+                _queues[pipeline_id] = asyncio.Queue(maxsize=1000)
+                queue = _queues[pipeline_id]
+            else:
+                # Unknown status: avoid infinite reconnect churn.
+                return
 
         while True:
             if await request.is_disconnected():

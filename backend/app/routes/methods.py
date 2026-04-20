@@ -312,6 +312,59 @@ GOAL_RECOMMENDATIONS: Dict[str, Dict[str, Any]] = {
 }
 
 
+STACK_PRESETS: Dict[str, Dict[str, Any]] = {
+    "starter": {
+        "id": "starter",
+        "label": "Starter",
+        "description": "Balanced default for first-time users.",
+        "stack": ["bmad"],
+    },
+    "speed-build": {
+        "id": "speed-build",
+        "label": "Speed Build",
+        "description": "Rapid shipping with execution traceability.",
+        "stack": ["gsd", "gtrack"],
+    },
+    "deep-audit": {
+        "id": "deep-audit",
+        "label": "Deep Audit",
+        "description": "Thorough implementation + runtime verification.",
+        "stack": ["specaudit", "superpowers"],
+    },
+    "solo-creator": {
+        "id": "solo-creator",
+        "label": "Solo Creator",
+        "description": "Plan deeply and keep progress checkpoints concise.",
+        "stack": ["bmad", "gtrack"],
+    },
+    "team-delivery": {
+        "id": "team-delivery",
+        "label": "Team Delivery",
+        "description": "Structured delivery with explicit quality gates.",
+        "stack": ["mvp-loop", "specaudit"],
+    },
+}
+
+
+def _clean_stack(stack: List[str]) -> List[str]:
+    return [mid for mid in stack if mid in BUILT_IN_METHODS and mid != "standard"]
+
+
+def _stack_compatibility_payload(stack: List[str]) -> Dict[str, Any]:
+    clean = _clean_stack(stack)
+    warnings = _check_conflicts(clean)
+    primary = clean[0] if clean else "standard"
+    score = max(0, 100 - (len(warnings) * 30))
+    return {
+        "stack": clean,
+        "stack_mode": len(clean) > 1,
+        "primary_method_id": primary,
+        "conflicts": warnings,
+        "compatibility_score": score,
+        "valid": len(warnings) == 0,
+    }
+
+
 # ─── Routes ───────────────────────────────────────────────────────────────────
 @router.get("/")
 async def list_methods(db: AsyncSession = Depends(get_db)):
@@ -400,7 +453,20 @@ async def get_method_recommendations(
     goal: Optional[str] = Query(default=None),
 ):
     """Goal-first method recommendation payload for launcher UX."""
-    recommendations = list(GOAL_RECOMMENDATIONS.values())
+    recommendations = []
+    for rec in GOAL_RECOMMENDATIONS.values():
+        entry = dict(rec)
+        entry["compatibility"] = _stack_compatibility_payload(rec.get("recommended_stack", []))
+        matched_preset = next(
+            (
+                preset_id
+                for preset_id, preset in STACK_PRESETS.items()
+                if preset.get("stack", []) == rec.get("recommended_stack", [])
+            ),
+            None,
+        )
+        entry["suggested_preset_id"] = matched_preset
+        recommendations.append(entry)
     if not goal:
         return {
             "ok": True,
@@ -423,6 +489,31 @@ async def get_method_recommendations(
         "ok": True,
         "goal": rec,
         "available_goals": recommendations,
+    }
+
+
+@router.get("/stack/presets")
+async def get_stack_presets():
+    presets = []
+    for preset in STACK_PRESETS.values():
+        entry = dict(preset)
+        entry["compatibility"] = _stack_compatibility_payload(entry.get("stack", []))
+        presets.append(entry)
+    return {
+        "ok": True,
+        "presets": presets,
+        "default_preset_id": "starter",
+    }
+
+
+@router.post("/stack/compatibility")
+async def get_stack_compatibility(body: StackUpdate):
+    invalid = [mid for mid in body.stack if mid not in BUILT_IN_METHODS]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Unknown methods: {invalid}")
+    return {
+        "ok": True,
+        **_stack_compatibility_payload(body.stack),
     }
 
 

@@ -40,6 +40,30 @@ interface MethodRecommendation {
   delegate_qa_to_agent: boolean
   why: string
   alternatives: string[]
+  suggested_preset_id?: string | null
+  compatibility?: {
+    stack: string[]
+    stack_mode: boolean
+    primary_method_id: string
+    compatibility_score: number
+    valid: boolean
+    conflicts: string[]
+  }
+}
+
+interface MethodStackPreset {
+  id: string
+  label: string
+  description: string
+  stack: string[]
+  compatibility?: {
+    stack: string[]
+    stack_mode: boolean
+    primary_method_id: string
+    compatibility_score: number
+    valid: boolean
+    conflicts: string[]
+  }
 }
 
 function getModelLabel(models: Model[], ref?: string | null) {
@@ -101,6 +125,8 @@ export default function WorkbenchListPage() {
   const [goalRecommendations, setGoalRecommendations] = useState<MethodRecommendation[]>([])
   const [recommendationsLoading, setRecommendationsLoading] = useState(false)
   const [selectedGoalId, setSelectedGoalId] = useState<string>('')
+  const [stackPresets, setStackPresets] = useState<MethodStackPreset[]>([])
+  const [selectedStack, setSelectedStack] = useState<string[]>([])
 
   const fetchSessions = useCallback(async () => {
     const apiBase = getApiBase()
@@ -297,17 +323,34 @@ export default function WorkbenchListPage() {
         setGoalRecommendations(goals)
         const defaultGoalId = String(payload?.default_goal_id || goals[0]?.goal_id || '')
         setSelectedGoalId(defaultGoalId)
+        const defaultGoal = goals.find(g => g.goal_id === defaultGoalId)
+        setSelectedStack(Array.isArray(defaultGoal?.recommended_stack) ? defaultGoal!.recommended_stack : [])
       } catch {
         if (!cancelled) {
           setGoalRecommendations([])
           setSelectedGoalId('')
+          setSelectedStack([])
         }
       } finally {
         if (!cancelled) setRecommendationsLoading(false)
       }
     }
 
+    const fetchStackPresets = async () => {
+      try {
+        const res = await fetch(`${apiBase}/v1/methods/stack/presets`, { headers: authHeaders })
+        const payload = await readApiPayload(res)
+        if (!res.ok) throw new Error(getApiErrorMessage(payload, res.status))
+        if (cancelled) return
+        const presets = Array.isArray(payload?.presets) ? payload.presets as MethodStackPreset[] : []
+        setStackPresets(presets)
+      } catch {
+        if (!cancelled) setStackPresets([])
+      }
+    }
+
     fetchRecommendations()
+    fetchStackPresets()
     return () => { cancelled = true }
   }, [showNew])
 
@@ -335,6 +378,10 @@ export default function WorkbenchListPage() {
       }
 
       if (asPipeline) {
+        const launchStack = selectedStack.length > 0 ? selectedStack : activeStack
+        const launchMethodId = launchStack.length > 1
+          ? 'stack'
+          : (launchStack[0] || pipelineMethod)
         // Build model_overrides with priority:
         //   1. Per-phase explicit override (customize models)
         //   2. Session-level Model dropdown (applies to all phases)
@@ -361,7 +408,8 @@ export default function WorkbenchListPage() {
           method: 'POST', headers: authHeaders,
           body: JSON.stringify({
             session_id: session.id,
-            method_id: activeStack.length > 1 ? 'stack' : pipelineMethod,
+            method_id: launchMethodId,
+            stack_override: launchStack.length > 1 ? launchStack : undefined,
             task: task.trim(),
             auto_approve: interactionMode === 'interactive' ? false : autoApprove,
             interaction_mode: interactionMode,
@@ -373,14 +421,15 @@ export default function WorkbenchListPage() {
         if (!pipeRes.ok || !pipeline?.id) {
           trackEvent('workbench_pipeline_launch_failed', {
             mode: launchMode,
-            method_id: activeStack.length > 1 ? 'stack' : pipelineMethod,
+            method_id: launchMethodId,
           })
           throw new Error(`Pipeline creation failed: ${getApiErrorMessage(pipeline, pipeRes.status)}`)
         }
         trackEvent('workbench_pipeline_launched', {
           mode: launchMode,
           goal_id: selectedGoalId || undefined,
-          method_id: activeStack.length > 1 ? 'stack' : pipelineMethod,
+          method_id: launchMethodId,
+          stack: launchStack,
           pipeline_id: pipeline.id,
         })
         router.push(`/workbench/pipelines/${pipeline.id}`)
@@ -403,6 +452,7 @@ export default function WorkbenchListPage() {
     setAsPipeline(true)
     setCustomizeModels(false)
     if (preset === 'mvp') {
+      setSelectedStack(['mvp-loop'])
       setPipelineMethod('mvp-loop')
       setInteractionMode('interactive')
       setAutoApprove(false)
@@ -410,12 +460,14 @@ export default function WorkbenchListPage() {
       return
     }
     if (preset === 'prototype') {
+      setSelectedStack(['gsd', 'gtrack'])
       setPipelineMethod('gsd')
       setInteractionMode('autonomous')
       setAutoApprove(true)
       setDelegateQaToAgent(true)
       return
     }
+    setSelectedStack(['specaudit'])
     setPipelineMethod('specaudit')
     setInteractionMode('interactive')
     setAutoApprove(false)
@@ -430,10 +482,23 @@ export default function WorkbenchListPage() {
     setAutoApprove(rec.auto_approve)
     setDelegateQaToAgent(rec.delegate_qa_to_agent)
     setSelectedGoalId(rec.goal_id)
+    setSelectedStack(rec.recommended_stack || [])
     trackEvent('method_recommendation_applied', {
       goal_id: rec.goal_id,
       method_id: rec.recommended_method_id,
       stack: rec.recommended_stack,
+    })
+  }
+
+  const applyStackPreset = (preset: MethodStackPreset) => {
+    if (!preset.stack?.length) return
+    setAsPipeline(true)
+    setSelectedStack(preset.stack)
+    setPipelineMethod(preset.stack[0])
+    trackEvent('stack_preset_applied', {
+      preset_id: preset.id,
+      stack: preset.stack,
+      compatibility_score: preset.compatibility?.compatibility_score,
     })
   }
 
@@ -619,10 +684,32 @@ export default function WorkbenchListPage() {
                                   <div className="font-semibold text-sky-900 dark:text-sky-200">{rec.label}</div>
                                   <div className="text-sky-700 dark:text-sky-300 mt-0.5">{rec.description}</div>
                                   <div className="text-sky-600 dark:text-sky-400 mt-1">Recommended: {rec.recommended_stack.join(' + ')}</div>
+                                  {typeof rec.compatibility?.compatibility_score === 'number' && (
+                                    <div className="text-sky-600 dark:text-sky-400 mt-0.5">Compatibility score: {rec.compatibility.compatibility_score}</div>
+                                  )}
                                 </button>
                               ))}
                             </div>
                           )}
+                        </div>
+                      )}
+                      {featureFlags.methodLauncherV1 && stackPresets.length > 0 && (
+                        <div className="rounded-lg border border-sky-200 dark:border-sky-700 bg-white/80 dark:bg-gray-900/30 p-2.5 space-y-2">
+                          <div className="text-xs font-semibold uppercase tracking-wider text-sky-700 dark:text-sky-300">Stack presets</div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            {stackPresets.map(preset => (
+                              <button
+                                key={preset.id}
+                                type="button"
+                                onClick={() => applyStackPreset(preset)}
+                                className={`px-2.5 py-2 text-xs rounded-lg border text-left transition-colors ${selectedStack.join('|') === preset.stack.join('|') ? 'border-sky-500 bg-sky-100 dark:bg-sky-900/30' : 'border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 hover:bg-sky-100 dark:hover:bg-sky-900/30'}`}
+                              >
+                                <div className="font-semibold text-sky-900 dark:text-sky-200">{preset.label}</div>
+                                <div className="text-sky-700 dark:text-sky-300 mt-0.5">{preset.description}</div>
+                                <div className="text-sky-600 dark:text-sky-400 mt-1">{preset.stack.join(' + ')}</div>
+                              </button>
+                            ))}
+                          </div>
                         </div>
                       )}
                       <div className="text-xs text-sky-800 dark:text-sky-200">Choose a starter path (you can still edit anything below):</div>
@@ -764,7 +851,7 @@ export default function WorkbenchListPage() {
                         </div>
                       </div>
                     ) : (
-                      <select value={pipelineMethod} onChange={e => setPipelineMethod(e.target.value)}
+                      <select value={pipelineMethod} onChange={e => { setPipelineMethod(e.target.value); setSelectedStack([]) }}
                         className="rounded-lg border border-indigo-300 dark:border-indigo-700 dark:bg-gray-800 dark:text-white px-2 py-1.5 text-xs">
                         <option value="bmad">BMAD — 6 phases (full lifecycle)</option>
                         <option value="gsd">GSD — 3 phases (ship fast)</option>
@@ -772,6 +859,11 @@ export default function WorkbenchListPage() {
                         <option value="specaudit">Spec Audit — 5 phases (review + runtime verification)</option>
                         <option value="mvp-loop">MVP Loop — 6 phases (contract to MVP release)</option>
                       </select>
+                    )}
+                    {(selectedStack.length > 0 || activeStack.length > 1) && (
+                      <div className="text-[11px] text-indigo-800 dark:text-indigo-200 bg-white/70 dark:bg-gray-900/30 border border-indigo-200 dark:border-indigo-800 rounded-lg px-3 py-2">
+                        Launch stack: <span className="font-semibold">{(selectedStack.length > 0 ? selectedStack : activeStack).join(' + ')}</span>
+                      </div>
                     )}
                     <label className="flex items-center gap-2 text-xs text-indigo-900 dark:text-indigo-200">
                       <input type="checkbox" checked={autoApprove} onChange={e => setAutoApprove(e.target.checked)}
