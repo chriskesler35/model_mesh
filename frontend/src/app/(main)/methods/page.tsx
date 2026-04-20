@@ -22,6 +22,14 @@ interface CustomMethod {
   updated_at?: string
 }
 
+interface StackCompatibility {
+  compatibility_score: number
+  conflicts: string[]
+  primary_method_id: string
+  primary_pipeline_supported: boolean
+  valid: boolean
+}
+
 const COLOR_MAP: Record<string, { border: string; bg: string; badge: string; btn: string; addBtn: string; phase: string }> = {
   gray:   { border: 'border-gray-300',   bg: 'bg-gray-50 dark:bg-gray-800/50',        badge: 'bg-gray-100 text-gray-700',          btn: 'bg-gray-700 hover:bg-gray-800 text-white',           addBtn: 'border-gray-300 text-gray-600 hover:bg-gray-50',         phase: 'bg-gray-100 text-gray-600' },
   purple: { border: 'border-purple-400', bg: 'bg-purple-50 dark:bg-purple-900/20',    badge: 'bg-purple-100 text-purple-700',       btn: 'bg-purple-600 hover:bg-purple-700 text-white',       addBtn: 'border-purple-300 text-purple-600 hover:bg-purple-50',   phase: 'bg-purple-100 text-purple-700' },
@@ -46,6 +54,7 @@ export default function MethodsPage() {
   const [editName, setEditName] = useState('')
   const [editDescription, setEditDescription] = useState('')
   const [importError, setImportError] = useState<string | null>(null)
+  const [stackCompatibility, setStackCompatibility] = useState<StackCompatibility | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const fetchMethods = useCallback(async () => {
@@ -65,6 +74,22 @@ export default function MethodsPage() {
   }, [])
 
   useEffect(() => { fetchMethods(); fetchCustomMethods() }, [fetchMethods, fetchCustomMethods])
+
+  useEffect(() => {
+    if (stack.length === 0) {
+      setStackCompatibility(null)
+      return
+    }
+
+    fetch(`${API_BASE}/v1/methods/stack/compatibility`, {
+      method: 'POST',
+      headers: AUTH_HEADERS,
+      body: JSON.stringify({ stack }),
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => setStackCompatibility(data as StackCompatibility))
+      .catch(() => setStackCompatibility(null))
+  }, [stack])
 
   const activate = async (id: string) => {
     if (working) return
@@ -125,6 +150,33 @@ export default function MethodsPage() {
     setActiveId('standard')
     setConflicts([])
     setMethods(prev => prev.map(m => ({ ...m, is_active: m.id === 'standard', in_stack: false, stack_position: null })))
+    setWorking(false)
+  }
+
+  const reorderStack = async (fromIndex: number, toIndex: number) => {
+    if (working) return
+    if (toIndex < 0 || toIndex >= stack.length || fromIndex === toIndex) return
+
+    const next = [...stack]
+    const [moved] = next.splice(fromIndex, 1)
+    next.splice(toIndex, 0, moved)
+
+    setWorking(true)
+    const res = await fetch(`${API_BASE}/v1/methods/stack`, {
+      method: 'POST',
+      headers: AUTH_HEADERS,
+      body: JSON.stringify({ stack: next }),
+    }).then(r => r.json())
+
+    setStack(res.active_stack || next)
+    setConflicts(res.conflicts || [])
+    setActiveId(res.active_stack?.[0] || 'standard')
+    setMethods(prev => prev.map(m => ({
+      ...m,
+      is_active: m.id === (res.active_stack?.[0] || 'standard'),
+      in_stack: res.active_stack?.includes(m.id) || false,
+      stack_position: res.active_stack?.indexOf(m.id) >= 0 ? res.active_stack.indexOf(m.id) + 1 : null,
+    })))
     setWorking(false)
   }
 
@@ -273,6 +325,22 @@ export default function MethodsPage() {
                     <span className="text-xs font-semibold text-gray-500 dark:text-gray-400">{i + 1}.</span>
                     <span className="text-base">{m.icon}</span>
                     <span className="text-sm font-medium text-gray-800 dark:text-white">{m.name}</span>
+                    <button
+                      onClick={() => reorderStack(i, i - 1)}
+                      disabled={working || i === 0}
+                      title="Move left"
+                      className="ml-1 text-gray-400 hover:text-indigo-500 transition-colors disabled:opacity-30 text-xs"
+                    >
+                      ◀
+                    </button>
+                    <button
+                      onClick={() => reorderStack(i, i + 1)}
+                      disabled={working || i === stackMethods.length - 1}
+                      title="Move right"
+                      className="text-gray-400 hover:text-indigo-500 transition-colors disabled:opacity-30 text-xs"
+                    >
+                      ▶
+                    </button>
                     <button onClick={() => removeFromStack(m.id)} disabled={working}
                       className="ml-1 text-gray-400 hover:text-red-500 transition-colors disabled:opacity-40 text-xs">✕</button>
                   </div>
@@ -280,6 +348,25 @@ export default function MethodsPage() {
               )
             })}
           </div>
+
+          {stackCompatibility && (
+            <div className="mt-3 rounded-lg border border-purple-200 dark:border-purple-700 bg-white/80 dark:bg-gray-900/30 px-3 py-2 text-xs text-purple-900 dark:text-purple-200">
+              <div className="font-semibold">Compatibility score: {stackCompatibility.compatibility_score}</div>
+              <div className="text-[11px] text-purple-700 dark:text-purple-300 mt-0.5">
+                Primary method: {stackCompatibility.primary_method_id.toUpperCase()}
+                {stackCompatibility.primary_pipeline_supported ? ' (pipeline-capable)' : ' (not pipeline-capable)'}
+              </div>
+              {stackCompatibility.conflicts.length > 0 && (
+                <div className="mt-2 space-y-1">
+                  {stackCompatibility.conflicts.map((w, i) => (
+                    <p key={i} className="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 px-2 py-1 rounded border border-amber-200 dark:border-amber-700">
+                      {w}
+                    </p>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Conflict warnings */}
           {conflicts.length > 0 && (

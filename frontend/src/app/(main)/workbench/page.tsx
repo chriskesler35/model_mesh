@@ -66,6 +66,16 @@ interface MethodStackPreset {
   }
 }
 
+interface StackCompatibility {
+  compatibility_score: number
+  conflicts: string[]
+  primary_method_id: string
+  primary_pipeline_supported: boolean
+  valid: boolean
+}
+
+const STACK_METHOD_OPTIONS = ['bmad', 'gsd', 'superpowers', 'specaudit', 'mvp-loop', 'gtrack'] as const
+
 function getModelLabel(models: Model[], ref?: string | null) {
   if (!ref) return ''
   const match = models.find(m => m.id === ref || m.model_id === ref)
@@ -90,7 +100,7 @@ function getApiErrorMessage(payload: any, fallbackStatus: number) {
   return String(fallbackStatus)
 }
 
-const METHOD_ICONS: Record<string, string> = { bmad: '🧠', gsd: '⚡', superpowers: '🦸', specaudit: '✅', 'mvp-loop': '🚧' }
+const METHOD_ICONS: Record<string, string> = { bmad: '🧠', gsd: '⚡', superpowers: '🦸', specaudit: '✅', 'mvp-loop': '🚧', gtrack: '📊' }
 
 export default function WorkbenchListPage() {
   const router = useRouter()
@@ -127,6 +137,7 @@ export default function WorkbenchListPage() {
   const [selectedGoalId, setSelectedGoalId] = useState<string>('')
   const [stackPresets, setStackPresets] = useState<MethodStackPreset[]>([])
   const [selectedStack, setSelectedStack] = useState<string[]>([])
+  const [selectedStackCompatibility, setSelectedStackCompatibility] = useState<StackCompatibility | null>(null)
 
   const fetchSessions = useCallback(async () => {
     const apiBase = getApiBase()
@@ -354,6 +365,26 @@ export default function WorkbenchListPage() {
     return () => { cancelled = true }
   }, [showNew])
 
+  useEffect(() => {
+    if (!showNew || !featureFlags.methodLauncherV1) return
+    const stack = selectedStack.length > 0 ? selectedStack : (activeStack.length > 1 ? activeStack : [])
+    if (stack.length === 0) {
+      setSelectedStackCompatibility(null)
+      return
+    }
+
+    const apiBase = getApiBase()
+    const authHeaders = getAuthHeaders()
+    fetch(`${apiBase}/v1/methods/stack/compatibility`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ stack }),
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => setSelectedStackCompatibility(data as StackCompatibility))
+      .catch(() => setSelectedStackCompatibility(null))
+  }, [showNew, selectedStack, activeStack])
+
   const createSession = async () => {
     if (!task.trim() || creating) return
     setCreating(true)
@@ -379,6 +410,9 @@ export default function WorkbenchListPage() {
 
       if (asPipeline) {
         const launchStack = selectedStack.length > 0 ? selectedStack : activeStack
+        if (launchStack.length > 0 && selectedStackCompatibility && !selectedStackCompatibility.valid) {
+          throw new Error('Selected stack is not pipeline-compatible. Adjust stack order before launching.')
+        }
         const launchMethodId = launchStack.length > 1
           ? 'stack'
           : (launchStack[0] || pipelineMethod)
@@ -502,6 +536,29 @@ export default function WorkbenchListPage() {
     })
   }
 
+  const moveSelectedStackItem = (fromIndex: number, toIndex: number) => {
+    const stack = [...selectedStack]
+    if (toIndex < 0 || toIndex >= stack.length || fromIndex === toIndex) return
+    const [moved] = stack.splice(fromIndex, 1)
+    stack.splice(toIndex, 0, moved)
+    setSelectedStack(stack)
+    if (stack.length > 0) setPipelineMethod(stack[0])
+    trackEvent('stack_reordered', { stack })
+  }
+
+  const removeFromSelectedStack = (methodId: string) => {
+    const next = selectedStack.filter(m => m !== methodId)
+    setSelectedStack(next)
+    if (next.length > 0) setPipelineMethod(next[0])
+  }
+
+  const addToSelectedStack = (methodId: string) => {
+    if (selectedStack.includes(methodId)) return
+    const next = [...selectedStack, methodId]
+    setSelectedStack(next)
+    if (next.length > 0 && !selectedStack.length) setPipelineMethod(next[0])
+  }
+
   const STATUS_COLOR: Record<string, string> = {
     pending: 'text-yellow-600 bg-yellow-50',
     running: 'text-blue-600 bg-blue-50',
@@ -515,6 +572,9 @@ export default function WorkbenchListPage() {
     waiting: 'idle',             // turn done, session open for follow-ups
     awaiting_approval: 'needs approval',
   }
+
+  const effectiveLaunchStack = selectedStack.length > 0 ? selectedStack : (activeStack.length > 1 ? activeStack : [])
+  const stackLaunchBlocked = asPipeline && effectiveLaunchStack.length > 0 && !!selectedStackCompatibility && !selectedStackCompatibility.valid
 
   return (
     <div className="space-y-6">
@@ -710,6 +770,52 @@ export default function WorkbenchListPage() {
                               </button>
                             ))}
                           </div>
+                        </div>
+                      )}
+                      {featureFlags.methodLauncherV1 && selectedStack.length > 0 && (
+                        <div className="rounded-lg border border-sky-200 dark:border-sky-700 bg-white/80 dark:bg-gray-900/30 p-2.5 space-y-2">
+                          <div className="text-xs font-semibold uppercase tracking-wider text-sky-700 dark:text-sky-300">Stack composer</div>
+                          <div className="space-y-1.5">
+                            {selectedStack.map((methodId, idx) => (
+                              <div key={`${methodId}-${idx}`} className="flex items-center gap-1.5 text-xs rounded border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 px-2 py-1.5">
+                                <span className="text-sky-700 dark:text-sky-300 w-4 text-right">{idx + 1}.</span>
+                                <span>{METHOD_ICONS[methodId] || '🔧'}</span>
+                                <span className="font-medium text-sky-900 dark:text-sky-200">{methodId}</span>
+                                <div className="ml-auto flex items-center gap-1">
+                                  <button type="button" onClick={() => moveSelectedStackItem(idx, idx - 1)} disabled={idx === 0} className="px-1 py-0.5 rounded border border-sky-200 dark:border-sky-700 text-sky-700 dark:text-sky-300 disabled:opacity-40">◀</button>
+                                  <button type="button" onClick={() => moveSelectedStackItem(idx, idx + 1)} disabled={idx === selectedStack.length - 1} className="px-1 py-0.5 rounded border border-sky-200 dark:border-sky-700 text-sky-700 dark:text-sky-300 disabled:opacity-40">▶</button>
+                                  <button type="button" onClick={() => removeFromSelectedStack(methodId)} className="px-1 py-0.5 rounded border border-red-200 dark:border-red-800 text-red-600 dark:text-red-300">✕</button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {STACK_METHOD_OPTIONS.filter(id => !selectedStack.includes(id)).map(methodId => (
+                              <button
+                                key={methodId}
+                                type="button"
+                                onClick={() => addToSelectedStack(methodId)}
+                                className="px-2 py-1 text-[11px] rounded border border-sky-300 dark:border-sky-700 text-sky-700 dark:text-sky-300 bg-white dark:bg-gray-800 hover:bg-sky-100 dark:hover:bg-sky-900/30"
+                              >
+                                + {methodId}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {featureFlags.methodLauncherV1 && selectedStackCompatibility && (
+                        <div className="rounded-lg border border-indigo-200 dark:border-indigo-800 bg-white/80 dark:bg-gray-900/30 p-2.5 text-xs text-indigo-900 dark:text-indigo-200 space-y-1">
+                          <div className="font-semibold">Stack compatibility: {selectedStackCompatibility.compatibility_score}</div>
+                          <div>Primary: {selectedStackCompatibility.primary_method_id.toUpperCase()} {selectedStackCompatibility.primary_pipeline_supported ? '(pipeline-capable)' : '(not pipeline-capable)'}</div>
+                          {selectedStackCompatibility.conflicts.length > 0 && (
+                            <div className="space-y-1 pt-1">
+                              {selectedStackCompatibility.conflicts.map((warning, idx) => (
+                                <div key={idx} className="rounded border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-2 py-1 text-[11px] text-amber-800 dark:text-amber-200">
+                                  {warning}
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       )}
                       <div className="text-xs text-sky-800 dark:text-sky-200">Choose a starter path (you can still edit anything below):</div>
@@ -1005,9 +1111,9 @@ export default function WorkbenchListPage() {
             <div className="px-6 py-4 border-t border-gray-100 dark:border-gray-800 flex gap-3 justify-end flex-shrink-0">
               <button onClick={() => setShowNew(false)}
                 className="px-4 py-2 text-sm font-medium rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50">Cancel</button>
-              <button onClick={createSession} disabled={!task.trim() || creating}
+              <button onClick={createSession} disabled={!task.trim() || creating || stackLaunchBlocked}
                 className="px-4 py-2 text-sm font-medium rounded-lg bg-orange-500 hover:bg-orange-600 disabled:bg-gray-200 text-white disabled:text-gray-400 transition-colors">
-                {creating ? 'Launching...' : '🚀 Launch'}
+                {creating ? 'Launching...' : stackLaunchBlocked ? 'Fix stack to launch' : '🚀 Launch'}
               </button>
             </div>
           </div>

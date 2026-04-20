@@ -346,6 +346,9 @@ STACK_PRESETS: Dict[str, Dict[str, Any]] = {
 }
 
 
+PIPELINE_PRIMARY_METHODS = {"bmad", "gsd", "superpowers", "specaudit", "mvp-loop"}
+
+
 def _clean_stack(stack: List[str]) -> List[str]:
     return [mid for mid in stack if mid in BUILT_IN_METHODS and mid != "standard"]
 
@@ -354,6 +357,10 @@ def _stack_compatibility_payload(stack: List[str]) -> Dict[str, Any]:
     clean = _clean_stack(stack)
     warnings = _check_conflicts(clean)
     primary = clean[0] if clean else "standard"
+    if clean and primary not in PIPELINE_PRIMARY_METHODS:
+        warnings.append(
+            f"⚠️ Primary method '{primary}' cannot drive pipeline phases. Move a pipeline-capable method to position #1."
+        )
     score = max(0, 100 - (len(warnings) * 30))
     return {
         "stack": clean,
@@ -362,6 +369,7 @@ def _stack_compatibility_payload(stack: List[str]) -> Dict[str, Any]:
         "conflicts": warnings,
         "compatibility_score": score,
         "valid": len(warnings) == 0,
+        "primary_pipeline_supported": (not clean) or (primary in PIPELINE_PRIMARY_METHODS),
     }
 
 
