@@ -1,6 +1,8 @@
 'use client'
 
 import { getApiBase, getAuthHeaders } from '@/lib/config'
+import { featureFlags } from '@/lib/feature-flags'
+import { trackEvent } from '@/lib/analytics'
 
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
@@ -27,6 +29,25 @@ interface ProjectSummary {
   }
 }
 
+interface MethodRecommendation {
+  goal_id: string
+  label: string
+  description: string
+  recommended_method_id: string
+  recommended_stack: string[]
+  interaction_mode: 'interactive' | 'autonomous'
+  auto_approve: boolean
+  delegate_qa_to_agent: boolean
+  why: string
+  alternatives: string[]
+}
+
+function getModelLabel(models: Model[], ref?: string | null) {
+  if (!ref) return ''
+  const match = models.find(m => m.id === ref || m.model_id === ref)
+  return match?.display_name || match?.model_id || ref
+}
+
 async function readApiPayload(res: Response) {
   const text = await res.text()
   if (!text) return null
@@ -45,7 +66,7 @@ function getApiErrorMessage(payload: any, fallbackStatus: number) {
   return String(fallbackStatus)
 }
 
-const METHOD_ICONS: Record<string, string> = { bmad: '🧠', gsd: '⚡', superpowers: '🦸' }
+const METHOD_ICONS: Record<string, string> = { bmad: '🧠', gsd: '⚡', superpowers: '🦸', specaudit: '✅', 'mvp-loop': '🚧' }
 
 export default function WorkbenchListPage() {
   const router = useRouter()
@@ -56,7 +77,7 @@ export default function WorkbenchListPage() {
   const [showNew, setShowNew] = useState(false)
   const [task, setTask] = useState('')
   const [agentType, setAgentType] = useState('coder')
-  const [model, setModel] = useState('ollama/glm4:latest')
+  const [model, setModel] = useState('')
   const [creating, setCreating] = useState(false)
   const [projectId, setProjectId] = useState<string | null>(null)
   const [projectName, setProjectName] = useState<string>('')
@@ -68,6 +89,7 @@ export default function WorkbenchListPage() {
   const [autoApprove, setAutoApprove] = useState(false)
   const [interactionMode, setInteractionMode] = useState<'interactive' | 'autonomous'>('interactive')
   const [delegateQaToAgent, setDelegateQaToAgent] = useState(true)
+  const [launchMode, setLaunchMode] = useState<'guided' | 'pro'>(featureFlags.uiGuidedMode ? 'guided' : 'pro')
   // Active method stack from Methods page
   const [activeStack, setActiveStack] = useState<string[]>([])
   const [activeStackName, setActiveStackName] = useState<string>('')
@@ -76,6 +98,9 @@ export default function WorkbenchListPage() {
   const [customizeModels, setCustomizeModels] = useState(false)
   const [isPromotedProject, setIsPromotedProject] = useState(false)
   const [taskAutoFilled, setTaskAutoFilled] = useState(false)
+  const [goalRecommendations, setGoalRecommendations] = useState<MethodRecommendation[]>([])
+  const [recommendationsLoading, setRecommendationsLoading] = useState(false)
+  const [selectedGoalId, setSelectedGoalId] = useState<string>('')
 
   const fetchSessions = useCallback(async () => {
     const apiBase = getApiBase()
@@ -220,7 +245,7 @@ export default function WorkbenchListPage() {
 
         while (true) {
           const res = await fetch(
-            `${apiBase}/v1/models?limit=${limit}&offset=${offset}&active_only=true&usable_only=true&chat_only=true`,
+            `${apiBase}/v1/models?limit=${limit}&offset=${offset}&active_only=true&usable_only=true&validated_only=true&chat_only=true`,
             { headers: authHeaders },
           )
           const d = await res.json().catch(() => ({ data: [] }))
@@ -236,12 +261,13 @@ export default function WorkbenchListPage() {
 
         if (cancelled) return
 
-        const unique = Array.from(new Map(all.map(m => [m.model_id, m])).values())
+        const unique = Array.from(new Map(all.map(m => [m.id, m])).values())
         setModels(unique)
 
-        // Preserve selected model if still present; otherwise pick first available.
-        if (unique.length > 0 && !unique.some(m => m.model_id === model)) {
-          setModel(unique[0].model_id)
+        // Keep session model empty by default so phase preview reflects
+        // persona/agent/phase binding resolution unless the user picks one.
+        if (model && !unique.some(m => m.id === model || m.model_id === model)) {
+          setModel('')
         }
       } catch {
         if (!cancelled) setModels([])
@@ -254,13 +280,45 @@ export default function WorkbenchListPage() {
     return () => { cancelled = true }
   }, [showNew])
 
+  useEffect(() => {
+    if (!showNew || !featureFlags.methodLauncherV1) return
+    const apiBase = getApiBase()
+    const authHeaders = getAuthHeaders()
+    let cancelled = false
+
+    const fetchRecommendations = async () => {
+      setRecommendationsLoading(true)
+      try {
+        const res = await fetch(`${apiBase}/v1/methods/recommendations`, { headers: authHeaders })
+        const payload = await readApiPayload(res)
+        if (!res.ok) throw new Error(getApiErrorMessage(payload, res.status))
+        const goals = Array.isArray(payload?.goals) ? payload.goals as MethodRecommendation[] : []
+        if (cancelled) return
+        setGoalRecommendations(goals)
+        const defaultGoalId = String(payload?.default_goal_id || goals[0]?.goal_id || '')
+        setSelectedGoalId(defaultGoalId)
+      } catch {
+        if (!cancelled) {
+          setGoalRecommendations([])
+          setSelectedGoalId('')
+        }
+      } finally {
+        if (!cancelled) setRecommendationsLoading(false)
+      }
+    }
+
+    fetchRecommendations()
+    return () => { cancelled = true }
+  }, [showNew])
+
   const createSession = async () => {
     if (!task.trim() || creating) return
     setCreating(true)
     try {
       const apiBase = getApiBase()
       const authHeaders = getAuthHeaders()
-      const body: any = { task: task.trim(), agent_type: agentType, model }
+      const body: any = { task: task.trim(), agent_type: agentType }
+      if (model) body.model = model
       if (projectId) body.project_id = projectId
       const sessRes = await fetch(`${apiBase}/v1/workbench/sessions`, {
         method: 'POST', headers: authHeaders,
@@ -268,6 +326,11 @@ export default function WorkbenchListPage() {
       })
       const session = await readApiPayload(sessRes)
       if (!sessRes.ok || !session?.id) {
+        trackEvent('workbench_launch_failed', {
+          mode: launchMode,
+          as_pipeline: asPipeline,
+          method_id: pipelineMethod,
+        })
         throw new Error(`Session creation failed: ${getApiErrorMessage(session, sessRes.status)}`)
       }
 
@@ -308,17 +371,70 @@ export default function WorkbenchListPage() {
         })
         const pipeline = await readApiPayload(pipeRes)
         if (!pipeRes.ok || !pipeline?.id) {
+          trackEvent('workbench_pipeline_launch_failed', {
+            mode: launchMode,
+            method_id: activeStack.length > 1 ? 'stack' : pipelineMethod,
+          })
           throw new Error(`Pipeline creation failed: ${getApiErrorMessage(pipeline, pipeRes.status)}`)
         }
+        trackEvent('workbench_pipeline_launched', {
+          mode: launchMode,
+          goal_id: selectedGoalId || undefined,
+          method_id: activeStack.length > 1 ? 'stack' : pipelineMethod,
+          pipeline_id: pipeline.id,
+        })
         router.push(`/workbench/pipelines/${pipeline.id}`)
         return
       }
+      trackEvent('workbench_session_launched', {
+        mode: launchMode,
+        agent_type: agentType,
+        session_id: session.id,
+      })
       router.push(`/workbench/${session.id}`)
     } catch (e: any) {
       console.error('Launch failed:', e)
       alert(`Launch failed: ${e.message || 'Unknown error'}`)
       setCreating(false)
     }
+  }
+
+  const applyGuidedPreset = (preset: 'mvp' | 'prototype' | 'review') => {
+    setAsPipeline(true)
+    setCustomizeModels(false)
+    if (preset === 'mvp') {
+      setPipelineMethod('mvp-loop')
+      setInteractionMode('interactive')
+      setAutoApprove(false)
+      setDelegateQaToAgent(false)
+      return
+    }
+    if (preset === 'prototype') {
+      setPipelineMethod('gsd')
+      setInteractionMode('autonomous')
+      setAutoApprove(true)
+      setDelegateQaToAgent(true)
+      return
+    }
+    setPipelineMethod('specaudit')
+    setInteractionMode('interactive')
+    setAutoApprove(false)
+    setDelegateQaToAgent(false)
+  }
+
+  const applyRecommendation = (rec: MethodRecommendation) => {
+    setAsPipeline(true)
+    setCustomizeModels(false)
+    setPipelineMethod(rec.recommended_method_id)
+    setInteractionMode(rec.interaction_mode)
+    setAutoApprove(rec.auto_approve)
+    setDelegateQaToAgent(rec.delegate_qa_to_agent)
+    setSelectedGoalId(rec.goal_id)
+    trackEvent('method_recommendation_applied', {
+      goal_id: rec.goal_id,
+      method_id: rec.recommended_method_id,
+      stack: rec.recommended_stack,
+    })
   }
 
   const STATUS_COLOR: Record<string, string> = {
@@ -457,6 +573,95 @@ export default function WorkbenchListPage() {
               </button>
             </div>
             <div className="px-6 py-5 space-y-4 overflow-y-auto flex-1">
+              {featureFlags.uiGuidedMode && (
+                <div className="rounded-lg border border-sky-200 dark:border-sky-700 bg-sky-50 dark:bg-sky-900/20 p-3 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-sm font-semibold text-sky-900 dark:text-sky-200">Launch Experience</div>
+                    <div className="inline-flex rounded-lg border border-sky-300 dark:border-sky-700 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLaunchMode('guided')
+                          trackEvent('workbench_launch_mode_changed', { mode: 'guided' })
+                        }}
+                        className={`px-2.5 py-1 text-xs font-medium ${launchMode === 'guided' ? 'bg-sky-500 text-white' : 'bg-white dark:bg-gray-800 text-sky-700 dark:text-sky-300'}`}>
+                        Guided
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLaunchMode('pro')
+                          trackEvent('workbench_launch_mode_changed', { mode: 'pro' })
+                        }}
+                        className={`px-2.5 py-1 text-xs font-medium border-l border-sky-300 dark:border-sky-700 ${launchMode === 'pro' ? 'bg-sky-500 text-white' : 'bg-white dark:bg-gray-800 text-sky-700 dark:text-sky-300'}`}>
+                        Pro
+                      </button>
+                    </div>
+                  </div>
+                  {launchMode === 'guided' && (
+                    <div className="space-y-2">
+                      {featureFlags.methodLauncherV1 && (
+                        <div className="rounded-lg border border-sky-200 dark:border-sky-700 bg-white/80 dark:bg-gray-900/30 p-2.5 space-y-2">
+                          <div className="text-xs font-semibold uppercase tracking-wider text-sky-700 dark:text-sky-300">Goal-first recommendations</div>
+                          {recommendationsLoading ? (
+                            <div className="text-xs text-sky-800 dark:text-sky-200">Loading recommendations…</div>
+                          ) : goalRecommendations.length === 0 ? (
+                            <div className="text-xs text-sky-800 dark:text-sky-200">Recommendations unavailable. You can still choose a starter path below.</div>
+                          ) : (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                              {goalRecommendations.map(rec => (
+                                <button
+                                  key={rec.goal_id}
+                                  type="button"
+                                  onClick={() => applyRecommendation(rec)}
+                                  className={`px-2.5 py-2 text-xs rounded-lg border text-left transition-colors ${selectedGoalId === rec.goal_id ? 'border-sky-500 bg-sky-100 dark:bg-sky-900/30' : 'border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 hover:bg-sky-100 dark:hover:bg-sky-900/30'}`}
+                                >
+                                  <div className="font-semibold text-sky-900 dark:text-sky-200">{rec.label}</div>
+                                  <div className="text-sky-700 dark:text-sky-300 mt-0.5">{rec.description}</div>
+                                  <div className="text-sky-600 dark:text-sky-400 mt-1">Recommended: {rec.recommended_stack.join(' + ')}</div>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      <div className="text-xs text-sky-800 dark:text-sky-200">Choose a starter path (you can still edit anything below):</div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            applyGuidedPreset('mvp')
+                            trackEvent('guided_preset_applied', { preset: 'mvp' })
+                          }}
+                          className="px-2.5 py-2 text-xs rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 text-left hover:bg-sky-100 dark:hover:bg-sky-900/30">
+                          <div className="font-semibold text-sky-900 dark:text-sky-200">Build MVP</div>
+                          <div className="text-sky-700 dark:text-sky-300">Contract-first pipeline</div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            applyGuidedPreset('prototype')
+                            trackEvent('guided_preset_applied', { preset: 'prototype' })
+                          }}
+                          className="px-2.5 py-2 text-xs rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 text-left hover:bg-sky-100 dark:hover:bg-sky-900/30">
+                          <div className="font-semibold text-sky-900 dark:text-sky-200">Fast Prototype</div>
+                          <div className="text-sky-700 dark:text-sky-300">Speed-focused GSD path</div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            applyGuidedPreset('review')
+                            trackEvent('guided_preset_applied', { preset: 'review' })
+                          }}
+                          className="px-2.5 py-2 text-xs rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-800 text-left hover:bg-sky-100 dark:hover:bg-sky-900/30">
+                          <div className="font-semibold text-sky-900 dark:text-sky-200">Deep Review</div>
+                          <div className="text-sky-700 dark:text-sky-300">Spec + runtime audit</div>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
               {projectId && (
                 <div className="rounded-lg border border-orange-200 dark:border-orange-700 bg-orange-50 dark:bg-orange-900/20 px-3 py-2 text-xs text-orange-700 dark:text-orange-300">
                   <div className="flex items-center gap-2">
@@ -564,6 +769,8 @@ export default function WorkbenchListPage() {
                         <option value="bmad">BMAD — 6 phases (full lifecycle)</option>
                         <option value="gsd">GSD — 3 phases (ship fast)</option>
                         <option value="superpowers">SuperPowers — 4 phases (deep work)</option>
+                        <option value="specaudit">Spec Audit — 5 phases (review + runtime verification)</option>
+                        <option value="mvp-loop">MVP Loop — 6 phases (contract to MVP release)</option>
                       </select>
                     )}
                     <label className="flex items-center gap-2 text-xs text-indigo-900 dark:text-indigo-200">
@@ -597,6 +804,10 @@ export default function WorkbenchListPage() {
                         <div className="space-y-1">
                           {phasePreview.map((ph, i) => {
                             const effectiveModel = modelOverrides[ph.name] || model || ph.resolved_model || ph.default_model
+                            const effectiveModelLabel = getModelLabel(models, effectiveModel)
+                            const sessionModelLabel = getModelLabel(models, model)
+                            const resolvedModelLabel = getModelLabel(models, ph.resolved_model)
+                            const defaultModelLabel = getModelLabel(models, ph.default_model)
                             const source = modelOverrides[ph.name] ? 'override' :
                               model ? 'session' :
                               ph.resolved_model ? 'persona' : 'default'
@@ -618,11 +829,24 @@ export default function WorkbenchListPage() {
                                   value={modelOverrides[ph.name] || model || ph.resolved_model || ph.default_model}
                                   onChange={e => setModelOverrides(prev => ({ ...prev, [ph.name]: e.target.value }))}
                                   className="rounded border border-indigo-200 dark:border-indigo-700 dark:bg-gray-800 dark:text-white px-1 py-0.5 text-[10px] max-w-[150px]">
-                                  {model && <option value={model}>{model} (session)</option>}
-                                  {ph.resolved_model && ph.resolved_model !== model && <option value={ph.resolved_model}>{ph.resolved_model} ({ph.resolved_via || 'agent'})</option>}
-                                  <option value={ph.default_model}>{ph.default_model} (template)</option>
-                                  {models.filter(m => m.model_id !== model && m.model_id !== ph.resolved_model && m.model_id !== ph.default_model).map(m => (
-                                    <option key={m.id} value={m.model_id}>{m.display_name || m.model_id}</option>
+                                  {model && <option value={model}>{sessionModelLabel} (session)</option>}
+                                  {ph.resolved_model && ph.resolved_model !== model && <option value={ph.resolved_model}>{resolvedModelLabel} ({ph.resolved_via || 'agent'})</option>}
+                                  <option value={ph.default_model}>{defaultModelLabel} (template)</option>
+                                  {Object.entries(
+                                    models
+                                      .filter(m => m.model_id !== model && m.model_id !== ph.resolved_model && m.model_id !== ph.default_model)
+                                      .reduce((acc, m) => {
+                                        const provider = m.provider_name || 'other'
+                                        if (!acc[provider]) acc[provider] = []
+                                        acc[provider].push(m)
+                                        return acc
+                                      }, {} as Record<string, Model[]>)
+                                  ).map(([provider, providerModels]) => (
+                                    <optgroup key={provider} label={provider.charAt(0).toUpperCase() + provider.slice(1)}>
+                                      {providerModels.map(m => (
+                                        <option key={m.id} value={m.model_id}>{m.display_name || m.model_id}</option>
+                                      ))}
+                                    </optgroup>
                                   ))}
                                 </select>
                               ) : (
@@ -632,7 +856,7 @@ export default function WorkbenchListPage() {
                                   source === 'session' ? 'text-indigo-600 dark:text-indigo-400' :
                                   'text-gray-400'
                                 }`} title={`from ${source}`}>
-                                  {effectiveModel}
+                                  {effectiveModelLabel}
                                 </span>
                               )}
                             </div>

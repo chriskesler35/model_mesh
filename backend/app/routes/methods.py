@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -120,6 +120,57 @@ Describe what you know, what you don't know, and what information would unblock 
             "structured_output": True,
         },
     },
+    "specaudit": {
+        "id": "specaudit",
+        "name": "Spec Audit",
+        "tagline": "Review previous workflow against spec + runtime",
+        "icon": "✅",
+        "color": "emerald",
+        "description": "Audit mode for validating an existing implementation against acceptance criteria and runtime behavior.",
+        "system_prompt": """# Spec Audit Mode Active
+
+You are running an evidence-first audit workflow.
+
+Priorities:
+1. Derive clear, testable acceptance criteria from available specs.
+2. Map implementation evidence to each criterion.
+3. Run practical runtime verification checks.
+4. Produce an explicit go/no-go decision with severity-ranked findings.
+
+Do not assume success. Require evidence.
+""",
+        "phases": ["SpecIntake", "ImplementationAudit", "RuntimeVerifier", "QAGate", "Report"],
+        "settings": {
+            "require_phase_confirmation": True,
+            "auto_advance_phases": False,
+        },
+    },
+    "mvp-loop": {
+        "id": "mvp-loop",
+        "name": "MVP Loop",
+        "tagline": "Contract-first path to a shippable MVP",
+        "icon": "🚧",
+        "color": "green",
+        "description": "Interactive, contract-driven MVP workflow that enforces criteria coverage and runtime QA before release recommendation.",
+        "system_prompt": """# MVP Loop Mode Active
+
+You are running a contract-driven MVP workflow.
+
+Priorities:
+1. Lock scope with explicit use cases and acceptance criteria.
+2. Build only P0 must-have capability first.
+3. Maintain a decision ledger for assumptions and tradeoffs.
+4. Prove coverage and runtime viability with evidence.
+5. Produce a clear ship/no-ship recommendation with iteration-2 backlog.
+
+Do not optimize for polish over functionality.
+""",
+        "phases": ["ContractIntake", "PlanWithUser", "BuildMVP", "CoverageAudit", "RuntimeQAGate", "MVPReport"],
+        "settings": {
+            "require_phase_confirmation": True,
+            "auto_advance_phases": False,
+        },
+    },
     "gtrack": {
         "id": "gtrack",
         "name": "GTrack",
@@ -209,6 +260,58 @@ class MethodImportRequest(BaseModel):
     method: MethodImportPayload
 
 
+GOAL_RECOMMENDATIONS: Dict[str, Dict[str, Any]] = {
+    "build-mvp": {
+        "goal_id": "build-mvp",
+        "label": "Build MVP",
+        "description": "Contract-first workflow to ship a near-complete MVP with explicit acceptance criteria.",
+        "recommended_method_id": "mvp-loop",
+        "recommended_stack": ["mvp-loop"],
+        "interaction_mode": "interactive",
+        "auto_approve": False,
+        "delegate_qa_to_agent": False,
+        "why": "Best for first-pass feature completeness with explicit user checkpoints.",
+        "alternatives": ["bmad", "superpowers"],
+    },
+    "prototype-fast": {
+        "goal_id": "prototype-fast",
+        "label": "Prototype Fast",
+        "description": "Speed-first rapid prototyping path with minimal ceremony.",
+        "recommended_method_id": "gsd",
+        "recommended_stack": ["gsd", "gtrack"],
+        "interaction_mode": "autonomous",
+        "auto_approve": True,
+        "delegate_qa_to_agent": True,
+        "why": "Optimized for momentum and short feedback loops.",
+        "alternatives": ["mvp-loop", "bmad"],
+    },
+    "review-runtime": {
+        "goal_id": "review-runtime",
+        "label": "Review and Verify",
+        "description": "Evidence-first implementation and runtime audit flow.",
+        "recommended_method_id": "specaudit",
+        "recommended_stack": ["specaudit"],
+        "interaction_mode": "interactive",
+        "auto_approve": False,
+        "delegate_qa_to_agent": False,
+        "why": "Best for finding gaps and release blockers before shipping.",
+        "alternatives": ["superpowers", "bmad"],
+    },
+    "architect-deep": {
+        "goal_id": "architect-deep",
+        "label": "Deep Architecture",
+        "description": "Structured analysis and planning for complex multi-step work.",
+        "recommended_method_id": "superpowers",
+        "recommended_stack": ["superpowers", "gtrack"],
+        "interaction_mode": "interactive",
+        "auto_approve": False,
+        "delegate_qa_to_agent": False,
+        "why": "Balances deep research with execution traceability.",
+        "alternatives": ["bmad", "mvp-loop"],
+    },
+}
+
+
 # ─── Routes ───────────────────────────────────────────────────────────────────
 @router.get("/")
 async def list_methods(db: AsyncSession = Depends(get_db)):
@@ -290,6 +393,37 @@ async def get_active_prompt():
     active_id = state.get("active_method", "standard")
     method = BUILT_IN_METHODS.get(active_id, BUILT_IN_METHODS["standard"])
     return {"method_id": active_id, "stack": [], "prompt": method.get("system_prompt", "")}
+
+
+@router.get("/recommendations")
+async def get_method_recommendations(
+    goal: Optional[str] = Query(default=None),
+):
+    """Goal-first method recommendation payload for launcher UX."""
+    recommendations = list(GOAL_RECOMMENDATIONS.values())
+    if not goal:
+        return {
+            "ok": True,
+            "goals": recommendations,
+            "default_goal_id": "build-mvp",
+        }
+
+    key = (goal or "").strip().lower()
+    rec = GOAL_RECOMMENDATIONS.get(key)
+    if not rec:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": f"Unknown goal '{goal}'.",
+                "available_goals": sorted(GOAL_RECOMMENDATIONS.keys()),
+            },
+        )
+
+    return {
+        "ok": True,
+        "goal": rec,
+        "available_goals": recommendations,
+    }
 
 
 @router.post("/activate", dependencies=[require_role("member")])
