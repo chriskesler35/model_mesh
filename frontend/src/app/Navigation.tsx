@@ -14,6 +14,7 @@ const NAV_ITEMS = [
   { href: '/projects',        label: 'Projects',    icon: '🗂️' },
   { href: '/gallery',         label: 'Gallery',     icon: '🖼️' },
   { href: '/methods',         label: 'Methods',     icon: '🧠' },
+  { href: '/marketplace',     label: 'Marketplace', icon: '🛍️' },
   { href: '/collaborate',     label: 'Collaborate', icon: '👥' },
   { href: '/personas',        label: 'Personas',    icon: '🎭' },
   { href: '/models',          label: 'Models',      icon: '⚡' },
@@ -25,7 +26,7 @@ const NAV_ITEMS = [
 const GROUPS = [
   { label: 'MAIN',   items: ['/', '/chat'] },
   { label: 'BUILD',  items: ['/agents', '/personas', '/projects', '/workbench', '/agents/sessions'] },
-  { label: 'CREATE', items: ['/gallery', '/methods'] },
+  { label: 'CREATE', items: ['/gallery', '/methods', '/marketplace'] },
   { label: 'MANAGE', items: ['/collaborate', '/models', '/stats', '/settings', '/help'] },
 ]
 

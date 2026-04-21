@@ -80,6 +80,8 @@ from app.routes.runner import router as runner_router
 from app.routes.custom_methods import router as custom_methods_router
 from app.routes.methods import router as methods_router
 from app.routes.metrics import router as metrics_router
+from app.routes.marketplace import router as marketplace_router
+from app.routes.skills import router as skills_router
 from app.routes.sandbox import router as sandbox_router
 from app.routes.collaboration import router as collab_router, public_router as auth_public_router
 from app.routes.github_oauth import router as github_oauth_router
@@ -212,6 +214,8 @@ app.include_router(projects_router)
 app.include_router(runner_router)
 app.include_router(custom_methods_router)
 app.include_router(methods_router)
+app.include_router(marketplace_router)
+app.include_router(skills_router)
 app.include_router(sandbox_router)
 app.include_router(collab_router)
 app.include_router(auth_public_router)
