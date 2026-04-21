@@ -122,11 +122,6 @@ export function SkillDetailPane({
             </a>
           )}
         </div>
-
-        {/* Phase 5 Note */}
-        <div className="p-3 bg-blue-50 border border-blue-200 rounded text-xs text-blue-800 mt-4">
-          <strong>Phase 5 Note:</strong> Install functionality coming in Phase 6. For now, you can browse and review available skills.
-        </div>
       </CardContent>
 
       <div className="border-t p-4 mt-4">
@@ -137,7 +132,7 @@ export function SkillDetailPane({
           size="sm"
           className="w-full"
         >
-          {isInstalled ? 'Already Installed' : 'Install (Coming in Phase 6)'}
+          {isInstalled ? 'Already Installed' : 'Install'}
         </Button>
       </div>
     </Card>

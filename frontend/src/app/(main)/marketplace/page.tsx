@@ -7,6 +7,7 @@ import { Card } from '@/components/ui/card';
 import { SkillCard } from '@/components/marketplace/SkillCard';
 import { FilterPanel } from '@/components/marketplace/FilterPanel';
 import { SkillDetailPane } from '@/components/marketplace/SkillDetailPane';
+import { InstallWizard } from '@/components/marketplace/InstallWizard';
 import { Loader2, AlertCircle } from 'lucide-react';
 
 interface Skill {
@@ -48,6 +49,10 @@ export default function MarketplacePage() {
 
   // Detail View
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
+
+  // Install Wizard
+  const [installingSkillId, setInstallingSkillId] = useState<string | null>(null);
+  const [showInstallWizard, setShowInstallWizard] = useState(false);
 
   // Fetch filter options and skills
   useEffect(() => {
@@ -128,8 +133,38 @@ export default function MarketplacePage() {
 
   // Handle install click
   const handleInstallClick = (skillId: string) => {
-    // Phase 5: Just show a message
-    alert(`Install for ${skillId} coming in Phase 6!`);
+    setInstallingSkillId(skillId);
+    setShowInstallWizard(true);
+  };
+
+  // Handle install start
+  const handleStartInstall = async (skillId: string) => {
+    const res = await fetch(`${API_BASE}/v1/marketplace/skill/${skillId}/install`, {
+      method: 'POST',
+    });
+    if (!res.ok) throw new Error('Failed to start install');
+    return res.json();
+  };
+
+  // Handle poll progress
+  const handlePollProgress = async (jobId: string) => {
+    if (!installingSkillId) throw new Error('No skill selected');
+    const res = await fetch(`${API_BASE}/v1/marketplace/skill/${installingSkillId}/install/progress/${jobId}`);
+    if (!res.ok) throw new Error('Failed to fetch progress');
+    return res.json();
+  };
+
+  // Handle install success
+  const handleInstallSuccess = (skillId: string) => {
+    setInstalledSkills(prev => [...new Set([...prev, skillId])]);
+    // Re-fetch skills to update badges
+    setSkills(prev => prev.map(s => s));
+  };
+
+  // Handle install wizard close
+  const handleInstallWizardClose = () => {
+    setShowInstallWizard(false);
+    setInstallingSkillId(null);
   };
 
   return (
@@ -260,6 +295,19 @@ export default function MarketplacePage() {
           </div>
         )}
       </div>
+
+      {/* Install Wizard Modal */}
+      {installingSkillId && (
+        <InstallWizard
+          skillId={installingSkillId}
+          skillName={skills.find(s => s.skill_id === installingSkillId)?.name || installingSkillId}
+          isOpen={showInstallWizard}
+          onClose={handleInstallWizardClose}
+          onSuccess={handleInstallSuccess}
+          onStartInstall={handleStartInstall}
+          onPollProgress={handlePollProgress}
+        />
+      )}
     </div>
   );
 }
