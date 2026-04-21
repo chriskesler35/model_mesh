@@ -77,6 +77,11 @@ class PipelinePhaseModelUpdate(BaseModel):
     model_id: str
 
 
+class PipelinePhasePreviewRequest(BaseModel):
+    method_id: str
+    stack_override: Optional[List[str]] = None
+
+
 def _apply_interaction_mode_to_phases(
     phases: List[Dict[str, Any]],
     interaction_mode: str,
@@ -177,6 +182,131 @@ def _apply_interaction_mode_to_phases(
         updated.append(p)
 
     return updated
+
+
+def _resolve_pipeline_method_selection(
+    method_id: str,
+    stack_override: Optional[List[str]] = None,
+) -> tuple[str, List[str], str, List[str]]:
+    """Resolve effective method + stacked prompt behavior exactly like create_pipeline."""
+    from app.routes.methods import _load_state as _load_method_state, BUILT_IN_METHODS, _build_stack_prompt
+
+    effective_method_id = method_id
+    stacked_prompt = ""
+    requested_stack = [m for m in (stack_override or []) if m != "standard"]
+    invalid_stack = [m for m in requested_stack if m not in BUILT_IN_METHODS]
+    if invalid_stack:
+        raise HTTPException(status_code=400, detail=f"Unknown methods in stack_override: {invalid_stack}")
+
+    if method_id in ("stack", "active"):
+        method_state = _load_method_state()
+        stack = requested_stack or method_state.get("active_stack", [])
+        primary = stack[0] if stack else method_state.get("active_method", "standard")
+        effective_method_id = primary
+        non_primary = [m for m in stack if m != primary]
+        if non_primary:
+            stacked_prompt = _build_stack_prompt(non_primary)
+    elif method_id in ("bmad", "gsd", "superpowers", "specaudit", "mvp-loop"):
+        method_state = _load_method_state()
+        stack = requested_stack or method_state.get("active_stack", [])
+        if len(stack) > 1 and method_id in stack:
+            non_primary = [m for m in stack if m != method_id]
+            if non_primary:
+                stacked_prompt = _build_stack_prompt(non_primary)
+
+    layered_methods = []
+    if stacked_prompt:
+        if method_id in ("stack", "active"):
+            layered_methods = [m for m in requested_stack if m != effective_method_id]
+        else:
+            layered_methods = [m for m in requested_stack if m != method_id]
+    return effective_method_id, requested_stack, stacked_prompt, layered_methods
+
+
+async def _build_phase_preview_rows(method_id: str) -> List[Dict[str, Any]]:
+    """Build phase preview rows with resolved agent/persona/model chain."""
+    from app.services.phase_templates import get_phases_for_method, list_supported_methods
+    from app.models.agent import Agent
+    from app.models.persona import Persona
+    from app.routes.workbench import _resolve_model
+
+    try:
+        phases = get_phases_for_method(method_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Method '{method_id}' not supported. Available: {list_supported_methods()}"
+        )
+
+    async with AsyncSessionLocal() as db:
+        agent_rows = (await db.execute(
+            select(Agent).where(Agent.is_active == True).where(Agent.method_phase.isnot(None))
+        )).scalars().all()
+        agent_by_phase = {}
+        for a in agent_rows:
+            key = (a.method_phase or "").lower()
+            if key and key not in agent_by_phase:
+                agent_by_phase[key] = a
+
+        persona_rows = (await db.execute(select(Persona))).scalars().all()
+        persona_by_id = {str(p.id): p for p in persona_rows}
+        persona_by_name = {p.name.lower(): p for p in persona_rows}
+
+    async def chain_info(phase_name: str) -> dict:
+        result = {
+            "has_agent": False, "agent_name": None,
+            "has_persona": False, "persona_name": None,
+            "resolved_model": None, "resolved_via": None,
+        }
+        agent = agent_by_phase.get(phase_name.lower())
+        if agent:
+            result["has_agent"] = True
+            result["agent_name"] = agent.name
+            if agent.persona_id:
+                persona = persona_by_id.get(str(agent.persona_id))
+                if persona:
+                    result["has_persona"] = True
+                    result["persona_name"] = persona.name
+                    if persona.primary_model_id:
+                        m, _ = await _resolve_model(str(persona.primary_model_id))
+                        if m:
+                            result["resolved_model"] = m.model_id
+                            result["resolved_via"] = "agent→persona"
+                            return result
+            if agent.model_id:
+                m, _ = await _resolve_model(str(agent.model_id))
+                if m:
+                    result["resolved_model"] = m.model_id
+                    result["resolved_via"] = "agent→model"
+                    return result
+
+        persona = persona_by_name.get(phase_name.lower())
+        if persona:
+            result["has_persona"] = True
+            result["persona_name"] = persona.name
+            if persona.primary_model_id:
+                m, _ = await _resolve_model(str(persona.primary_model_id))
+                if m:
+                    result["resolved_model"] = m.model_id
+                    result["resolved_via"] = "persona name-match"
+                    return result
+        return result
+
+    phase_rows = []
+    for p in phases:
+        info = await chain_info(p["name"])
+        phase_rows.append(
+            {
+                "name": p["name"],
+                "role": p["role"],
+                "default_model": p["default_model"],
+                "artifact_type": p["artifact_type"],
+                "depends_on": p.get("depends_on", []),
+                **info,
+                "persona_model": None,
+            }
+        )
+    return phase_rows
 
 
 # ─── Event helpers ────────────────────────────────────────────────────────────
@@ -1565,97 +1695,29 @@ async def preview_phases(method_id: str):
     For each phase, reports the full Phase → Agent → Persona → Model chain
     so the frontend can show the user what will actually run.
     """
-    from app.services.phase_templates import get_phases_for_method, list_supported_methods
-    from app.models.agent import Agent
-    from app.models.persona import Persona
-    try:
-        phases = get_phases_for_method(method_id)
-    except KeyError:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Method '{method_id}' not supported. Available: {list_supported_methods()}"
-        )
-
-    from app.routes.workbench import _resolve_model
-    from sqlalchemy import func as sqlfunc
-    async with AsyncSessionLocal() as db:
-        # All active agents keyed by method_phase
-        agent_rows = (await db.execute(
-            select(Agent).where(Agent.is_active == True).where(Agent.method_phase.isnot(None))
-        )).scalars().all()
-        agent_by_phase = {}
-        for a in agent_rows:
-            key = (a.method_phase or "").lower()
-            if key and key not in agent_by_phase:  # first wins (ordered by created_at already? no — keep consistent)
-                agent_by_phase[key] = a
-
-        persona_rows = (await db.execute(select(Persona))).scalars().all()
-        persona_by_id = {str(p.id): p for p in persona_rows}
-        persona_by_name = {p.name.lower(): p for p in persona_rows}
-
-    async def chain_info(phase_name: str) -> dict:
-        """Resolve the agent → persona → model chain for this phase."""
-        result = {
-            "has_agent": False, "agent_name": None,
-            "has_persona": False, "persona_name": None,
-            "resolved_model": None, "resolved_via": None,
-        }
-        # 1. Agent bound via method_phase
-        agent = agent_by_phase.get(phase_name.lower())
-        if agent:
-            result["has_agent"] = True
-            result["agent_name"] = agent.name
-            # 1a. Agent -> Persona -> Model
-            if agent.persona_id:
-                persona = persona_by_id.get(str(agent.persona_id))
-                if persona:
-                    result["has_persona"] = True
-                    result["persona_name"] = persona.name
-                    if persona.primary_model_id:
-                        m, _ = await _resolve_model(str(persona.primary_model_id))
-                        if m:
-                            result["resolved_model"] = m.model_id
-                            result["resolved_via"] = "agent→persona"
-                            return result
-            # 1b. Agent -> direct model
-            if agent.model_id:
-                m, _ = await _resolve_model(str(agent.model_id))
-                if m:
-                    result["resolved_model"] = m.model_id
-                    result["resolved_via"] = "agent→model"
-                    return result
-        # 2. Legacy fallback — persona matching the phase name directly
-        persona = persona_by_name.get(phase_name.lower())
-        if persona:
-            result["has_persona"] = True
-            result["persona_name"] = persona.name
-            if persona.primary_model_id:
-                m, _ = await _resolve_model(str(persona.primary_model_id))
-                if m:
-                    result["resolved_model"] = m.model_id
-                    result["resolved_via"] = "persona name-match"
-                    return result
-        # 3. Nothing resolved — frontend will show template default
-        return result
-
-    phase_rows = []
-    for p in phases:
-        info = await chain_info(p["name"])
-        phase_rows.append(
-            {
-                "name": p["name"],
-                "role": p["role"],
-                "default_model": p["default_model"],
-                "artifact_type": p["artifact_type"],
-                "depends_on": p.get("depends_on", []),
-                **info,
-                # Back-compat for existing frontend code
-                "persona_model": None,  # replaced by resolved_model
-            }
-        )
+    phase_rows = await _build_phase_preview_rows(method_id)
 
     return {
         "method_id": method_id,
+        "phases": phase_rows,
+    }
+
+
+@router.post("/methods/preview", dependencies=[Depends(verify_api_key)])
+async def preview_phases_with_stack(body: PipelinePhasePreviewRequest):
+    """Stack-aware runtime preview used by the launcher before pipeline creation."""
+    effective_method_id, requested_stack, stacked_prompt, layered_methods = _resolve_pipeline_method_selection(
+        body.method_id,
+        body.stack_override,
+    )
+    phase_rows = await _build_phase_preview_rows(effective_method_id)
+
+    return {
+        "method_id": body.method_id,
+        "effective_method_id": effective_method_id,
+        "stack_override": requested_stack,
+        "layered_methods": layered_methods,
+        "stacked_prompt_applied": bool(stacked_prompt),
         "phases": phase_rows,
     }
 
@@ -1671,34 +1733,12 @@ async def create_pipeline(body: PipelineCreate, request: Request, db: AsyncSessi
     # stack from the Methods page. The primary (first) method in the stack
     # determines the phase structure; other stacked methods' prompts get
     # injected into every phase.
-    from app.routes.methods import _load_state as _load_method_state, BUILT_IN_METHODS, _build_stack_prompt
-    effective_method_id = body.method_id
-    stacked_prompt = ""  # extra prompt from non-primary stacked methods
-    requested_stack = [m for m in (body.stack_override or []) if m != "standard"]
-    invalid_stack = [m for m in requested_stack if m not in BUILT_IN_METHODS]
-    if invalid_stack:
-        raise HTTPException(status_code=400, detail=f"Unknown methods in stack_override: {invalid_stack}")
-
-    if body.method_id in ("stack", "active"):
-        method_state = _load_method_state()
-        stack = requested_stack or method_state.get("active_stack", [])
-        primary = stack[0] if stack else method_state.get("active_method", "standard")
-        effective_method_id = primary
-        # Build stacked prompt from non-primary methods
-        non_primary = [m for m in stack if m != primary]
-        if non_primary:
-            stacked_prompt = _build_stack_prompt(non_primary)
-            logger.info(f"Pipeline using stack: primary={primary}, also applying: {non_primary}")
-    elif body.method_id in ("bmad", "gsd", "superpowers", "specaudit", "mvp-loop"):
-        # Explicit single method — still check if there are stacked methods
-        # that should layer on top.
-        method_state = _load_method_state()
-        stack = requested_stack or method_state.get("active_stack", [])
-        if len(stack) > 1 and body.method_id in stack:
-            non_primary = [m for m in stack if m != body.method_id]
-            if non_primary:
-                stacked_prompt = _build_stack_prompt(non_primary)
-                logger.info(f"Pipeline method={body.method_id}, layering stack: {non_primary}")
+    effective_method_id, requested_stack, stacked_prompt, layered_methods = _resolve_pipeline_method_selection(
+        body.method_id,
+        body.stack_override,
+    )
+    if layered_methods:
+        logger.info(f"Pipeline method={effective_method_id}, layering stack: {layered_methods}")
 
     # Validate method — check custom methods (DB) first, then built-in
     try:

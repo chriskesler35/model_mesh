@@ -138,6 +138,9 @@ export default function WorkbenchListPage() {
   const [stackPresets, setStackPresets] = useState<MethodStackPreset[]>([])
   const [selectedStack, setSelectedStack] = useState<string[]>([])
   const [selectedStackCompatibility, setSelectedStackCompatibility] = useState<StackCompatibility | null>(null)
+  const [runtimeEffectiveMethod, setRuntimeEffectiveMethod] = useState<string>('')
+  const [runtimeLayeredMethods, setRuntimeLayeredMethods] = useState<string[]>([])
+  const [runtimeStackedPromptApplied, setRuntimeStackedPromptApplied] = useState(false)
 
   const fetchSessions = useCallback(async () => {
     const apiBase = getApiBase()
@@ -253,17 +256,41 @@ export default function WorkbenchListPage() {
 
   // Fetch phase preview when pipeline method changes
   useEffect(() => {
-    if (!asPipeline || !pipelineMethod) { setPhasePreview([]); return }
+    if (!asPipeline || !pipelineMethod) {
+      setPhasePreview([])
+      setRuntimeEffectiveMethod('')
+      setRuntimeLayeredMethods([])
+      setRuntimeStackedPromptApplied(false)
+      return
+    }
     const apiBase = getApiBase()
     const authHeaders = getAuthHeaders()
-    fetch(`${apiBase}/v1/workbench/pipelines/methods/${pipelineMethod}/phases`, { headers: authHeaders })
+    const launchStack = selectedStack.length > 0 ? selectedStack : (activeStack.length > 1 ? activeStack : [])
+    const previewMethodId = launchStack.length > 1 ? 'stack' : (launchStack[0] || pipelineMethod)
+
+    fetch(`${apiBase}/v1/workbench/pipelines/methods/preview`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        method_id: previewMethodId,
+        stack_override: launchStack.length > 1 ? launchStack : undefined,
+      }),
+    })
       .then(r => r.ok ? r.json() : { phases: [] })
       .then(d => {
         setPhasePreview(d.phases || [])
+        setRuntimeEffectiveMethod(String(d.effective_method_id || previewMethodId || ''))
+        setRuntimeLayeredMethods(Array.isArray(d.layered_methods) ? d.layered_methods : [])
+        setRuntimeStackedPromptApplied(Boolean(d.stacked_prompt_applied))
         setModelOverrides({})
       })
-      .catch(() => setPhasePreview([]))
-  }, [asPipeline, pipelineMethod])
+      .catch(() => {
+        setPhasePreview([])
+        setRuntimeEffectiveMethod('')
+        setRuntimeLayeredMethods([])
+        setRuntimeStackedPromptApplied(false)
+      })
+  }, [asPipeline, pipelineMethod, selectedStack, activeStack])
 
   // Fetch available models for the dropdown.
   // Always refresh when opening the modal and paginate to avoid missing newer entries.
@@ -969,6 +996,17 @@ export default function WorkbenchListPage() {
                     {(selectedStack.length > 0 || activeStack.length > 1) && (
                       <div className="text-[11px] text-indigo-800 dark:text-indigo-200 bg-white/70 dark:bg-gray-900/30 border border-indigo-200 dark:border-indigo-800 rounded-lg px-3 py-2">
                         Launch stack: <span className="font-semibold">{(selectedStack.length > 0 ? selectedStack : activeStack).join(' + ')}</span>
+                      </div>
+                    )}
+                    {(runtimeEffectiveMethod || runtimeLayeredMethods.length > 0) && (
+                      <div className="text-[11px] text-indigo-800 dark:text-indigo-200 bg-white/70 dark:bg-gray-900/30 border border-indigo-200 dark:border-indigo-800 rounded-lg px-3 py-2 space-y-1">
+                        <div><span className="font-semibold">Runtime phase engine:</span> {(runtimeEffectiveMethod || pipelineMethod).toUpperCase()}</div>
+                        {runtimeLayeredMethods.length > 0 && (
+                          <div><span className="font-semibold">Layered instructions:</span> {runtimeLayeredMethods.map(m => m.toUpperCase()).join(' + ')}</div>
+                        )}
+                        {runtimeStackedPromptApplied && (
+                          <div className="text-[10px] text-indigo-700 dark:text-indigo-300">All layered methods are appended to each phase system prompt at runtime.</div>
+                        )}
                       </div>
                     )}
                     <label className="flex items-center gap-2 text-xs text-indigo-900 dark:text-indigo-200">
