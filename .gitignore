@@ -97,3 +97,15 @@ data/
 # PM2 startup scripts (machine-specific)
 .pm2/
 
+# Claude/Copilot local agent worktrees (ephemeral)
+.claude/worktrees/
+
+# Temporary local utility scripts/files
+.tmp_*.py
+.devforgeai.start.lock
+
+# E2E generated artifacts
+tests/e2e/playwright-report/
+tests/e2e/test-results/
+tests/e2e/.tmp-regression-output.txt
+
