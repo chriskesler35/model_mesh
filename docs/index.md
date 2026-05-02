@@ -39,6 +39,7 @@
 - [Architecture — Frontend](./architecture-frontend.md) — Next.js App Router, state management, real-time patterns
 - [Architecture — Extension](./architecture-extension.md) — VS Code command-based architecture + 5 known issues
 - [Integration Architecture](./integration-architecture.md) — How backend, frontend, and extension communicate
+- [Agentic Layer Plan](./agentic-layer-plan.md) — Blueprint for guaranteed true-agentic behavior and phased rollout
 - [Source Tree Analysis](./source-tree-analysis.md) — Annotated directory structure with file descriptions
 
 ### API & Data
@@ -50,6 +51,7 @@
 
 ### Development
 - [Development Guide](./development-guide.md) — Prerequisites, installation, running, testing, building
+- [UX + Methods + Skills 90-Day Implementation Plan](./UX_METHODS_SKILLS_90_DAY_IMPLEMENTATION_PLAN.md) — Guided/pro UX strategy, method stack launcher, and GitHub/Hugging Face skills marketplace rollout
 
 ## Existing Documentation
 

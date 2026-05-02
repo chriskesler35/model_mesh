@@ -12,16 +12,26 @@ import path from 'path'
 const FRONTEND_DIR = process.cwd()
 const NEXT_DIR = path.join(FRONTEND_DIR, '.next')
 const CACHE_DIR = path.join(NEXT_DIR, 'cache')
-const BACKEND_PORT = 19001
+const PRIMARY_BACKEND_PORT = Number(process.env.DEVFORGEAI_BACKEND_PORT || process.env.NEXT_PUBLIC_BACKEND_PORT || '19000')
+const BACKEND_PORT_CANDIDATES = Array.from(new Set([PRIMARY_BACKEND_PORT, 19001, 19000]))
 
 export async function GET() {
   let backendHealthy = false
-  try {
-    const res = await fetch(`http://localhost:${BACKEND_PORT}/`, {
-      signal: AbortSignal.timeout(3000),
-    })
-    backendHealthy = res.ok
-  } catch { /* backend unreachable */ }
+  let activeBackendPort: number | null = null
+  for (const port of BACKEND_PORT_CANDIDATES) {
+    try {
+      const res = await fetch(`http://localhost:${port}/`, {
+        signal: AbortSignal.timeout(3000),
+      })
+      if (res.ok) {
+        backendHealthy = true
+        activeBackendPort = port
+        break
+      }
+    } catch {
+      // try next candidate
+    }
+  }
 
   const cacheExists = fs.existsSync(CACHE_DIR)
   const nextExists = fs.existsSync(NEXT_DIR)
@@ -30,6 +40,7 @@ export async function GET() {
     status: 'ok',
     frontend: 'running',
     backend: backendHealthy ? 'healthy' : 'unreachable',
+    backendPort: activeBackendPort,
     cache: cacheExists ? 'present' : 'clean',
     buildDir: nextExists,
     timestamp: new Date().toISOString(),

@@ -385,11 +385,271 @@ Be specific. Cite files/functions as evidence. Flag any gaps honestly."""
 ]
 
 
+# ─── Spec Audit — review previous workflow against spec + runtime (5 phases) ──
+SPECAUDIT_PHASES: List[Dict[str, Any]] = [
+        {
+                "name": "SpecIntake",
+                "role": "Specification Analyst",
+                "default_model": _REASONING_MODEL,
+                "artifact_type": "json",
+                "depends_on": [],
+                "system_prompt": """You are a Specification Analyst. Extract acceptance criteria from available project/spec artifacts.
+
+Do not write code. Build a strict audit baseline.
+
+Output JSON in a ```json block:
+{
+    "spec_sources": ["<files/docs used as source of truth>"],
+    "acceptance_criteria": [
+        {"id": "AC-1", "criterion": "<testable statement>", "priority": "P0|P1|P2"}
+    ],
+    "assumptions": ["<if spec is incomplete, list assumptions>"]
+}
+"""
+        },
+        {
+                "name": "ImplementationAudit",
+                "role": "Implementation Auditor",
+                "default_model": _REVIEW_MODEL,
+                "artifact_type": "json",
+                "depends_on": ["SpecIntake"],
+                "system_prompt": """You are an Implementation Auditor. Compare implementation to acceptance criteria.
+
+Read the project snapshot and prior phase artifacts. Do not modify code.
+
+Output JSON in a ```json block:
+{
+    "traceability": [
+        {"criterion_id": "AC-1", "status": "met|partial|unmet", "evidence": ["<file/function evidence>"]}
+    ],
+    "missing_coverage": ["<criterion ids not evidenced>"],
+    "high_risk_areas": ["<areas likely to fail at runtime>"]
+}
+"""
+        },
+        {
+                "name": "RuntimeVerifier",
+                "role": "Runtime Verification Engineer",
+                "default_model": _FAST_MODEL,
+                "artifact_type": "json",
+                "depends_on": ["ImplementationAudit"],
+                "system_prompt": """You are a Runtime Verification Engineer.
+
+Design and execute practical runtime checks via CMD blocks where possible (install, tests, startup, smoke checks).
+
+Output JSON in a ```json block:
+{
+    "commands_run": [
+        {"command": "<cmd>", "exit_code": 0, "summary": "<what happened>"}
+    ],
+    "runtime_verdict": "passes|partial|fails",
+    "failures": [
+        {"severity": "critical|high|medium|low", "description": "<issue>", "evidence": "<command/output>"}
+    ]
+}
+"""
+        },
+        {
+                "name": "QAGate",
+                "role": "QA Gatekeeper",
+                "default_model": _REVIEW_MODEL,
+                "artifact_type": "json",
+                "depends_on": ["RuntimeVerifier"],
+                "system_prompt": """You are a QA Gatekeeper. Produce a go/no-go decision.
+
+Use acceptance criteria + implementation + runtime evidence from prior phases.
+
+Output JSON in a ```json block:
+{
+    "go_no_go": "go|no_go",
+    "blocking_issues": [
+        {"id": "ISS-1", "severity": "critical|high", "reason": "<why blocking>", "owner": "<role>"}
+    ],
+    "non_blocking_issues": ["<medium/low issues>"]
+}
+"""
+        },
+        {
+                "name": "Report",
+                "role": "Release Readiness Reporter",
+                "default_model": _FAST_MODEL,
+                "artifact_type": "md",
+                "depends_on": ["QAGate"],
+                "system_prompt": """You are a Release Readiness Reporter.
+
+Generate a concise markdown audit report from prior artifacts.
+
+Sections required:
+# Spec Audit Report
+## Scope and Sources
+## Acceptance Criteria Summary
+## Runtime Verification Results
+## Findings by Severity
+## Go/No-Go Decision
+## Recommended Next Actions
+"""
+        },
+]
+
+
+# ─── MVP Loop — contract-first MVP delivery with user checkpoints (6 phases) ──
+MVP_LOOP_PHASES: List[Dict[str, Any]] = [
+        {
+                "name": "ContractIntake",
+                "role": "MVP Contract Analyst",
+                "default_model": _REASONING_MODEL,
+                "artifact_type": "json",
+                "depends_on": [],
+                "system_prompt": """You are an MVP Contract Analyst.
+
+Build a strict implementation contract before coding begins. Do not write code.
+
+Output JSON in a ```json block:
+{
+    "mvp_goal": "<single sentence outcome>",
+    "use_cases": [
+        {"id": "UC-1", "actor": "<user>", "scenario": "<what they need>", "priority": "P0|P1|P2"}
+    ],
+    "acceptance_criteria": [
+        {"id": "AC-1", "use_case_id": "UC-1", "criterion": "<testable statement>", "priority": "P0|P1|P2"}
+    ],
+    "constraints": ["<time/tech/compliance constraints>"],
+    "out_of_scope": ["<explicitly excluded items>"],
+    "open_questions_for_user": ["<only truly blocking questions>"]
+}
+
+Prefer minimal P0 scope. Keep criteria measurable and unambiguous.
+"""
+        },
+        {
+                "name": "PlanWithUser",
+                "role": "Delivery Planner",
+                "default_model": _FAST_MODEL,
+                "artifact_type": "json",
+                "depends_on": ["ContractIntake"],
+                "system_prompt": """You are a Delivery Planner.
+
+Translate the MVP contract into an implementation plan optimized for one-pass delivery.
+Do not write code.
+
+Output JSON in a ```json block:
+{
+    "execution_plan": [
+        {"step": 1, "objective": "<what to build>", "maps_to": ["AC-1"], "risk": "low|medium|high"}
+    ],
+    "build_order": ["<ordered major components>"] ,
+    "test_strategy": ["<how each P0 criterion will be verified>"],
+    "decision_ledger": [
+        {"decision": "<choice>", "rationale": "<why>", "impact": "<scope/risk impact>"}
+    ]
+}
+
+Every step must reference acceptance criteria IDs.
+"""
+        },
+        {
+                "name": "BuildMVP",
+                "role": "MVP Engineer",
+                "default_model": _CODER_MODEL,
+                "artifact_type": "code",
+                "depends_on": ["PlanWithUser"],
+                "system_prompt": """You are an MVP Engineer.
+
+Implement the MVP plan and satisfy P0 acceptance criteria first.
+
+Write complete runnable code in FILE blocks and setup/verification commands in CMD blocks.
+
+FILE: <relative/path/to/file.ext>
+```<language>
+<complete file content>
+```
+
+CMD: <single shell command>
+
+Rules:
+- Edit existing project files from snapshot context when possible.
+- Keep implementation narrowly scoped to MVP contract.
+- Include README/run instructions if they are missing or stale.
+- After code blocks, include a short mapping: AC id -> implemented files/components.
+"""
+        },
+        {
+                "name": "CoverageAudit",
+                "role": "Coverage Auditor",
+                "default_model": _REVIEW_MODEL,
+                "artifact_type": "json",
+                "depends_on": ["BuildMVP"],
+                "system_prompt": """You are a Coverage Auditor.
+
+Evaluate implementation coverage against acceptance criteria.
+Do not modify code.
+
+Output JSON in a ```json block:
+{
+    "coverage_matrix": [
+        {"criterion_id": "AC-1", "status": "met|partial|unmet", "evidence": ["<file/function/test>"]}
+    ],
+    "blockers": [
+        {"id": "BLK-1", "severity": "critical|high", "criterion_id": "AC-1", "reason": "<why unmet>"}
+    ],
+    "non_blocking_gaps": ["<remaining gaps>"],
+    "mvp_readiness_score": 0
+}
+
+Score from 0-100 with strict evidence requirements.
+"""
+        },
+        {
+                "name": "RuntimeQAGate",
+                "role": "Runtime QA Gatekeeper",
+                "default_model": _FAST_MODEL,
+                "artifact_type": "json",
+                "depends_on": ["CoverageAudit"],
+                "system_prompt": """You are a Runtime QA Gatekeeper.
+
+Run practical runtime checks using CMD blocks where possible and produce ship readiness.
+
+Output JSON in a ```json block:
+{
+    "commands_run": [
+        {"command": "<cmd>", "exit_code": 0, "summary": "<result>"}
+    ],
+    "qa_gate": "pass|conditional_pass|fail",
+    "critical_failures": ["<runtime or reliability blockers>"],
+    "release_recommendation": "ship_mvp|ship_with_known_gaps|do_not_ship"
+}
+"""
+        },
+        {
+                "name": "MVPReport",
+                "role": "MVP Release Reporter",
+                "default_model": _FAST_MODEL,
+                "artifact_type": "md",
+                "depends_on": ["RuntimeQAGate"],
+                "system_prompt": """You are an MVP Release Reporter.
+
+Generate a concise markdown decision report from prior artifacts.
+
+Required sections:
+# MVP Loop Report
+## MVP Goal and Scope
+## Acceptance Criteria Coverage
+## Runtime QA Outcome
+## Blockers and Risks
+## Final Recommendation
+## Iteration 2 Backlog (only unmet/partial criteria)
+"""
+        },
+]
+
+
 # ─── Method → phases mapping ──────────────────────────────────────────────────
 METHOD_PHASE_TEMPLATES: Dict[str, List[Dict[str, Any]]] = {
     "bmad":        BMAD_PHASES,
     "gsd":         GSD_PHASES,
     "superpowers": SUPERPOWERS_PHASES,
+    "specaudit":   SPECAUDIT_PHASES,
+    "mvp-loop":    MVP_LOOP_PHASES,
 }
 
 

@@ -256,7 +256,7 @@ def _infer_model_capabilities(model_id: str, supported_methods: Optional[list[st
     if any(token in normalized for token in ("babbage", "davinci")):
         return {"legacy_completion": True}
 
-    if any(token in normalized for token in ("imagen", "dall-e", "flux", "stable-diffusion", "sdxl")):
+    if any(token in normalized for token in ("imagen", "dall-e", "flux", "stable-diffusion", "sdxl", "gpt-image", "chatgpt-image")):
         return {"image_generation": True}
 
     capabilities: dict[str, bool] = {"chat": True, "streaming": True}
@@ -945,3 +945,59 @@ async def sync_status(db: AsyncSession = Depends(get_db)):
             for name, has_key in providers_status.items()
         },
     }
+
+
+@router.post("/cleanup")
+async def cleanup_and_resync(db: AsyncSession = Depends(get_db)):
+    """
+    DESTRUCTIVE OPERATION: Deletes all models from the database and re-syncs from provider catalogs.
+
+    This removes junk/stale models and starts fresh. All references to deleted models
+    (in personas, agents, request logs) will be set to NULL.
+
+    Returns: Summary of deleted models and fresh sync results.
+    """
+    logger.warning("=== DESTRUCTIVE MODEL CLEANUP STARTING ===")
+
+    # Get model counts before deletion
+    result = await db.execute(select(Model))
+    models_before = len(list(result.scalars().all()))
+
+    # Delete all models (cascading will handle cleanup)
+    result = await db.execute(delete(Model))
+    deleted_count = result.rowcount
+
+    # Also reset all providers to start fresh
+    result_providers = await db.execute(select(Provider))
+    for provider in result_providers.scalars().all():
+        provider.config = {}
+        provider.is_active = True
+
+    await db.flush()
+    logger.warning(f"Deleted {deleted_count} models from database")
+
+    # Now run fresh sync
+    try:
+        sync_result = await run_model_sync(db, deduplicate_existing=False)
+        logger.info(f"Fresh sync complete after cleanup: {len(sync_result['added'])} models added")
+
+        return {
+            "ok": True,
+            "cleanup": {
+                "deleted_models": deleted_count,
+                "models_before": models_before,
+            },
+            "fresh_sync": sync_result,
+            "message": f"Cleanup complete. {deleted_count} junk models removed. Fresh sync added {len(sync_result['added'])} active models.",
+        }
+    except Exception as e:
+        logger.error(f"Fresh sync failed after cleanup: {e}")
+        await db.rollback()
+        return {
+            "ok": False,
+            "error": f"Cleanup succeeded ({deleted_count} models deleted) but fresh sync failed: {str(e)}",
+            "cleanup": {
+                "deleted_models": deleted_count,
+                "models_before": models_before,
+            },
+        }

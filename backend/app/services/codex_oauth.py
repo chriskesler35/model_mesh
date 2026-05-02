@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 
 DEFAULT_CODEX_PROXY_BASE_URL = "http://127.0.0.1:10531/v1"
@@ -19,6 +21,26 @@ OPENAI_OAUTH_ACCESS_TOKEN_ENV = "OPENAI_OAUTH_ACCESS_TOKEN"
 OPENAI_OAUTH_REFRESH_TOKEN_ENV = "OPENAI_OAUTH_REFRESH_TOKEN"
 SUPPORTED_CODEX_PROXY_SCHEMES = {"http", "https"}
 _CODEX_PROXY_HEALTH_CACHE: dict[str, float | bool] = {"checked_at": 0.0, "reachable": False}
+
+
+def _probe_codex_proxy_http(timeout: float) -> bool:
+    """Require a real HTTP response from the configured proxy base URL.
+
+    A raw TCP connect can succeed against non-HTTP services and produce false
+    positives that later fail during LiteLLM requests.
+    """
+    base_url = get_codex_proxy_base_url().rstrip("/")
+    models_url = f"{base_url}/models"
+    req = Request(models_url, method="GET")
+    try:
+        with urlopen(req, timeout=timeout) as resp:  # nosec B310 - controlled local URL
+            status = int(getattr(resp, "status", 200) or 200)
+            return 200 <= status < 500
+    except HTTPError as e:
+        # 4xx still confirms the endpoint is a live HTTP service.
+        return 400 <= int(getattr(e, "code", 0) or 0) < 500
+    except (URLError, TimeoutError, OSError):
+        return False
 
 
 def get_codex_auth_file() -> Path:
@@ -149,15 +171,22 @@ def is_codex_proxy_reachable(timeout: float = 0.35, cache_ttl_seconds: float = 5
 
     parsed = urlparse(get_codex_proxy_base_url())
     host = parsed.hostname
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
     reachable = False
 
     if host:
-        try:
-            with socket.create_connection((host, port), timeout=timeout):
-                reachable = True
-        except OSError:
-            reachable = False
+        reachable = _probe_codex_proxy_http(timeout=max(timeout, 0.5))
+        if not reachable:
+            # Fallback TCP probe for diagnostics: only accept as reachable when
+            # the URL uses the default localhost endpoint and there is no Codex
+            # CLI installed (legacy local proxies). Otherwise require HTTP.
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            try:
+                with socket.create_connection((host, port), timeout=timeout):
+                    reachable = bool(
+                        is_default_codex_proxy_base_url() and not shutil.which("codex")
+                    )
+            except OSError:
+                reachable = False
 
     _CODEX_PROXY_HEALTH_CACHE["checked_at"] = now
     _CODEX_PROXY_HEALTH_CACHE["reachable"] = reachable
@@ -176,16 +205,21 @@ def should_use_codex_oauth_proxy(provider_name: str, api_key: str | None = None)
         return False
     if not codex_proxy_url_is_supported():
         return False
-    if not is_codex_proxy_reachable():
+    # Use a fresh health check for openai-codex to avoid a stale cached
+    # "reachable" result keeping us pinned to a dead local proxy.
+    health_ttl = 0.0 if normalized == "openai-codex" else 5.0
+    if not is_codex_proxy_reachable(cache_ttl_seconds=health_ttl):
         return False
-    # The dedicated Codex provider should always honor the local OAuth-backed
-    # proxy so it behaves like the user's VS Code / Codex CLI session.
+    prefer_proxy = os.environ.get("PREFER_CODEX_OAUTH", "").strip().lower() in ("1", "true", "yes")
+
+    # Dedicated Codex provider should use OAuth proxy transport by default.
+    # Users relying on OAuth tokens (without OPENAI_API_KEY) depend on this.
     if normalized == "openai-codex":
         return True
     # When the user sets PREFER_CODEX_OAUTH=1, route plain OpenAI models
     # through the OAuth proxy even if an API key is set. Useful when your
     # sk- key is dead/unfunded but you want ChatGPT Plus OAuth to do the work.
-    if os.environ.get("PREFER_CODEX_OAUTH", "").strip().lower() in ("1", "true", "yes"):
+    if prefer_proxy:
         return True
     # Plain OpenAI dual-mode: prefer a real API key when present,
     # otherwise fall back to the local OAuth proxy.

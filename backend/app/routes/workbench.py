@@ -16,7 +16,11 @@ from sqlalchemy import select, desc
 from pydantic import BaseModel
 from app.middleware.auth import verify_api_key
 from app.database import get_db, AsyncSessionLocal
-from app.services.provider_credentials import has_provider_api_key
+from app.services.provider_credentials import has_provider_api_key, get_provider_api_key
+from app.services.codex_oauth import should_use_codex_oauth_proxy
+from app.schemas.agentic import AgenticRunState
+from app.services.agentic_state_machine import AgenticStateMachine
+from app.services.agentic_events import build_agentic_event, compute_agentic_score
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +59,17 @@ def _push(session_id: str, type: str, **payload):
             _queues[session_id].put_nowait(evt)
         except asyncio.QueueFull:
             pass
+
+
+def _push_agentic_state(session_id: str, state: AgenticRunState, actor: str, **payload):
+    """Emit a normalized agentic event over the existing SSE/event log channel."""
+    event = build_agentic_event(
+        run_id=session_id,
+        state=state,
+        actor=actor,
+        payload=payload,
+    )
+    _push(session_id, "agentic_event", **event.model_dump())
 
 
 async def _db_update(session_id: str, **kwargs):
@@ -100,6 +115,10 @@ def _provider_has_credentials(provider_name: str) -> bool:
     p = (provider_name or "").lower()
     if p in ("ollama", "local", "lm-studio", "lmstudio", "llamacpp"):
         return True
+    if p == "openai-codex":
+        # openai-codex supports API-key mode OR Codex OAuth proxy mode.
+        api_key = get_provider_api_key("openai-codex")
+        return bool(api_key) or should_use_codex_oauth_proxy("openai-codex", api_key=api_key)
     if p in ("anthropic", "google", "openai", "openai-codex", "openrouter", "github-copilot"):
         return has_provider_api_key(p)
     # Unknown providers — assume yes and let the call fail loudly
@@ -127,6 +146,46 @@ def _enabled_capabilities(capabilities: Any) -> set[str]:
         for key, enabled in capabilities.items()
         if enabled and str(key) in runtime_relevant
     }
+
+
+def _runtime_fallback_capabilities(model_orm: Any) -> set[str]:
+    """Return the minimum runtime capabilities a fallback must satisfy.
+
+    If the requested model row is stale or missing capability metadata, default
+    to a chat-safe profile so we don't fall through into image/audio models.
+    """
+    requested_caps = _enabled_capabilities(getattr(model_orm, "capabilities", None))
+    if requested_caps:
+        return requested_caps
+    return {"chat", "streaming"}
+
+
+def _runtime_error_deactivates_model(exc: Exception) -> bool:
+    low = str(exc).lower()
+    return any(marker in low for marker in (
+        "notfounderror",
+        "model_not_found",
+        "does not exist",
+        "404",
+    ))
+
+
+async def _mark_model_runtime_unavailable(model_id: str, *, warning: str, validation_error: str) -> None:
+    from app.models.model import Model as ModelORM
+
+    try:
+        async with AsyncSessionLocal() as db:
+            row = (await db.execute(select(ModelORM).where(ModelORM.id == model_id))).scalar_one_or_none()
+            if not row:
+                return
+            row.is_active = False
+            row.validation_status = "failed"
+            row.validation_source = "runtime_failure"
+            row.validation_warning = warning
+            row.validation_error = validation_error
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"Could not mark model {model_id} unavailable after runtime failure: {e}")
 
 
 def _should_failover_error(exc: Exception) -> bool:
@@ -185,22 +244,66 @@ def _humanize_model_error(err_str: str, model_id: str) -> str:
     return friendly
 
 
+def _normalize_model_ref_for_lookup(model_ref: str) -> str:
+    """Normalize common alias/versioned refs to stable catalog IDs for lookup.
+
+    This primarily protects Codex OAuth/OpenAI model refs where users or older
+    templates may use aliases like `gpt-5-codex`, `gpt-5.3`, or `gpt-5.4`.
+    """
+    ref = (model_ref or "").strip()
+    low = ref.lower()
+    alias_map = {
+        "gpt-5-codex": "gpt-5",
+        "gpt-5.3": "gpt-5",
+        "gpt-5.4": "gpt-5",
+        "gpt-5.3-codex": "gpt-5",
+        "gpt-5.4-codex": "gpt-5",
+    }
+    if low in alias_map:
+        return alias_map[low]
+
+    # Future-proof: map gpt-5.<minor> and gpt-5.<minor>-codex to gpt-5.
+    if re.fullmatch(r"gpt-5\.\d+(?:-codex)?", low):
+        return "gpt-5"
+
+    return ref
+
+
 async def _fetch_model_row(db: AsyncSession, model_ref: str, *, include_fuzzy: bool = True):
     from app.models.model import Model as ModelORM
     from app.models.provider import Provider as ProviderORM
 
+    normalized_ref = _normalize_model_ref_for_lookup(model_ref)
+
     result = await db.execute(
         select(ModelORM, ProviderORM)
         .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
-        .where(ModelORM.model_id == model_ref)
-        .limit(1)
+        .where(ModelORM.model_id == normalized_ref)
     )
-    row = result.first()
-    if row:
-        return row
+    rows = result.all()
+    if rows:
+        wants_codex = "codex" in str(model_ref).lower()
+
+        def _row_rank(item):
+            model_orm, provider_orm = item
+            provider_name = (provider_orm.name or "").lower()
+            codex_provider_rank = 0 if (wants_codex and provider_name == "openai-codex") else 1
+            ready_rank = 0 if _model_is_runtime_ready(model_orm, provider_orm) else 1
+            active_rank = 0 if model_orm.is_active else 1
+            validated_rank = 0 if (model_orm.validation_status or "unverified") == "validated" else 1
+            return (
+                codex_provider_rank,
+                ready_rank,
+                active_rank,
+                validated_rank,
+                -(model_orm.validated_at.timestamp() if model_orm.validated_at else 0),
+            )
+
+        rows.sort(key=_row_rank)
+        return rows[0]
 
     try:
-        model_uuid = uuid.UUID(str(model_ref))
+        model_uuid = uuid.UUID(str(normalized_ref))
     except (TypeError, ValueError):
         model_uuid = None
 
@@ -215,8 +318,8 @@ async def _fetch_model_row(db: AsyncSession, model_ref: str, *, include_fuzzy: b
         if row:
             return row
 
-    if include_fuzzy and model_ref:
-        last_part = str(model_ref).split("/")[-1]
+    if include_fuzzy and normalized_ref:
+        last_part = str(normalized_ref).split("/")[-1]
         result = await db.execute(
             select(ModelORM, ProviderORM)
             .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
@@ -233,6 +336,7 @@ async def _collect_runtime_fallbacks(
     model_ref: str,
     explicit_fallback_refs: Optional[list[str]] = None,
     *,
+    allow_catalog_fallbacks: bool = True,
     limit: int = 3,
 ):
     from app.models.model import Model as ModelORM
@@ -245,7 +349,7 @@ async def _collect_runtime_fallbacks(
         requested_row = await _fetch_model_row(db, model_ref, include_fuzzy=True)
         requested_model = requested_row[0] if requested_row else None
         requested_provider = requested_row[1] if requested_row else None
-        required_caps = _enabled_capabilities(getattr(requested_model, "capabilities", None))
+        required_caps = _runtime_fallback_capabilities(requested_model)
         requested_context = getattr(requested_model, "context_window", None)
 
         if requested_model:
@@ -262,6 +366,9 @@ async def _collect_runtime_fallbacks(
             candidates.append((model_orm, provider_orm, "configured fallback"))
             if len(candidates) >= limit:
                 return candidates
+
+        if not allow_catalog_fallbacks:
+            return candidates
 
         result = await db.execute(
             select(ModelORM, ProviderORM)
@@ -316,6 +423,7 @@ async def _build_runtime_model_chain(
     for model_orm, provider_orm, reason in await _collect_runtime_fallbacks(
         model_ref,
         explicit_fallback_refs=explicit_fallback_refs,
+        allow_catalog_fallbacks=bool(primary_model),
         limit=limit,
     ):
         if str(model_orm.id) in seen:
@@ -624,6 +732,10 @@ async def _run_turn(
     """
     started = datetime.utcnow()
     await _db_update(session_id, status="running", started_at=started)
+    state_machine = AgenticStateMachine()
+    state_machine.transition(AgenticRunState.PLANNING)
+    _push_agentic_state(session_id, state_machine.current, "orchestrator", turn="start")
+
     turn_num = (len([m for m in history if m.get("role") == "user"]) + 1)
     _push(session_id, "info", message=f"Turn {turn_num}: {user_message[:80]}{'…' if len(user_message) > 80 else ''}")
 
@@ -663,6 +775,9 @@ async def _run_turn(
     llm_success = True
     llm_error = None
 
+    state_machine.transition(AgenticRunState.EXECUTING)
+    _push_agentic_state(session_id, state_machine.current, "orchestrator", turn="llm_call")
+
     model_chain, preflight_note = await _build_runtime_model_chain(model_id)
     if not model_chain:
         _push(
@@ -673,6 +788,8 @@ async def _run_turn(
                 "and no validated fallback model was available."
             ),
         )
+        state_machine.transition(AgenticRunState.FAILED)
+        _push_agentic_state(session_id, state_machine.current, "orchestrator", reason="model_unresolved")
         await _db_update(session_id, status="failed", completed_at=datetime.utcnow())
         _push(session_id, "done", message="Session failed.", status="failed")
         return
@@ -712,6 +829,12 @@ async def _run_turn(
         except Exception as e:
             last_error = e
             logger.error(f"LLM call setup failed in workbench session {session_id} using {candidate_model.model_id}: {e}")
+            if _runtime_error_deactivates_model(e):
+                await _mark_model_runtime_unavailable(
+                    str(candidate_model.id),
+                    warning=f"Runtime call reported that model '{candidate_model.model_id}' is no longer available from its provider.",
+                    validation_error="model_not_in_runtime_api",
+                )
             if idx + 1 >= len(model_chain) or not _should_failover_error(e):
                 break
 
@@ -721,6 +844,8 @@ async def _run_turn(
         llm_success = False
         llm_error = friendly
         _push(session_id, "error", message=friendly)
+        state_machine.transition(AgenticRunState.FAILED)
+        _push_agentic_state(session_id, state_machine.current, "orchestrator", reason="llm_init_failed")
         _push(session_id, "done", message="Session failed.", status="failed")
         await _db_update(
             session_id,
@@ -793,6 +918,12 @@ async def _run_turn(
     except Exception as e:
         err_str = str(e)
         logger.error(f"LLM call failed in workbench session {session_id}: {e}")
+        if model_orm and _runtime_error_deactivates_model(e):
+            await _mark_model_runtime_unavailable(
+                str(model_orm.id),
+                warning=f"Runtime call reported that model '{model_orm.model_id}' is no longer available from its provider.",
+                validation_error="model_not_in_runtime_api",
+            )
         friendly = _humanize_model_error(err_str, model_orm.model_id if model_orm else model_id)
         llm_success = False
         llm_error = friendly
@@ -852,10 +983,14 @@ async def _run_turn(
     )
 
     if not llm_success:
+        state_machine.transition(AgenticRunState.FAILED)
+        _push_agentic_state(session_id, state_machine.current, "orchestrator", reason="llm_stream_failure")
         return
 
     if _pending_messages.get(session_id) == "cancelled":
         _push(session_id, "info", message="Session cancelled.")
+        state_machine.transition(AgenticRunState.CANCELLED)
+        _push_agentic_state(session_id, state_machine.current, "orchestrator", reason="user_cancelled")
         _push(session_id, "done", message="Session cancelled.", status="cancelled")
         await _db_update(
             session_id,
@@ -866,6 +1001,8 @@ async def _run_turn(
         return
 
     # ── Parse files ──────────────────────────────────────────────────────────
+    state_machine.transition(AgenticRunState.VERIFYING)
+    _push_agentic_state(session_id, state_machine.current, "verifier", check="parse_and_persist")
     _push(session_id, "agent_thought", thought="Parsing generated files…")
 
     # Log first 2000 chars of raw response for debugging
@@ -1069,6 +1206,8 @@ async def _run_turn(
 
     location = str(project_path) if project_path else "in-memory only (no project path)"
     _push(session_id, "agent_reply", message=commentary, files_changed=written)
+    state_machine.transition(AgenticRunState.COMPLETED)
+    _push_agentic_state(session_id, state_machine.current, "verifier", files_changed=len(written))
     _push(session_id, "done",
           message=f"Turn {turn_num} complete. {len(written)} file(s) updated in {location}. Send a follow-up to continue.",
           files_changed=written,
@@ -1344,6 +1483,22 @@ async def complete_session(session_id: str):
     _queues.pop(session_id, None)
     _pending_messages.pop(session_id, None)
     return {"ok": True}
+
+
+@router.get("/sessions/{session_id}/agentic", dependencies=[Depends(verify_api_key)])
+async def get_session_agentic_score(session_id: str):
+    """Return a phase-0 agentic score derived from the session event log."""
+    events = _event_logs.get(session_id, [])
+    if not events:
+        async with AsyncSessionLocal() as db:
+            from app.models.workbench import WorkbenchSession
+            row = (await db.execute(select(WorkbenchSession).where(WorkbenchSession.id == session_id))).scalar_one_or_none()
+            if not row:
+                raise HTTPException(status_code=404, detail="Session not found")
+            events = row.events_log or []
+
+    score = compute_agentic_score(events)
+    return score.model_dump()
 
 
 @router.get("/sessions/{session_id}/commands", dependencies=[Depends(verify_api_key)])

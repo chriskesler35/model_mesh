@@ -1,9 +1,11 @@
 'use client'
 
 import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+import WorkbenchSessionCard from '@/components/WorkbenchSessionCard'
+import SessionListToolbar, { SessionFilterKey, SessionSortKey } from '@/components/SessionListToolbar'
 
 import { useState, useEffect, useCallback } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -36,38 +38,6 @@ function timeAgo(dateStr: string | null): string {
   return `${h}h ago`
 }
 
-function duration(start: string | null, end: string | null): string {
-  if (!start) return '—'
-  const ms = new Date(end || new Date().toISOString()).getTime() - new Date(start).getTime()
-  const s = Math.floor(ms / 1000)
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  return `${m}m ${s % 60}s`
-}
-
-const STATUS_CONFIG: Record<string, { label: string; color: string; dot: string; animate: boolean }> = {
-  pending:   { label: 'Pending',   color: 'text-yellow-600 bg-yellow-50 border-yellow-200',  dot: 'bg-yellow-400', animate: true  },
-  running:   { label: 'Running',   color: 'text-blue-600 bg-blue-50 border-blue-200',        dot: 'bg-blue-500',   animate: true  },
-  completed: { label: 'Done',      color: 'text-green-600 bg-green-50 border-green-200',     dot: 'bg-green-500',  animate: false },
-  failed:    { label: 'Failed',    color: 'text-red-600 bg-red-50 border-red-200',           dot: 'bg-red-500',    animate: false },
-  cancelled: { label: 'Cancelled', color: 'text-gray-500 bg-gray-50 border-gray-200',        dot: 'bg-gray-400',   animate: false },
-}
-
-const AGENT_ICONS: Record<string, string> = {
-  coder: '💻', researcher: '🔍', designer: '🎨',
-  reviewer: '🔎', planner: '📋', executor: '⚡', writer: '✍️',
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.pending
-  return (
-    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${cfg.color}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot} ${cfg.animate ? 'animate-pulse' : ''}`} />
-      {cfg.label}
-    </span>
-  )
-}
-
 function StatCard({ label, value, sub, color = 'text-gray-900' }: {
   label: string; value: string | number; sub?: string; color?: string
 }) {
@@ -80,135 +50,23 @@ function StatCard({ label, value, sub, color = 'text-gray-900' }: {
   )
 }
 
-// ─── Session card ─────────────────────────────────────────────────────────────
-function SessionCard({ session, onCancel, onDelete }: {
-  session: WorkbenchSession
-  onCancel: (id: string) => void
-  onDelete: (id: string) => void
-}) {
-  const router = useRouter()
-  const icon = AGENT_ICONS[session.agent_type?.toLowerCase()] || '🤖'
-  const isActive = session.status === 'running' || session.status === 'pending'
-
-  const costStr = session.estimated_cost != null
-    ? session.estimated_cost < 0.001
-      ? `<$0.001`
-      : `$${session.estimated_cost.toFixed(4)}`
-    : null
-
-  const tokenStr = (session.input_tokens || session.output_tokens)
-    ? `${((session.input_tokens || 0) + (session.output_tokens || 0)).toLocaleString()} tokens`
-    : null
-
-  return (
-    <div
-      onClick={() => router.push(`/workbench/${session.id}`)}
-      className={`bg-white dark:bg-gray-800 rounded-xl border cursor-pointer transition-all hover:shadow-md ${
-        isActive
-          ? 'border-blue-200 dark:border-blue-700 shadow-sm shadow-blue-100 dark:shadow-none'
-          : 'border-gray-200 dark:border-gray-700 hover:border-gray-300'
-      }`}
-    >
-      <div className="px-5 py-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-start gap-3 min-w-0">
-            {/* Icon */}
-            <div className="relative flex-shrink-0 mt-0.5">
-              <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-xl ${
-                isActive ? 'bg-blue-50 dark:bg-blue-900/30' : 'bg-gray-50 dark:bg-gray-700'
-              }`}>
-                {icon}
-              </div>
-              {isActive && (
-                <span className="absolute -top-0.5 -right-0.5 flex h-3 w-3">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500" />
-                </span>
-              )}
-            </div>
-
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-sm font-semibold text-gray-900 dark:text-white capitalize">
-                  {session.agent_type}
-                </span>
-                <StatusBadge status={session.status} />
-                {session.model && (
-                  <span className="text-xs text-gray-400 font-mono truncate max-w-[160px]">
-                    {session.model.split('/').pop()}
-                  </span>
-                )}
-              </div>
-              <p className="text-sm text-gray-600 dark:text-gray-300 mt-0.5 line-clamp-2">{session.task}</p>
-              <div className="flex items-center gap-3 mt-1.5 text-xs text-gray-400 flex-wrap">
-                <span>{timeAgo(session.created_at)}</span>
-                {session.started_at && (
-                  <span>Duration: {duration(session.started_at, session.completed_at)}</span>
-                )}
-                {session.files.length > 0 && (
-                  <span className="text-green-600">📄 {session.files.length} file{session.files.length !== 1 ? 's' : ''}</span>
-                )}
-                {tokenStr && <span>{tokenStr}</span>}
-                {costStr && <span className="text-orange-500">{costStr}</span>}
-              </div>
-            </div>
-          </div>
-
-          {/* Actions — stop propagation so clicks don't navigate */}
-          <div className="flex items-center gap-2 flex-shrink-0" onClick={e => e.stopPropagation()}>
-            {isActive && (
-              <button
-                onClick={() => onCancel(session.id)}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg border border-red-200 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-              >
-                Cancel
-              </button>
-            )}
-            {!isActive && (
-              <button
-                onClick={() => onDelete(session.id)}
-                className="p-1.5 rounded-lg text-gray-300 hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-                title="Delete session"
-              >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                </svg>
-              </button>
-            )}
-            <svg className="w-4 h-4 text-gray-300 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-            </svg>
-          </div>
-        </div>
-
-        {/* File list for completed sessions */}
-        {session.files.length > 0 && (
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            {session.files.slice(0, 6).map(f => (
-              <span key={f} className="text-xs font-mono px-2 py-0.5 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 rounded">
-                {f}
-              </span>
-            ))}
-            {session.files.length > 6 && (
-              <span className="text-xs px-2 py-0.5 bg-gray-100 dark:bg-gray-700 text-gray-400 rounded">
-                +{session.files.length - 6} more
-              </span>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function AgentSessionsPage() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const [sessions, setSessions] = useState<WorkbenchSession[]>([])
   const [loading, setLoading] = useState(true)
-  const [filter, setFilter] = useState<string>('all')
+  const [filter, setFilter] = useState<SessionFilterKey>('all')
+  const [sort, setSort] = useState<SessionSortKey>('newest')
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
+
+  useEffect(() => {
+    const q = searchParams?.get('filter')
+    if (!q) return
+    const allowed = new Set<SessionFilterKey>(['all', 'active', 'running', 'pending', 'completed', 'failed'])
+    if (allowed.has(q as SessionFilterKey)) setFilter(q as SessionFilterKey)
+  }, [searchParams])
 
   const fetchSessions = useCallback(async () => {
     try {
@@ -244,10 +102,26 @@ export default function AgentSessionsPage() {
     setSessions(prev => prev.filter(s => s.id !== id))
   }
 
-  const filtered = filter === 'all' ? sessions : sessions.filter(s => s.status === filter)
+  const filtered = (() => {
+    let list =
+      filter === 'all'
+        ? sessions
+        : filter === 'active'
+          ? sessions.filter(s => s.status === 'running' || s.status === 'pending')
+          : sessions.filter(s => s.status === filter)
+
+    if (sort === 'newest') list = [...list].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+    else if (sort === 'oldest') list = [...list].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+    else if (sort === 'status') {
+      const order: Record<string, number> = { running: 0, pending: 1, failed: 2, completed: 3, cancelled: 4 }
+      list = [...list].sort((a, b) => (order[a.status] ?? 5) - (order[b.status] ?? 5))
+    }
+    return list
+  })()
 
   const counts = {
     all:       sessions.length,
+    active:    sessions.filter(s => s.status === 'running' || s.status === 'pending').length,
     running:   sessions.filter(s => s.status === 'running').length,
     pending:   sessions.filter(s => s.status === 'pending').length,
     completed: sessions.filter(s => s.status === 'completed').length,
@@ -276,9 +150,9 @@ export default function AgentSessionsPage() {
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Agent Sessions</h1>
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Sessions</h1>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Workbench agent runs — click any session to view the event log
+            Live agent work tracking across Projects and Workbench
             {lastRefresh && <span className="ml-2 text-gray-400">· Updated {timeAgo(lastRefresh.toISOString())}</span>}
           </p>
         </div>
@@ -330,29 +204,14 @@ export default function AgentSessionsPage() {
         />
       </div>
 
-      {/* Filter tabs */}
-      <div className="flex items-center gap-1 border-b border-gray-200 dark:border-gray-700">
-        {(['all', 'running', 'pending', 'completed', 'failed'] as const).map(key => (
-          <button
-            key={key}
-            onClick={() => setFilter(key)}
-            className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium border-b-2 transition-colors capitalize ${
-              filter === key
-                ? 'border-orange-500 text-orange-600 dark:text-orange-400'
-                : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
-            }`}
-          >
-            {key}
-            {counts[key] > 0 && (
-              <span className={`text-xs px-1.5 py-0.5 rounded-full ${
-                filter === key ? 'bg-orange-100 text-orange-600 dark:bg-orange-900/30' : 'bg-gray-100 dark:bg-gray-700 text-gray-500'
-              }`}>
-                {counts[key]}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
+      {/* Filter toolbar */}
+      <SessionListToolbar
+        filter={filter}
+        sort={sort}
+        counts={counts}
+        onFilterChange={setFilter}
+        onSortChange={setSort}
+      />
 
       {/* Session list */}
       {filtered.length === 0 ? (
@@ -376,9 +235,10 @@ export default function AgentSessionsPage() {
       ) : (
         <div className="space-y-3">
           {filtered.map(s => (
-            <SessionCard
+            <WorkbenchSessionCard
               key={s.id}
               session={s}
+              onOpen={(id) => router.push(`/workbench/${id}`)}
               onCancel={cancelSession}
               onDelete={deleteSession}
             />

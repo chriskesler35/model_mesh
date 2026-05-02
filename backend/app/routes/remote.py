@@ -62,6 +62,15 @@ class HealthCheck(BaseModel):
 START_TIME = datetime.now()
 
 
+def _backend_port() -> int:
+    """Resolve active backend port with launcher-compatible defaults."""
+    raw = os.getenv("DEVFORGEAI_BACKEND_PORT", "19001")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 19001
+
+
 def _detect_tailscale_ip() -> Optional[str]:
     """Detect local Tailscale IPv4 address if available."""
     try:
@@ -313,12 +322,14 @@ async def get_tailscale_info():
     hostname = socket.gethostname()
     tailscale_ip = _detect_tailscale_ip()
     
+    backend_port = _backend_port()
+
     return {
         "hostname": hostname,
         "tailscale_ip": tailscale_ip,
-        "backend_port": 19000,
+        "backend_port": backend_port,
         "frontend_port": 3001,
-        "api_url": f"http://{tailscale_ip or hostname}:19000",
+        "api_url": f"http://{tailscale_ip or hostname}:{backend_port}",
         "frontend_url": f"http://{tailscale_ip or hostname}:3001",
         "instructions": {
             "tailscale": f"Connect via Tailscale: http://{tailscale_ip or '100.106.217.99'}:3001",
@@ -333,6 +344,7 @@ async def get_network_profiles():
 
     Returns detected IPs plus user-configured override URLs for each network.
     """
+    backend_port = _backend_port()
     hostname = socket.gethostname()
     tailscale_ip = _detect_tailscale_ip()
     wireguard_ip = _detect_wireguard_ip()
@@ -349,10 +361,11 @@ async def get_network_profiles():
 
     def _default_backend(ip: Optional[str]) -> str:
         host = ip or hostname
-        return f"http://{host}:19000"
+        return f"http://{host}:{backend_port}"
 
     return {
         "hostname": hostname,
+        "backend_port": backend_port,
         "profiles": {
             "tailscale": {
                 "network": "tailscale",

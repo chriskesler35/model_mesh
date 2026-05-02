@@ -5,8 +5,10 @@ export const revalidate = 0
 
 import { getApiBase, getAuthHeaders } from '@/lib/config'
 import { renderMarkdown } from '@/lib/markdown'
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+
+const TERMINAL_PIPELINE_STATUSES = new Set(['completed', 'failed', 'cancelled'])
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface PhaseDef {
@@ -34,6 +36,7 @@ interface PhaseRun {
     type: 'json' | 'md' | 'code'
     data?: any
     content?: string
+    review_markdown?: string
     files?: Array<{ path: string; content: string }>
     raw?: string
     files_written_to_disk?: string[]
@@ -75,6 +78,19 @@ interface ModelOption {
   model_id: string
   display_name?: string
   provider_name?: string
+}
+
+function getModelOptionLabel(models: ModelOption[], ref?: string | null) {
+  if (!ref) return ''
+  const match = models.find(model => model.id === ref || model.model_id === ref)
+  return match?.display_name || match?.model_id || ref
+}
+
+interface BackendStatus {
+  running: boolean
+  healthy: boolean
+  pid?: number | null
+  port?: number | null
 }
 
 // ─── Role → avatar mapping ────────────────────────────────────────────────────
@@ -240,9 +256,29 @@ function getApiErrorMessage(payload: any, status: number) {
 }
 
 // ─── Artifact viewer ──────────────────────────────────────────────────────────
-function ArtifactViewer({ artifact }: { artifact: PhaseRun['output_artifact'] }) {
+function ArtifactViewer({ artifact, rawFallback }: { artifact: PhaseRun['output_artifact']; rawFallback?: string | null }) {
   const [copied, setCopied] = useState(false)
-  if (!artifact) return <div className="text-sm text-gray-400 italic">No artifact yet.</div>
+  if (!artifact) {
+    if (rawFallback) {
+      return (
+        <div>
+          <div className="text-[11px] text-amber-600 dark:text-amber-400 mb-2 bg-amber-50 dark:bg-amber-900/20 px-3 py-1.5 rounded-lg">
+            Artifact is still loading — showing raw LLM response. You can approve/reject from here.
+          </div>
+          <div className="relative">
+            <button onClick={() => navigator.clipboard.writeText(rawFallback).catch(() => {})}
+              className="absolute top-2 right-2 z-10 text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-300 hover:bg-gray-700">
+              📋
+            </button>
+            <pre className="bg-gray-900 text-gray-200 rounded-lg p-3 text-xs overflow-auto max-h-[32rem] whitespace-pre-wrap">
+              {rawFallback}
+            </pre>
+          </div>
+        </div>
+      )
+    }
+    return <div className="text-sm text-gray-400 italic">No artifact yet.</div>
+  }
 
   const copy = (text: string) => {
     navigator.clipboard.writeText(text).catch(() => {})
@@ -252,15 +288,34 @@ function ArtifactViewer({ artifact }: { artifact: PhaseRun['output_artifact'] })
 
   if (artifact.type === 'json' && artifact.data) {
     const json = JSON.stringify(artifact.data, null, 2)
+    const reviewMarkdown = artifact.review_markdown || '## Structured Output\n\n```json\n' + json + '\n```'
     return (
-      <div className="relative">
-        <button onClick={() => copy(json)}
-          className="absolute top-2 right-2 z-10 text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-300 hover:bg-gray-700">
-          {copied ? '✓' : '📋'}
-        </button>
-        <pre className="bg-gray-900 text-green-300 rounded-lg p-3 text-xs overflow-auto max-h-96 font-mono leading-relaxed">
-          {json}
-        </pre>
+      <div className="space-y-3">
+        <div className="rounded-xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50/60 dark:bg-indigo-900/10 px-4 py-3">
+          <div className="text-[11px] uppercase tracking-wider text-indigo-600 dark:text-indigo-300 font-semibold mb-2">
+            Review Preview
+          </div>
+          <div
+            className="prose prose-sm dark:prose-invert max-w-none text-sm text-gray-700 dark:text-gray-200"
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(reviewMarkdown) }}
+          />
+        </div>
+
+        <details className="rounded-xl overflow-hidden border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900">
+          <summary className="cursor-pointer px-4 py-3 text-xs font-semibold text-gray-700 dark:text-gray-200 bg-gray-50 dark:bg-gray-800/60 flex items-center justify-between">
+            <span>Developer JSON</span>
+            <span className="text-gray-400">Expand raw structured data</span>
+          </summary>
+          <div className="relative border-t border-gray-200 dark:border-gray-700">
+            <button onClick={() => copy(json)}
+              className="absolute top-2 right-2 z-10 text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-300 hover:bg-gray-700">
+              {copied ? '✓' : '📋'}
+            </button>
+            <pre className="bg-gray-900 text-green-300 rounded-none p-3 text-xs overflow-auto max-h-96 font-mono leading-relaxed">
+              {json}
+            </pre>
+          </div>
+        </details>
       </div>
     )
   }
@@ -310,6 +365,7 @@ function ArtifactViewer({ artifact }: { artifact: PhaseRun['output_artifact'] })
 // ─── Phase Card ───────────────────────────────────────────────────────────────
 function PhaseCard({
   phase, run, isCurrent, onOpenApproval, onViewArtifact, onChangeModel,
+  previewResolvedModel, previewPersonaName, previewAssignedModelLabel,
 }: {
   phase: PhaseDef
   run: PhaseRun | null
@@ -317,6 +373,9 @@ function PhaseCard({
   onOpenApproval: (run: PhaseRun) => void
   onViewArtifact: (run: PhaseRun) => void
   onChangeModel: (run: PhaseRun) => void
+  previewResolvedModel?: string | null
+  previewPersonaName?: string | null
+  previewAssignedModelLabel?: string | null
 }) {
   const avatar = ROLE_AVATARS[phase.role] || { icon: '🤖', color: 'from-gray-400 to-gray-600' }
   const status = run?.status || 'pending'
@@ -324,7 +383,10 @@ function PhaseCard({
   const isRunning = status === 'running'
   const awaitingApproval = status === 'awaiting_approval'
   const tokens = (run?.input_tokens || 0) + (run?.output_tokens || 0)
-  const assignedModel = run?.model_id || phase.model || phase.default_model || '—'
+  // For phases that have run, use the recorded model_id.
+  // For pending phases, fall back to persona-resolved preview model if available.
+  const assignedModel = run?.model_id || previewAssignedModelLabel || previewResolvedModel || phase.default_model || '—'
+  const modelViaPersona = !run?.model_id && !phase.model && !!previewResolvedModel && !!previewPersonaName
   const canChangeModel = !!run && (status === 'failed' || status === 'awaiting_approval' || status === 'rejected')
 
   return (
@@ -348,7 +410,17 @@ function PhaseCard({
           </div>
         </div>
         <div className="mt-2 flex items-center justify-between text-[11px] text-gray-500 dark:text-gray-400">
-          <span className="font-mono truncate">{assignedModel}</span>
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="font-mono truncate">{assignedModel}</span>
+            {modelViaPersona && (
+              <span
+                className="flex-shrink-0 px-1 py-0.5 rounded text-[9px] font-semibold bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
+                title={`Model resolved via persona: ${previewPersonaName}`}
+              >
+                🎭 {previewPersonaName}
+              </span>
+            )}
+          </div>
           {tokens > 0 && <span>{tokens.toLocaleString()} tok</span>}
         </div>
       </div>
@@ -446,6 +518,14 @@ function ChangeModelModal({
   const [selectedModel, setSelectedModel] = useState(currentModel)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const modelsByProvider = useMemo(() => {
+    return models.reduce((acc, model) => {
+      const provider = model.provider_name || 'other'
+      if (!acc[provider]) acc[provider] = []
+      acc[provider].push(model)
+      return acc
+    }, {} as Record<string, ModelOption[]>)
+  }, [models])
 
   const handleSubmit = async () => {
     if (!selectedModel) {
@@ -506,10 +586,14 @@ function ChangeModelModal({
               className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
             >
               <option value="">Choose a validated model</option>
-              {models.map(model => (
-                <option key={model.id} value={model.model_id}>
-                  {model.display_name || model.model_id}{model.provider_name ? ` (${model.provider_name})` : ''}
-                </option>
+              {Object.entries(modelsByProvider).map(([provider, providerModels]) => (
+                <optgroup key={provider} label={provider.charAt(0).toUpperCase() + provider.slice(1)}>
+                  {providerModels.map(model => (
+                    <option key={model.id} value={model.id}>
+                      {model.display_name || model.model_id}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
             <div className="mt-1 text-[11px] text-gray-500">
@@ -593,7 +677,7 @@ function ApprovalModal({
         <div className="flex-1 overflow-auto px-6 py-4 space-y-4">
           <div>
             <div className="text-[11px] uppercase tracking-wider text-gray-400 font-semibold mb-2">Artifact</div>
-            <ArtifactViewer artifact={run.output_artifact} />
+            <ArtifactViewer artifact={run.output_artifact} rawFallback={run.raw_response} />
           </div>
 
           <div>
@@ -1018,7 +1102,11 @@ export default function PipelinePage() {
   const router = useRouter()
   const pipelineId = Array.isArray(params?.id) ? params.id[0] : params?.id as string
   const apiBase = getApiBase()
-  const authHeaders = getAuthHeaders()
+  const rawAuthHeaders = getAuthHeaders()
+  const authHeaders = useMemo(() => ({
+    'Authorization': rawAuthHeaders.Authorization,
+    'Content-Type': 'application/json',
+  }), [rawAuthHeaders.Authorization])
 
   const [pipeline, setPipeline] = useState<Pipeline | null>(null)
   const [phaseRuns, setPhaseRuns] = useState<PhaseRun[]>([])
@@ -1031,7 +1119,13 @@ export default function PipelinePage() {
   const [showSaveTemplate, setShowSaveTemplate] = useState(false)
   const [guidance, setGuidance] = useState('')
   const [sendingGuidance, setSendingGuidance] = useState(false)
+  const [recoveringPhase, setRecoveringPhase] = useState(false)
+  const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null)
+  const [checkingBackend, setCheckingBackend] = useState(false)
+  const [restartingBackend, setRestartingBackend] = useState(false)
   const [connectionState, setConnectionState] = useState<'connecting' | 'live' | 'reconnecting'>('connecting')
+  const [tickNow, setTickNow] = useState(() => Date.now())
+  const [phaseResolution, setPhaseResolution] = useState<Record<string, { resolved_model: string | null; persona_name: string | null }>>({})
 
   // Escape closes the read-only artifact modal
   useEffect(() => {
@@ -1044,6 +1138,16 @@ export default function PipelinePage() {
   const [actionError, setActionError] = useState<string | null>(null)
   const esRef = useRef<EventSource | null>(null)
   const seenEventKeysRef = useRef<Set<string>>(new Set())
+  const currentStatusRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    currentStatusRef.current = pipeline?.status || null
+  }, [pipeline?.status])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setTickNow(Date.now()), 30000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   const appendEvent = useCallback((evt: PipelineEvent) => {
     if (!evt || !evt.type || evt.type === 'ping' || evt.type === 'init') return
@@ -1081,7 +1185,11 @@ export default function PipelinePage() {
       setLoading(false)
       setLoadError(null)
     } catch (e: any) {
-      setLoadError(e.message || 'Failed to load pipeline')
+      // A dead network/backend while SSE is reconnecting can trigger transient
+      // fetch failures. Keep the warning concise so it doesn't look like a hard crash.
+      const msg = String(e?.message || 'Failed to load pipeline')
+      const isTransientNetwork = /failed to fetch|networkerror|network error/i.test(msg)
+      setLoadError(isTransientNetwork ? 'Temporary network issue while refreshing live activity. Reconnecting…' : msg)
       setLoading(false)
     }
   }, [apiBase, authHeaders, pipelineId])
@@ -1107,7 +1215,7 @@ export default function PipelinePage() {
         offset += limit
       }
 
-      const uniqueModels = Array.from(new Map(allModels.map(model => [model.model_id, model])).values())
+      const uniqueModels = Array.from(new Map(allModels.map(model => [model.id, model])).values())
       setModels(uniqueModels)
     } catch (e: any) {
       setActionError(e.message || 'Failed to load available models')
@@ -1119,6 +1227,73 @@ export default function PipelinePage() {
     if (!pipelineId) return
     refetch()
   }, [pipelineId, refetch])
+
+  // Fetch per-phase persona/model resolution for pending phase cards
+  useEffect(() => {
+    if (!pipeline?.method_id) return
+    fetch(`${apiBase}/v1/workbench/pipelines/methods/${pipeline.method_id}/phases`, { headers: authHeaders })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!d?.phases) return
+        const map: Record<string, { resolved_model: string | null; persona_name: string | null }> = {}
+        for (const ph of (d.phases as Array<{ name: string; resolved_model?: string | null; persona_name?: string | null }>)) {
+          map[ph.name] = { resolved_model: ph.resolved_model ?? null, persona_name: ph.persona_name ?? null }
+        }
+        setPhaseResolution(map)
+      })
+      .catch(() => {})
+  }, [pipeline?.method_id, apiBase, authHeaders])
+
+  const refreshBackendStatus = useCallback(async () => {
+    setCheckingBackend(true)
+    try {
+      const res = await fetch('/api/backend', { method: 'GET' })
+      const payload = await readApiPayload(res)
+      if (!res.ok) throw new Error(getApiErrorMessage(payload, res.status))
+      setBackendStatus({
+        running: !!payload?.running,
+        healthy: !!payload?.healthy,
+        pid: payload?.pid ?? null,
+        port: payload?.port ?? null,
+      })
+    } catch (e: any) {
+      setActionError(e.message || 'Failed to check backend status')
+    } finally {
+      setCheckingBackend(false)
+    }
+  }, [])
+
+  const restartBackend = useCallback(async () => {
+    setRestartingBackend(true)
+    setActionError(null)
+    try {
+      const res = await fetch('/api/backend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'restart' }),
+      })
+      const payload = await readApiPayload(res)
+      if (!res.ok || payload?.ok === false) {
+        throw new Error(getApiErrorMessage(payload, res.status))
+      }
+      await refreshBackendStatus()
+      await refetch()
+    } catch (e: any) {
+      setActionError(e.message || 'Failed to restart backend')
+    } finally {
+      setRestartingBackend(false)
+    }
+  }, [refreshBackendStatus, refetch])
+
+  useEffect(() => {
+    refreshBackendStatus()
+  }, [refreshBackendStatus])
+
+  useEffect(() => {
+    if (connectionState === 'reconnecting') {
+      refreshBackendStatus()
+    }
+  }, [connectionState, refreshBackendStatus])
 
   useEffect(() => {
     fetchModels()
@@ -1146,15 +1321,41 @@ export default function PipelinePage() {
           setPipeline(evt.payload)
           setPhaseRuns(evt.payload.phase_runs || [])
           setLoading(false)
+          if (TERMINAL_PIPELINE_STATUSES.has(evt.payload?.status)) {
+            // Replay-only streams for terminal pipelines close immediately.
+            // Close client-side too so EventSource doesn't auto-reconnect forever.
+            setConnectionState('live')
+            es.close()
+            esRef.current = null
+          }
           return
         }
         appendEvent(evt)
+        if (evt.type === 'pipeline_done') {
+          const status = evt.payload?.status
+          if (status) {
+            setPipeline(prev => prev ? { ...prev, status } : prev)
+          }
+          setConnectionState('live')
+          es.close()
+          esRef.current = null
+          return
+        }
         if (EVENT_REFRESH_TYPES.has(evt.type)) {
           refetch()
         }
       } catch {}
     }
-    es.onerror = () => { setConnectionState('reconnecting') }
+    es.onerror = () => {
+      // For terminal pipelines, don't flash reconnect state forever.
+      if (TERMINAL_PIPELINE_STATUSES.has(currentStatusRef.current || '')) {
+        setConnectionState('live')
+        es.close()
+        esRef.current = null
+        return
+      }
+      setConnectionState('reconnecting')
+    }
 
     return () => { es.close(); esRef.current = null }
   }, [apiBase, appendEvent, pipelineId, refetch])
@@ -1208,6 +1409,37 @@ export default function PipelinePage() {
     })
     refetch()
   }
+  const restartCurrentPhase = useCallback(async () => {
+    if (!pipeline) return
+    const stuckIndex = pipeline.current_phase_index
+    if (!confirm(`Restart phase ${stuckIndex + 1}? This will cancel the current run and retry that phase.`)) return
+
+    setRecoveringPhase(true)
+    setActionError(null)
+    try {
+      const cancelRes = await fetch(`${apiBase}/v1/workbench/pipelines/${pipelineId}/cancel`, {
+        method: 'POST', headers: authHeaders,
+      })
+      if (!cancelRes.ok) {
+        const payload = await readApiPayload(cancelRes)
+        throw new Error(getApiErrorMessage(payload, cancelRes.status))
+      }
+
+      const retryRes = await fetch(`${apiBase}/v1/workbench/pipelines/${pipelineId}/retry?phase_index=${stuckIndex}`, {
+        method: 'POST', headers: authHeaders,
+      })
+      if (!retryRes.ok) {
+        const payload = await readApiPayload(retryRes)
+        throw new Error(getApiErrorMessage(payload, retryRes.status))
+      }
+
+      await refetch()
+    } catch (e: any) {
+      setActionError(e.message || 'Failed to restart the current phase')
+    } finally {
+      setRecoveringPhase(false)
+    }
+  }, [apiBase, authHeaders, pipeline, pipelineId, refetch])
   const changePhaseModel = useCallback(async (phaseIndex: number, modelId: string) => {
     setActionError(null)
     const res = await fetch(`${apiBase}/v1/workbench/pipelines/${pipelineId}/phase-model`, {
@@ -1244,6 +1476,67 @@ export default function PipelinePage() {
     }
   }, [apiBase, authHeaders, guidance, pipelineId])
 
+  const pipelineStatus = pipeline?.status || 'pending'
+  const statusBadge = STATUS_STYLE[pipelineStatus] || STATUS_STYLE.pending
+  const totalTokens = phaseRuns.reduce((sum, r) => sum + (r.input_tokens || 0) + (r.output_tokens || 0), 0)
+  const currentPhaseRun = runsByIndex[pipeline?.current_phase_index ?? 0]
+  const currentPhaseRunSeconds = currentPhaseRun?.started_at
+    ? Math.max(0, Math.round((tickNow - new Date(currentPhaseRun.started_at).getTime()) / 1000))
+    : 0
+  const latestEventTs = (() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ts = events[i]?.ts
+      if (!ts) continue
+      const parsed = new Date(ts).getTime()
+      if (Number.isFinite(parsed) && parsed > 0) return parsed
+    }
+    return null
+  })()
+  const inactivitySeconds = latestEventTs
+    ? Math.max(0, Math.round((tickNow - latestEventTs) / 1000))
+    : currentPhaseRunSeconds
+  const likelyStuck = !!(
+    pipelineStatus === 'running' &&
+    currentPhaseRun &&
+    (
+      inactivitySeconds >= 180 ||
+      (connectionState === 'reconnecting' && currentPhaseRunSeconds >= 90)
+    )
+  )
+  const connectionLabel = connectionState === 'live' ? 'Live' : connectionState === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'
+  const lastEventAgo = (() => {
+    if (!latestEventTs) return null
+    if (inactivitySeconds < 30) return 'just now'
+    if (inactivitySeconds < 90) return `${inactivitySeconds}s ago`
+    const m = Math.floor(inactivitySeconds / 60)
+    const s = inactivitySeconds % 60
+    return s > 0 ? `${m}m ${s}s ago` : `${m}m ago`
+  })()
+  const connectionClasses = connectionState === 'live'
+    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+    : connectionState === 'reconnecting'
+      ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+      : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
+
+  // Parallel approval: all phases currently awaiting approval
+  const awaitingRuns = Object.values(runsByIndex).filter(r => r.status === 'awaiting_approval')
+  // Progress: count phases with terminal status
+  const completedCount = Object.values(runsByIndex).filter(r =>
+    r.status === 'approved' || r.status === 'skipped'
+  ).length
+  const totalPhases = pipeline?.phases?.length || 0
+  const latestEvent = [...events].reverse().find(evt => evt.type !== 'phase_progress') || null
+  const latestAlert = [...events].reverse().find(evt =>
+    evt.type === 'phase_failed' || evt.type === 'warning' || evt.type === 'awaiting_approval' || evt.type === 'pipeline_done'
+  ) || null
+  const latestEventSummary = latestEvent ? describeEvent(latestEvent, pipeline?.phases) : null
+  const latestAlertSummary = latestAlert ? describeEvent(latestAlert, pipeline?.phases) : null
+
+  useEffect(() => {
+    if (!likelyStuck) return
+    refreshBackendStatus()
+  }, [likelyStuck, refreshBackendStatus])
+
   if (loading) {
     return (
       <div className="flex justify-center py-20">
@@ -1267,30 +1560,6 @@ export default function PipelinePage() {
     )
   }
 
-  const statusBadge = STATUS_STYLE[pipeline.status] || STATUS_STYLE.pending
-  const totalTokens = phaseRuns.reduce((sum, r) => sum + (r.input_tokens || 0) + (r.output_tokens || 0), 0)
-  const currentPhaseRun = runsByIndex[pipeline.current_phase_index]
-  const connectionLabel = connectionState === 'live' ? 'Live' : connectionState === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'
-  const connectionClasses = connectionState === 'live'
-    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
-    : connectionState === 'reconnecting'
-      ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
-      : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
-
-  // Parallel approval: all phases currently awaiting approval
-  const awaitingRuns = Object.values(runsByIndex).filter(r => r.status === 'awaiting_approval')
-  // Progress: count phases with terminal status
-  const completedCount = Object.values(runsByIndex).filter(r =>
-    r.status === 'approved' || r.status === 'skipped'
-  ).length
-  const totalPhases = pipeline.phases.length
-  const latestEvent = [...events].reverse().find(evt => evt.type !== 'phase_progress') || null
-  const latestAlert = [...events].reverse().find(evt =>
-    evt.type === 'phase_failed' || evt.type === 'warning' || evt.type === 'awaiting_approval' || evt.type === 'pipeline_done'
-  ) || null
-  const latestEventSummary = latestEvent ? describeEvent(latestEvent, pipeline.phases) : null
-  const latestAlertSummary = latestAlert ? describeEvent(latestAlert, pipeline.phases) : null
-
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -1309,6 +1578,11 @@ export default function PipelinePage() {
             <span className={`text-xs font-semibold px-2 py-0.5 rounded ${connectionClasses}`}>
               {connectionLabel}
             </span>
+            {lastEventAgo && (
+              <span className="text-xs text-gray-400 dark:text-gray-500" title="Time since last SSE event">
+                · last event {lastEventAgo}
+              </span>
+            )}
             {pipeline.auto_approve && (
               <span className="text-xs font-semibold px-2 py-0.5 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300">
                 AUTO
@@ -1319,6 +1593,11 @@ export default function PipelinePage() {
           <div className="text-xs text-gray-500 mt-1">
             {pipeline.phases.length} phases · {totalTokens.toLocaleString()} tokens used
           </div>
+          {pipeline.status === 'running' && currentPhaseRun?.phase_name && currentPhaseRunSeconds > 0 && (
+            <div className="text-xs text-gray-500 mt-1">
+              Active phase: <span className="font-semibold">{currentPhaseRun.phase_name}</span> · running for {Math.floor(currentPhaseRunSeconds / 60)}m {currentPhaseRunSeconds % 60}s
+            </div>
+          )}
           {latestEventSummary && (
             <div className="mt-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/60 px-3 py-2">
               <div className="text-[11px] uppercase tracking-wider font-semibold text-gray-500 dark:text-gray-400">Latest update</div>
@@ -1346,6 +1625,16 @@ export default function PipelinePage() {
             <button onClick={pausePipeline}
               className="px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/60">
               Pause
+            </button>
+          )}
+          {pipeline.status === 'running' && (
+            <button
+              onClick={restartCurrentPhase}
+              disabled={recoveringPhase}
+              className="px-3 py-1.5 text-xs font-medium rounded-lg border border-amber-300 text-amber-700 hover:bg-amber-50 dark:hover:bg-amber-900/20 disabled:opacity-40"
+              title="If a phase looks stuck, cancel and retry just the current phase"
+            >
+              {recoveringPhase ? 'Restarting…' : 'Restart stuck phase'}
             </button>
           )}
           {pipeline.status === 'paused' && (
@@ -1393,6 +1682,39 @@ export default function PipelinePage() {
           {latestAlertSummary.detail && (
             <div className="text-sm text-gray-700 dark:text-gray-300 mt-1">{latestAlertSummary.detail}</div>
           )}
+        </div>
+      )}
+
+      {likelyStuck && (
+        <div className="rounded-2xl border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-900/20 px-4 py-3">
+          <div className="text-sm font-semibold text-amber-900 dark:text-amber-200">Potentially stuck phase detected</div>
+          <div className="text-sm text-amber-800 dark:text-amber-100 mt-1">
+            {currentPhaseRun?.phase_name || 'Current phase'} has shown no new activity for {Math.floor(inactivitySeconds / 60)}m {inactivitySeconds % 60}s.
+            Use the recovery actions below to unstick the workflow.
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              onClick={restartCurrentPhase}
+              disabled={recoveringPhase}
+              className="px-3 py-1.5 text-xs font-medium rounded-lg bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-40"
+            >
+              {recoveringPhase ? 'Restarting phase…' : 'Restart stuck phase'}
+            </button>
+            <button
+              onClick={refreshBackendStatus}
+              disabled={checkingBackend}
+              className="px-3 py-1.5 text-xs font-medium rounded-lg border border-amber-400 text-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900/30 disabled:opacity-40"
+            >
+              {checkingBackend ? 'Checking backend…' : 'Check backend process'}
+            </button>
+            <button
+              onClick={restartBackend}
+              disabled={restartingBackend}
+              className="px-3 py-1.5 text-xs font-medium rounded-lg border border-amber-500 text-amber-900 hover:bg-amber-100 dark:hover:bg-amber-900/30 disabled:opacity-40"
+            >
+              {restartingBackend ? 'Restarting backend…' : 'Restart backend'}
+            </button>
+          </div>
         </div>
       )}
 
@@ -1457,22 +1779,62 @@ export default function PipelinePage() {
           <div>
             <div className="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3">Phase Details</div>
             <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${Math.min(pipeline.phases.length, 3)}, minmax(240px, 1fr))` }}>
-              {pipeline.phases.map((phase, idx) => (
-                <PhaseCard
-                  key={idx}
-                  phase={phase}
-                  run={runsByIndex[idx] || null}
-                  isCurrent={idx === pipeline.current_phase_index && pipeline.status !== 'completed'}
-                  onOpenApproval={setApprovalRun}
-                  onViewArtifact={setViewArtifactRun}
-                  onChangeModel={setChangeModelRun}
-                />
-              ))}
+              {pipeline.phases.map((phase, idx) => {
+                const res = phaseResolution[phase.name]
+                const previewAssignedModelLabel = getModelOptionLabel(models, phase.model || res?.resolved_model || phase.default_model)
+                return (
+                  <PhaseCard
+                    key={idx}
+                    phase={phase}
+                    run={runsByIndex[idx] || null}
+                    isCurrent={idx === pipeline.current_phase_index && pipeline.status !== 'completed'}
+                    onOpenApproval={setApprovalRun}
+                    onViewArtifact={setViewArtifactRun}
+                    onChangeModel={setChangeModelRun}
+                    previewResolvedModel={res?.resolved_model}
+                    previewPersonaName={res?.persona_name}
+                    previewAssignedModelLabel={previewAssignedModelLabel}
+                  />
+                )
+              })}
             </div>
           </div>
         </div>
 
         <aside className="space-y-4 xl:sticky xl:top-4 self-start">
+          <div className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 p-4 space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-gray-900 dark:text-white">Backend process</div>
+                <div className="text-xs text-gray-500 mt-1">Check if the local backend is healthy and restart it when a pipeline looks stuck.</div>
+              </div>
+              <span className={`text-[11px] font-semibold px-2 py-1 rounded-full ${backendStatus?.healthy ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'}`}>
+                {backendStatus?.healthy ? 'Healthy' : 'Needs attention'}
+              </span>
+            </div>
+            <div className="text-xs text-gray-600 dark:text-gray-300 space-y-1">
+              <div>Running: <span className="font-semibold">{backendStatus?.running ? 'Yes' : 'No'}</span></div>
+              <div>Port: <span className="font-semibold">{backendStatus?.port ?? 'unknown'}</span></div>
+              <div>PID: <span className="font-semibold">{backendStatus?.pid ?? 'unknown'}</span></div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={refreshBackendStatus}
+                disabled={checkingBackend}
+                className="flex-1 rounded-lg border border-gray-300 text-gray-700 dark:text-gray-200 text-xs font-medium px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-40"
+              >
+                {checkingBackend ? 'Checking…' : 'Check status'}
+              </button>
+              <button
+                onClick={restartBackend}
+                disabled={restartingBackend}
+                className="flex-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium px-3 py-2 disabled:opacity-40"
+              >
+                {restartingBackend ? 'Restarting…' : 'Restart backend'}
+              </button>
+            </div>
+          </div>
+
           <div className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 p-4 space-y-3">
             <div>
               <div className="text-sm font-semibold text-gray-900 dark:text-white">Send guidance</div>
@@ -1515,9 +1877,16 @@ export default function PipelinePage() {
                   <div className="text-sm font-semibold text-gray-900 dark:text-white">Live activity</div>
                   <div className="text-xs text-gray-500 mt-1">Continuous status, failures, and handoffs.</div>
                 </div>
-                <span className={`text-[11px] font-semibold px-2 py-1 rounded-full ${connectionClasses}`}>
-                  {connectionLabel}
-                </span>
+                <div className="flex flex-col items-end gap-0.5">
+                  <span className={`text-[11px] font-semibold px-2 py-1 rounded-full ${connectionClasses}`}>
+                    {connectionLabel}
+                  </span>
+                  {lastEventAgo && (
+                    <span className="text-[10px] text-gray-400 dark:text-gray-500 pr-0.5" title="Time since last SSE event">
+                      {lastEventAgo}
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
             <div className="max-h-[34rem] overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800">
@@ -1558,7 +1927,7 @@ export default function PipelinePage() {
       {/* Approval modal */}
       {approvalRun && (
         <ApprovalModal
-          run={approvalRun}
+          run={runsByIndex[approvalRun.phase_index] ?? approvalRun}
           phase={pipeline.phases[approvalRun.phase_index]}
           onClose={() => setApprovalRun(null)}
           onApprove={approve}

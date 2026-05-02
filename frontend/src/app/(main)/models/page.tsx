@@ -258,7 +258,7 @@ export default function ModelsPage() {
     setCatalogValidating(true)
     setCatalogValidationResult(null)
     try {
-      const res = await fetch(`${API_BASE}/v1/models/validate-catalog`, {
+      const res = await fetch(`${API_BASE}/v1/models/validate-catalog?latest_only=true&lookback_days=90`, {
         method: 'POST',
         headers: AUTH_HEADERS,
       })

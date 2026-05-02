@@ -2,7 +2,7 @@
 
 import { API_BASE, AUTH_HEADERS } from '@/lib/config'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 
@@ -51,6 +51,14 @@ export default function PersonaForm() {
   const [loading, setLoading] = useState(!!personaId)
   const [modelsLoading, setModelsLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const modelsByProvider = useMemo(() => {
+    return models.reduce((acc, model) => {
+      const provider = model.provider_name || 'other'
+      if (!acc[provider]) acc[provider] = []
+      acc[provider].push(model)
+      return acc
+    }, {} as Record<string, Model[]>)
+  }, [models])
 
   const fetchAllEligibleModels = async (): Promise<Model[]> => {
     const pageSize = 250
@@ -60,7 +68,7 @@ export default function PersonaForm() {
 
     while (hasMore) {
       const res = await fetch(
-        `${API_BASE}/v1/models?active_only=true&usable_only=true&chat_only=true&limit=${pageSize}&offset=${offset}`,
+        `${API_BASE}/v1/models?active_only=true&usable_only=true&validated_only=true&chat_only=true&limit=${pageSize}&offset=${offset}`,
         { headers: AUTH_HEADERS }
       )
       const data = await res.json()
@@ -221,10 +229,14 @@ export default function PersonaForm() {
                 className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
               >
                 <option value="">Select a model</option>
-                {models.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.display_name || model.model_id} ({model.provider_name})
-                  </option>
+                {Object.entries(modelsByProvider).map(([provider, providerModels]) => (
+                  <optgroup key={provider} label={provider.charAt(0).toUpperCase() + provider.slice(1)}>
+                    {providerModels.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.display_name || model.model_id}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </select>
             </div>
@@ -237,10 +249,14 @@ export default function PersonaForm() {
                 className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
               >
                 <option value="">No fallback</option>
-                {models.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.display_name || model.model_id} ({model.provider_name})
-                  </option>
+                {Object.entries(modelsByProvider).map(([provider, providerModels]) => (
+                  <optgroup key={provider} label={provider.charAt(0).toUpperCase() + provider.slice(1)}>
+                    {providerModels.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.display_name || model.model_id}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </select>
             </div>

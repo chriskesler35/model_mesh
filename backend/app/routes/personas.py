@@ -6,9 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from datetime import datetime
 from app.database import get_db
-from app.models import Persona
+from app.models import Persona, Model, Provider
 from app.schemas import PersonaCreate, PersonaUpdate, PersonaResponse, PersonaList
 from app.middleware.auth import verify_api_key
+from app.routes.models import _provider_is_usable
 import uuid as _uuid
 
 router = APIRouter(prefix="/v1/personas", tags=["personas"], dependencies=[Depends(verify_api_key)])
@@ -19,6 +20,35 @@ def _parse_uuid(value: str) -> _uuid.UUID:
         return _uuid.UUID(value)
     except (ValueError, AttributeError):
         raise HTTPException(status_code=404, detail="Not found")
+
+
+async def _ensure_model_usable(model_ref: Optional[_uuid.UUID], *, field_name: str, db: AsyncSession) -> None:
+    if not model_ref:
+        return
+
+    row = (await db.execute(
+        select(Model, Provider)
+        .join(Provider, Model.provider_id == Provider.id)
+        .where(Model.id == model_ref)
+        .limit(1)
+    )).first()
+
+    if not row:
+        raise HTTPException(status_code=400, detail=f"{field_name} references a model that does not exist.")
+
+    model, provider = row
+    if not model.is_active:
+        raise HTTPException(status_code=400, detail=f"{field_name} must reference an active model.")
+    if (model.validation_status or "unverified") != "validated":
+        raise HTTPException(status_code=400, detail=f"{field_name} must reference a live-validated model.")
+    if provider.is_active is False or not _provider_is_usable(provider.name, provider.api_base_url):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{field_name} provider '{provider.name}' is not currently usable "
+                "(inactive, unreachable local endpoint, or missing credentials)."
+            ),
+        )
 
 
 @router.get("", response_model=PersonaList)
@@ -60,6 +90,9 @@ async def create_persona(
     )
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Persona name already exists")
+
+    await _ensure_model_usable(persona.primary_model_id, field_name="primary_model_id", db=db)
+    await _ensure_model_usable(persona.fallback_model_id, field_name="fallback_model_id", db=db)
     
     db_persona = Persona(
         **persona.model_dump(),
@@ -108,9 +141,15 @@ async def update_persona(
     
     if not persona:
         raise HTTPException(status_code=404, detail="Persona not found")
+
+    payload = update.model_dump(exclude_unset=True)
+    if "primary_model_id" in payload:
+        await _ensure_model_usable(payload.get("primary_model_id"), field_name="primary_model_id", db=db)
+    if "fallback_model_id" in payload:
+        await _ensure_model_usable(payload.get("fallback_model_id"), field_name="fallback_model_id", db=db)
     
     # Update fields
-    for field, value in update.model_dump(exclude_unset=True).items():
+    for field, value in payload.items():
         setattr(persona, field, value)
     
     persona.updated_at = datetime.utcnow()

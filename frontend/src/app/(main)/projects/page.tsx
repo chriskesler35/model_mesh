@@ -14,44 +14,70 @@ interface Project {
   sandbox_mode?: 'restricted' | 'full'
 }
 interface Template { id: string; name: string; description: string }
+interface WorkbenchSessionLite {
+  id: string
+  project_id: string | null
+  agent_type?: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | string
+}
+
+type ProjectRunStats = {
+  running: number
+  pending: number
+  active: number
+  failed: number
+  completed: number
+  awaiting: number
+}
 
 const TEMPLATE_ICONS: Record<string, string> = {
   blank: '📄', 'python-api': '🐍', 'next-app': '⚡', 'cli-tool': '🔧'
+}
+
+const WORKBENCH_SEED_TASK: Record<string, string> = {
+  coder: 'Continue building this project. Focus on the next scoped improvement and summarize verification steps.',
+  planner: 'Analyze this project and produce a prioritized implementation plan.',
+  reviewer: 'Run a code review for this project and report the most important findings first.',
+  executor: 'Execute the next safe project change and validate outcomes before summarizing.',
 }
 
 export default function ProjectsPage() {
   const router = useRouter()
   const [projects, setProjects] = useState<Project[]>([])
   const [templates, setTemplates] = useState<Template[]>([])
+  const [projectRunStats, setProjectRunStats] = useState<Record<string, ProjectRunStats>>({})
   const [loading, setLoading] = useState(true)
   const [showNew, setShowNew] = useState(false)
   const [showWizard, setShowWizard] = useState(false)
   const [form, setForm] = useState({ name: '', path: '', template: 'blank', description: '', sandbox_mode: 'restricted' })
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
-  const [loadError, setLoadError] = useState('')
 
   const fetchData = useCallback(async () => {
-    setLoadError('')
-    try {
-      const [projRes, tmplRes] = await Promise.all([
-        fetch(`${API_BASE}/v1/projects`, { headers: AUTH_HEADERS }),
-        fetch(`${API_BASE}/v1/projects/templates`, { headers: AUTH_HEADERS }),
-      ])
+    const [proj, tmpl, sess] = await Promise.all([
+      fetch(`${API_BASE}/v1/projects/`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+      fetch(`${API_BASE}/v1/projects/templates`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+      fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+    ])
+    setProjects(proj.data || [])
+    setTemplates(tmpl.data || [])
 
-      if (!projRes.ok) throw new Error(`Failed to load projects (${projRes.status})`)
-      if (!tmplRes.ok) throw new Error(`Failed to load templates (${tmplRes.status})`)
-
-      const [proj, tmpl] = await Promise.all([projRes.json(), tmplRes.json()])
-      setProjects(proj.data || [])
-      setTemplates(tmpl.data || [])
-    } catch (e: any) {
-      setProjects([])
-      setTemplates([])
-      setLoadError(e.message || 'Failed to load projects')
-    } finally {
-      setLoading(false)
+    const stats: Record<string, ProjectRunStats> = {}
+    const sessions: WorkbenchSessionLite[] = sess.data || []
+    for (const s of sessions) {
+      if (!s.project_id) continue
+      if (!stats[s.project_id]) {
+        stats[s.project_id] = { running: 0, pending: 0, active: 0, failed: 0, completed: 0, awaiting: 0 }
+      }
+      if (s.status === 'running') stats[s.project_id].running += 1
+      if (s.status === 'pending') stats[s.project_id].pending += 1
+      if (s.status === 'failed') stats[s.project_id].failed += 1
+      if (s.status === 'completed') stats[s.project_id].completed += 1
+      if (s.status === 'awaiting_approval') stats[s.project_id].awaiting += 1
+      if (s.status === 'running' || s.status === 'pending') stats[s.project_id].active += 1
     }
+    setProjectRunStats(stats)
+    setLoading(false)
   }, [])
 
   useEffect(() => { fetchData() }, [fetchData])
@@ -60,7 +86,7 @@ export default function ProjectsPage() {
     if (!form.name.trim() || !form.path.trim() || creating) return
     setCreating(true); setError('')
     try {
-      const res = await fetch(`${API_BASE}/v1/projects`, {
+      const res = await fetch(`${API_BASE}/v1/projects/`, {
         method: 'POST', headers: AUTH_HEADERS, body: JSON.stringify(form)
       })
       if (!res.ok) throw new Error((await res.json()).detail || 'Failed')
@@ -76,6 +102,52 @@ export default function ProjectsPage() {
   const deleteProject = async (id: string, deleteFiles: boolean) => {
     await fetch(`${API_BASE}/v1/projects/${id}?delete_files=${deleteFiles}`, { method: 'DELETE', headers: AUTH_HEADERS })
     setProjects(prev => prev.filter(p => p.id !== id))
+  }
+
+  const openProjectSession = async (projectId: string, preferredAgent: string = 'coder') => {
+    try {
+      const listRes = await fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH_HEADERS })
+      const listData = listRes.ok ? await listRes.json() : { data: [] }
+      const sessions: WorkbenchSessionLite[] = (listData?.data || []).filter((s: WorkbenchSessionLite) => s.project_id === projectId)
+
+      const matchesPreferredAgent = (s: WorkbenchSessionLite) => (s.agent_type || 'coder') === preferredAgent
+      const isContinuable = (s: WorkbenchSessionLite) => !['completed', 'failed', 'cancelled'].includes(s.status)
+
+      const reusable =
+        sessions.find(s => matchesPreferredAgent(s) && (s.status === 'running' || s.status === 'pending' || s.status === 'waiting')) ||
+        sessions.find(s => matchesPreferredAgent(s) && isContinuable(s)) ||
+        sessions.find(s => isContinuable(s))
+
+      if (reusable?.id) {
+        router.push(`/workbench/${reusable.id}`)
+        return
+      }
+
+      const createRes = await fetch(`${API_BASE}/v1/workbench/sessions`, {
+        method: 'POST',
+        headers: AUTH_HEADERS,
+        body: JSON.stringify({
+          project_id: projectId,
+          agent_type: preferredAgent,
+          task: WORKBENCH_SEED_TASK[preferredAgent] || WORKBENCH_SEED_TASK.coder,
+        }),
+      })
+
+      if (!createRes.ok) {
+        throw new Error(`HTTP ${createRes.status}`)
+      }
+
+      const created = await createRes.json()
+      if (created?.id) {
+        router.push(`/workbench/${created.id}`)
+        return
+      }
+
+      throw new Error('Session create returned no id')
+    } catch {
+      const query = new URLSearchParams({ project: projectId, agent_type: preferredAgent })
+      router.push(`/workbench?${query.toString()}`)
+    }
   }
 
   if (loading) return (
@@ -104,12 +176,6 @@ export default function ProjectsPage() {
           </button>
         </div>
       </div>
-
-      {loadError && (
-        <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
-          {loadError}
-        </div>
-      )}
 
       {projects.length === 0 ? (
         <div className="text-center py-20">
@@ -141,6 +207,34 @@ export default function ProjectsPage() {
                 <h3 className="font-semibold text-gray-900 dark:text-white mb-1">{p.name}</h3>
                 {p.description && <p className="text-sm text-gray-500 mb-2 line-clamp-2">{p.description}</p>}
                 <p className="text-xs font-mono text-gray-400 truncate">{p.path}</p>
+
+                {(projectRunStats[p.id]?.active > 0 || projectRunStats[p.id]?.failed > 0 || projectRunStats[p.id]?.awaiting > 0) && (
+                  <div className="flex items-center gap-1.5 mt-3 flex-wrap">
+                    {projectRunStats[p.id]?.active > 0 && (
+                      <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">
+                        <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+                        {projectRunStats[p.id].active} in flight
+                      </span>
+                    )}
+                    {projectRunStats[p.id]?.awaiting > 0 && (
+                      <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                        {projectRunStats[p.id].awaiting} needs input
+                      </span>
+                    )}
+                    {projectRunStats[p.id]?.failed > 0 && (
+                      <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+                        {projectRunStats[p.id].failed} failed
+                      </span>
+                    )}
+                    {projectRunStats[p.id]?.completed > 0 && (
+                      <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-green-100 text-green-700">
+                        {projectRunStats[p.id].completed} done
+                      </span>
+                    )}
+                  </div>
+                )}
+
                 <div className="flex items-center gap-3 mt-3 text-xs text-gray-400">
                   <span>{p.file_count} files</span>
                   <span>{p.template}</span>
@@ -153,8 +247,12 @@ export default function ProjectsPage() {
               <div className="border-t border-gray-100 dark:border-gray-700 px-4 py-2.5 flex items-center gap-3 bg-gray-50 dark:bg-gray-900/50 opacity-0 group-hover:opacity-100 transition-opacity">
                 <button onClick={() => router.push(`/projects/${p.id}`)}
                   className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Open</button>
-                <button onClick={() => router.push(`/workbench?project=${p.id}`)}
+                <button onClick={() => openProjectSession(p.id, 'coder')}
                   className="text-xs text-orange-600 hover:text-orange-800 font-medium">Launch Workbench</button>
+                <button onClick={() => router.push(`/workbench?project=${p.id}&agent_type=planner`)}
+                  className="text-xs text-blue-600 hover:text-blue-800 font-medium">Plan</button>
+                <button onClick={() => openProjectSession(p.id, 'reviewer')}
+                  className="text-xs text-violet-600 hover:text-violet-800 font-medium">Review</button>
                 <button onClick={() => {
                   if (confirm(`Delete project "${p.name}"?\n\nChoose OK to also delete files on disk, or Cancel to keep files.`)) {
                     deleteProject(p.id, false)

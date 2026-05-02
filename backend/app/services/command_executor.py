@@ -448,3 +448,268 @@ def format_command_for_context(result: dict) -> str:
     if stderr:
         parts.append(f"STDERR:\n{stderr}")
     return "\n".join(parts)
+
+
+# ─── Structured tool executors ────────────────────────────────────────────────
+# These are called by the agent runner when a model returns native function-call
+# responses (OpenAI tool_calls format).  Each function mirrors a schema defined
+# in tool_registry.py and returns a dict with at least "success" and "output".
+#
+# File-system operations are workspace-bounded: paths outside the project root
+# are rejected to prevent accidental writes to system directories.
+
+_MAX_FILE_READ_BYTES = 200 * 1024  # 200 KB cap for read_file
+
+
+def _resolve_workspace_path(relative_path: str, workspace_root: Path) -> Path:
+    """Resolve a relative path against the workspace root.
+
+    Raises ValueError if the resolved path escapes the workspace root
+    (directory-traversal guard).
+    """
+    try:
+        resolved = (workspace_root / relative_path).resolve()
+    except Exception as exc:
+        raise ValueError(f"Invalid path: {relative_path}") from exc
+
+    try:
+        resolved.relative_to(workspace_root.resolve())
+    except ValueError:
+        raise ValueError(
+            f"Path '{relative_path}' resolves outside the workspace root."
+        )
+
+    return resolved
+
+
+async def tool_read_file(
+    path: str,
+    workspace_root: Path,
+    *,
+    start_line: Optional[int] = None,
+    end_line: Optional[int] = None,
+) -> dict:
+    """Read a file from the workspace and return its contents."""
+    try:
+        target = _resolve_workspace_path(path, workspace_root)
+    except ValueError as exc:
+        return {"success": False, "output": str(exc)}
+
+    if not target.exists():
+        return {"success": False, "output": f"File not found: {path}"}
+    if not target.is_file():
+        return {"success": False, "output": f"Path is not a file: {path}"}
+
+    try:
+        raw = target.read_bytes()
+        if len(raw) > _MAX_FILE_READ_BYTES:
+            raw = raw[:_MAX_FILE_READ_BYTES]
+            truncated = True
+        else:
+            truncated = False
+        text = raw.decode("utf-8", errors="replace")
+    except Exception as exc:
+        return {"success": False, "output": f"Read error: {exc}"}
+
+    if start_line is not None or end_line is not None:
+        lines = text.splitlines(keepends=True)
+        s = max(0, (start_line or 1) - 1)
+        e = end_line if end_line is not None else len(lines)
+        text = "".join(lines[s:e])
+
+    note = "\n\n[…file truncated at 200 KB…]" if truncated else ""
+    return {"success": True, "output": text + note}
+
+
+async def tool_write_file(
+    path: str,
+    content: str,
+    workspace_root: Path,
+    *,
+    create_dirs: bool = True,
+) -> dict:
+    """Write content to a file in the workspace."""
+    try:
+        target = _resolve_workspace_path(path, workspace_root)
+    except ValueError as exc:
+        return {"success": False, "output": str(exc)}
+
+    try:
+        if create_dirs:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    except Exception as exc:
+        return {"success": False, "output": f"Write error: {exc}"}
+
+    return {"success": True, "output": f"Wrote {len(content)} chars to {path}"}
+
+
+async def tool_list_dir(
+    path: str,
+    workspace_root: Path,
+    *,
+    recursive: bool = False,
+) -> dict:
+    """List directory contents in the workspace."""
+    try:
+        target = _resolve_workspace_path(path, workspace_root)
+    except ValueError as exc:
+        return {"success": False, "output": str(exc)}
+
+    if not target.exists():
+        return {"success": False, "output": f"Path not found: {path}"}
+    if not target.is_dir():
+        return {"success": False, "output": f"Path is not a directory: {path}"}
+
+    try:
+        if recursive:
+            entries = sorted(str(p.relative_to(target)) for p in target.rglob("*") if not any(
+                part.startswith(".") or part == "__pycache__"
+                for part in p.relative_to(target).parts
+            ))
+        else:
+            entries = sorted(
+                (p.name + "/" if p.is_dir() else p.name)
+                for p in target.iterdir()
+            )
+    except Exception as exc:
+        return {"success": False, "output": f"List error: {exc}"}
+
+    return {"success": True, "output": "\n".join(entries) if entries else "(empty)"}
+
+
+async def tool_install_package(
+    packages: str,
+    workspace_root: Path,
+    *,
+    manager: str = "pip",
+) -> dict:
+    """Install packages using the specified package manager."""
+    manager = manager.lower().strip()
+    pkg_list = packages.strip()
+
+    cmd_map = {
+        "pip": f"pip install {pkg_list}",
+        "npm": f"npm install {pkg_list}",
+        "yarn": f"yarn add {pkg_list}",
+        "pnpm": f"pnpm add {pkg_list}",
+        "cargo": f"cargo add {pkg_list}",
+        "go": f"go get {pkg_list}",
+    }
+    command = cmd_map.get(manager, f"pip install {pkg_list}")
+
+    exit_code, stdout, stderr, duration_ms = await run_command(
+        command, workspace_root, timeout_sec=120
+    )
+    success = exit_code == 0
+    output = stdout if success else (stderr or stdout)
+    return {
+        "success": success,
+        "output": output[:4000],
+        "exit_code": exit_code,
+        "duration_ms": duration_ms,
+    }
+
+
+async def tool_web_fetch(
+    url: str,
+    *,
+    method: str = "GET",
+    headers: Optional[dict] = None,
+    body: Optional[str] = None,
+) -> dict:
+    """Fetch a URL and return the response body."""
+    # Basic URL validation — must be http/https
+    if not url.lower().startswith(("http://", "https://")):
+        return {"success": False, "output": "Only http:// and https:// URLs are supported."}
+
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+            req_headers = dict(headers or {})
+            if method.upper() == "POST":
+                resp = await client.post(url, headers=req_headers, content=(body or "").encode())
+            else:
+                resp = await client.get(url, headers=req_headers)
+
+        text = resp.text[:8000]  # cap at 8 KB returned to the model
+        return {
+            "success": True,
+            "output": f"[HTTP {resp.status_code}]\n{text}",
+            "status_code": resp.status_code,
+        }
+    except Exception as exc:
+        return {"success": False, "output": f"Fetch error: {exc}"}
+
+
+async def execute_tool_call(
+    tool_name: str,
+    arguments: dict,
+    workspace_root: Path,
+) -> dict:
+    """Dispatch a native function-call tool request to the correct executor.
+
+    Returns a result dict with at least ``success`` (bool) and ``output`` (str).
+    This is the single entry point used by AgentRunner when a model returns
+    an OpenAI-style tool_calls response.
+    """
+    name = (tool_name or "").strip()
+
+    if name == "read_file":
+        return await tool_read_file(
+            path=arguments.get("path", ""),
+            workspace_root=workspace_root,
+            start_line=arguments.get("start_line"),
+            end_line=arguments.get("end_line"),
+        )
+
+    if name == "write_file":
+        return await tool_write_file(
+            path=arguments.get("path", ""),
+            content=arguments.get("content", ""),
+            workspace_root=workspace_root,
+            create_dirs=arguments.get("create_dirs", True),
+        )
+
+    if name == "list_dir":
+        return await tool_list_dir(
+            path=arguments.get("path", "."),
+            workspace_root=workspace_root,
+            recursive=arguments.get("recursive", False),
+        )
+
+    if name == "run_shell":
+        command = arguments.get("command", "")
+        timeout = int(arguments.get("timeout") or 60)
+        from app.services.command_classifier import classify_command, CommandTier
+        tier = classify_command(command)
+        if tier == CommandTier.BLOCKED:
+            return {"success": False, "output": "Command blocked by sandbox policy."}
+        exit_code, stdout, stderr, duration_ms = await run_command(
+            command, workspace_root, timeout_sec=timeout
+        )
+        success = exit_code == 0
+        return {
+            "success": success,
+            "output": (stdout or "") + ("\n" + stderr if stderr else ""),
+            "exit_code": exit_code,
+            "duration_ms": duration_ms,
+        }
+
+    if name == "install_package":
+        return await tool_install_package(
+            packages=arguments.get("packages", ""),
+            workspace_root=workspace_root,
+            manager=arguments.get("manager", "pip"),
+        )
+
+    if name == "web_fetch":
+        return await tool_web_fetch(
+            url=arguments.get("url", ""),
+            method=arguments.get("method", "GET"),
+            headers=arguments.get("headers"),
+            body=arguments.get("body"),
+        )
+
+    return {"success": False, "output": f"Unknown tool: {name}"}

@@ -18,6 +18,7 @@ export interface SkillDetailPaneProps {
   isInstalled?: boolean;
   onClose: () => void;
   onInstallClick: () => void;
+  onRemoveClick: () => void;
 }
 
 export function SkillDetailPane({
@@ -34,6 +35,7 @@ export function SkillDetailPane({
   isInstalled = false,
   onClose,
   onInstallClick,
+  onRemoveClick,
 }: SkillDetailPaneProps) {
   return (
     <Card className="h-full flex flex-col">
@@ -125,15 +127,34 @@ export function SkillDetailPane({
       </CardContent>
 
       <div className="border-t p-4 mt-4">
-        <Button
-          onClick={onInstallClick}
-          disabled={isInstalled}
-          variant={isInstalled ? "outline" : "default"}
-          size="sm"
-          className="w-full"
-        >
-          {isInstalled ? 'Already Installed' : 'Install'}
-        </Button>
+        {isInstalled ? (
+          <div className="flex gap-3">
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
+              disabled
+            >
+              Installed
+            </Button>
+            <Button
+              onClick={onRemoveClick}
+              variant="outline"
+              size="sm"
+              className="w-full border-red-200 text-red-700 hover:bg-red-50 hover:text-red-800"
+            >
+              Remove
+            </Button>
+          </div>
+        ) : (
+          <Button
+            onClick={onInstallClick}
+            size="sm"
+            className="w-full"
+          >
+            Install
+          </Button>
+        )}
       </div>
     </Card>
   );

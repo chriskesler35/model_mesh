@@ -19,7 +19,7 @@ from app.models import Model
 from app.middleware.auth import verify_api_key
 from app.config import settings
 from app.services.app_settings_helper import get_setting
-from app.routes.workflows import find_workflow_path, _convert_editor_to_api, _fetch_object_info_schema
+from app.routes.workflows import find_workflow_path, _convert_editor_to_api, _fetch_object_info_schema, _get_running_comfyui_url
 from pydantic import BaseModel
 from typing import Optional, List, Tuple, Any, Dict
 from datetime import datetime as _dt
@@ -249,6 +249,28 @@ async def is_comfyui_running(url: str = "http://localhost:8188") -> bool:
         return False
 
 
+def _has_cli_flag(args: list[str], flag: str) -> bool:
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in args)
+
+
+def _build_comfyui_launch_cmd(comfyui_python: Path, launch_args: str) -> list[str]:
+    cmd = [str(comfyui_python), "main.py"]
+    user_args = shlex.split(launch_args, posix=False) if launch_args else []
+
+    if not _has_cli_flag(user_args, "--listen"):
+        cmd.extend(["--listen", "0.0.0.0"])
+    if not _has_cli_flag(user_args, "--default-device"):
+        # Primary GPU, keeps others visible for overflow.
+        cmd.extend(["--default-device", "0"])
+    if not _has_cli_flag(user_args, "--preview-method"):
+        cmd.extend(["--preview-method", "auto"])
+    if not _has_cli_flag(user_args, "--enable-cors-header"):
+        cmd.extend(["--enable-cors-header", "*"])
+
+    cmd.extend(user_args)
+    return cmd
+
+
 async def launch_comfyui(url: str = "http://localhost:8188") -> bool:
     """
     Spawn ComfyUI in the background (Windows detached process).
@@ -278,18 +300,7 @@ async def launch_comfyui(url: str = "http://localhost:8188") -> bool:
     env["CUDA_MODULE_LOADING"] = "LAZY"
     env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-    if launch_args:
-        cmd = [str(comfyui_python), "main.py", *shlex.split(launch_args, posix=False)]
-    else:
-        cmd = [
-            str(comfyui_python), "main.py",
-            "--listen", "0.0.0.0",
-            "--default-device", "0",  # primary GPU, keeps others visible for overflow
-            # Safer default profile: avoid aggressive VRAM flags to reduce OOM risk
-            # for larger/multi-mask inpaint workflows.
-            "--preview-method", "auto",
-            "--enable-cors-header", "*",
-        ]
+    cmd = _build_comfyui_launch_cmd(comfyui_python, launch_args)
     logger.info(
         "Launching ComfyUI: CUDA_VISIBLE_DEVICES=%s, cwd=%s, args=%s",
         gpu_devices,
@@ -1682,20 +1693,27 @@ async def generate_image(
 @router.get("/models/available")
 async def list_image_models(db: AsyncSession = Depends(get_db)):
     """List image generation backends available for generation + variations."""
+    comfyui_url = await _get_running_comfyui_url(db, timeout=2.5)
+    gemini_key = (
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or getattr(settings, "gemini_api_key", None)
+        or getattr(settings, "google_api_key", None)
+    )
     backends = [
         {
             "id": "gemini-imagen",
             "name": "Gemini (Imagen / Nano Banana)",
             "requires": "GEMINI_API_KEY",
-            "available": bool(os.environ.get("GEMINI_API_KEY") or getattr(settings, "gemini_api_key", None)),
+            "available": bool(gemini_key),
             "description": "Fast cloud generation via Google",
         },
         {
             "id": "comfyui-local",
             "name": "ComfyUI (Local)",
             "requires": "ComfyUI running on localhost",
-            "available": True,  # always exposed; runtime checks reachability + falls back to Gemini
-            "description": "Local SDXL/FLUX workflows — falls back to Gemini on failure",
+            "available": bool(comfyui_url),
+            "description": "Local SDXL/FLUX workflows",
         },
     ]
     return {"data": backends}

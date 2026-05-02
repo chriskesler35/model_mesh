@@ -252,9 +252,10 @@ export function RemoteAccessTab() {
   if (loading) return <div className="text-sm text-gray-400 py-8 text-center">Loading remote settings...</div>
 
   const backendPort = backendStatus?.port ?? 19001
+  const VPN_REMOTE_CIDRS = '100.64.0.0/10,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16'
   const FIREWALL_CMDS = [
-    `netsh advfirewall firewall add rule name="DevForgeAI API (${backendPort})" dir=in action=allow protocol=tcp localport=${backendPort} remoteip=100.64.0.0/10`,
-    `netsh advfirewall firewall add rule name="DevForgeAI Frontend (3001)" dir=in action=allow protocol=tcp localport=3001 remoteip=100.64.0.0/10`,
+    `netsh advfirewall firewall add rule name="DevForgeAI API (${backendPort})" dir=in action=allow protocol=tcp localport=${backendPort} remoteip=${VPN_REMOTE_CIDRS}`,
+    `netsh advfirewall firewall add rule name="DevForgeAI Frontend (3001)" dir=in action=allow protocol=tcp localport=3001 remoteip=${VPN_REMOTE_CIDRS}`,
   ]
 
   return (
@@ -497,7 +498,7 @@ export function RemoteAccessTab() {
       </Card>
 
       {/* Firewall rules */}
-      <Card icon="🔒" title="Firewall Rules" subtitle="Run as Administrator to allow Tailscale access">
+      <Card icon="🔒" title="Firewall Rules" subtitle="Run as Administrator to allow VPN/LAN access (Tailscale + WireGuard)">
         <div className="space-y-3">
           {FIREWALL_CMDS.map((cmd, i) => (
             <div key={i}>
@@ -509,7 +510,7 @@ export function RemoteAccessTab() {
             </div>
           ))}
           <p className="text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg px-3 py-2">
-            ⚠ These restrict access to Tailscale IP range only (100.64.0.0/10). Your data stays private.
+            ⚠ These allow common VPN/private ranges (Tailscale + WireGuard + LAN). If your WireGuard subnet is custom, replace <span className="font-mono">remoteip</span> with your exact CIDR.
           </p>
         </div>
       </Card>

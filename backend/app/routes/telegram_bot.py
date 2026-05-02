@@ -460,6 +460,36 @@ async def send_telegram_message(chat_id: int, text: str, parse_mode: str = "Mark
         return {"error": str(e)}
 
 
+def _is_status_query(text: str) -> bool:
+    """Detect plain-language status queries that should not enter chat mode."""
+    low = (text or "").strip().lower()
+    if not low:
+        return False
+
+    status_markers = (
+        "status",
+        "health",
+        "uptime",
+        "running",
+        "sessions",
+        "session list",
+        "models",
+    )
+    return any(marker in low for marker in status_markers)
+
+
+async def handle_status_query(chat_id: int, text: str):
+    """Route natural-language status requests to existing status commands."""
+    low = (text or "").lower()
+    if "session" in low:
+        await send_sessions_list(chat_id)
+        return
+    if "model" in low:
+        await send_models_list(chat_id)
+        return
+    await send_status_update(chat_id)
+
+
 async def process_telegram_command(chat_id: int, text: str):
     """Process a Telegram command."""
     text = text.strip()

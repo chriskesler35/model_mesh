@@ -2,8 +2,10 @@
 
 import uuid
 from datetime import datetime
+from datetime import timedelta
 from urllib.parse import urlparse
 import socket
+import re
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -20,6 +22,86 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/models", tags=["models"], dependencies=[Depends(verify_api_key)])
 
 _LOCAL_MODEL_PROVIDERS = {"ollama", "local", "lm-studio", "lmstudio", "llamacpp"}
+
+_DATE_SUFFIX_PATTERNS = (
+    re.compile(r"[-_](20\d{2})[-_](\d{2})[-_](\d{2})$"),
+    re.compile(r"[-_](20\d{2})(\d{2})(\d{2})$"),
+)
+
+
+def _extract_snapshot_date(model_id: str | None):
+    if not model_id:
+        return None
+    tail = str(model_id).split("/")[-1]
+    for pattern in _DATE_SUFFIX_PATTERNS:
+        m = pattern.search(tail)
+        if not m:
+            continue
+        try:
+            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _model_family_key(model_id: str | None) -> str:
+    if not model_id:
+        return ""
+    parts = str(model_id).split("/")
+    tail = parts[-1].lower().strip()
+    tail = re.sub(r"[:\-_]?latest$", "", tail)
+    for pattern in _DATE_SUFFIX_PATTERNS:
+        tail = pattern.sub("", tail)
+    tail = tail.rstrip("-_")
+    if len(parts) > 1:
+        return "/".join(parts[:-1]).lower() + "/" + tail
+    return tail
+
+
+def _select_latest_validation_candidates(provider_models: list[Model], lookback_days: int) -> tuple[set[str], dict[str, str]]:
+    """Select latest snapshots per family and all undated aliases.
+
+    Keeps validation focused on current model versions while preserving canonical
+    undated IDs (for example, `gpt-5`).
+    """
+    families: dict[str, list[tuple[Model, object]]] = {}
+    for model in provider_models:
+        family = _model_family_key(model.model_id)
+        snapshot_date = _extract_snapshot_date(model.model_id)
+        families.setdefault(family, []).append((model, snapshot_date))
+
+    cutoff = (datetime.utcnow() - timedelta(days=max(1, lookback_days))).date()
+    selected_ids: set[str] = set()
+    skip_reasons: dict[str, str] = {}
+
+    for members in families.values():
+        undated = [(m, d) for m, d in members if d is None]
+        dated = [(m, d) for m, d in members if d is not None]
+
+        for model, _ in undated:
+            selected_ids.add(str(model.id))
+
+        if not dated:
+            continue
+
+        dated_sorted = sorted(dated, key=lambda item: item[1], reverse=True)
+        latest_model, latest_date = dated_sorted[0]
+        selected_ids.add(str(latest_model.id))
+
+        if latest_date and latest_date < cutoff:
+            skip_reasons[str(latest_model.id)] = (
+                f"Latest snapshot for this family is older than {lookback_days} days ({latest_date.isoformat()})."
+            )
+
+        for stale_model, stale_date in dated_sorted[1:]:
+            if stale_date:
+                skip_reasons[str(stale_model.id)] = (
+                    f"Skipped older snapshot {stale_date.isoformat()} in favor of latest {latest_date.isoformat()}."
+                )
+            else:
+                skip_reasons[str(stale_model.id)] = "Skipped older dated snapshot in favor of latest family snapshot."
+
+    return selected_ids, skip_reasons
 
 
 def _apply_validation_result(model: Model, validation: dict) -> str:
@@ -297,9 +379,18 @@ async def revalidate_model(
 async def validate_catalog(
     provider_id: str | None = None,
     active_only: bool = True,
+    latest_only: bool = True,
+    lookback_days: int = 90,
     db: AsyncSession = Depends(get_db)
 ):
-    """Bulk-validate the current catalog and separate validated from review/failed rows."""
+    """Bulk-validate the current catalog and separate validated from review/failed rows.
+
+    Default mode focuses on latest versions per provider-family with a 90-day
+    recency window so deprecated snapshots are skipped during validation.
+    """
+    if lookback_days < 1 or lookback_days > 3650:
+        raise HTTPException(status_code=400, detail="lookback_days must be between 1 and 3650")
+
     query = select(Model).order_by(Model.created_at)
     if provider_id:
         query = query.where(Model.provider_id == uuid.UUID(provider_id))
@@ -316,6 +407,7 @@ async def validate_catalog(
         "needs_review": 0,
         "failed": 0,
         "processed": 0,
+        "skipped_by_filter": 0,
         "providers": {},
     }
 
@@ -338,7 +430,13 @@ async def validate_catalog(
             "needs_review": 0,
             "failed": 0,
             "processed": 0,
+            "skipped_by_filter": 0,
         })
+
+        selected_ids: set[str] = set()
+        skip_reasons: dict[str, str] = {}
+        if latest_only:
+            selected_ids, skip_reasons = _select_latest_validation_candidates(provider_models, lookback_days)
 
         if not provider or provider.is_active is False:
             for model in provider_models:
@@ -377,6 +475,22 @@ async def validate_catalog(
             catalog_error = f"Could not validate against a live {provider_name} catalog — {type(exc).__name__}."
 
         for model in provider_models:
+            if latest_only and str(model.id) not in selected_ids:
+                model.validation_source = "catalog_filter"
+                reason = skip_reasons.get(str(model.id)) or f"Skipped by latest-only filter ({lookback_days}-day lookback)."
+                model.validation_warning = reason
+                if (model.validation_status or "unverified") != "validated":
+                    model.validation_status = "unverified"
+                    model.validation_error = None
+
+                summary["needs_review"] += 1
+                summary["processed"] += 1
+                summary["skipped_by_filter"] += 1
+                provider_summary["needs_review"] += 1
+                provider_summary["processed"] += 1
+                provider_summary["skipped_by_filter"] += 1
+                continue
+
             if catalog_models_by_id is not None:
                 catalog_model = catalog_models_by_id.get(model.model_id)
                 if catalog_model is not None:
@@ -417,10 +531,18 @@ async def validate_catalog(
             provider_summary["processed"] += 1
 
     await db.commit()
+
+    filter_note = (
+        f" {summary['skipped_by_filter']} skipped by latest-only filter ({lookback_days}-day lookback)."
+        if latest_only else
+        ""
+    )
     return {
         "ok": True,
-        "message": f"Validated {summary['processed']} catalog models.",
+        "message": f"Validated {summary['processed']} catalog models.{filter_note}",
         **summary,
+        "latest_only": latest_only,
+        "lookback_days": lookback_days,
     }
 
 

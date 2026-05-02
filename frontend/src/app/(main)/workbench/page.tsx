@@ -3,6 +3,8 @@
 import { getApiBase, getAuthHeaders } from '@/lib/config'
 import { featureFlags } from '@/lib/feature-flags'
 import { trackEvent } from '@/lib/analytics'
+import WorkbenchSessionCard from '@/components/WorkbenchSessionCard'
+import SessionListToolbar, { SessionFilterKey, SessionSortKey } from '@/components/SessionListToolbar'
 
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
@@ -74,6 +76,19 @@ interface StackCompatibility {
   valid: boolean
 }
 
+type PhasePreviewItem = {
+  name: string
+  role: string
+  default_model: string
+  artifact_type: string
+  has_agent?: boolean
+  agent_name?: string | null
+  has_persona?: boolean
+  persona_name?: string | null
+  resolved_model?: string | null
+  resolved_via?: string | null
+}
+
 const STACK_METHOD_OPTIONS = ['bmad', 'gsd', 'superpowers', 'specaudit', 'mvp-loop', 'gtrack'] as const
 
 function getModelLabel(models: Model[], ref?: string | null) {
@@ -102,6 +117,53 @@ function getApiErrorMessage(payload: any, fallbackStatus: number) {
 
 const METHOD_ICONS: Record<string, string> = { bmad: '🧠', gsd: '⚡', superpowers: '🦸', specaudit: '✅', 'mvp-loop': '🚧', gtrack: '📊' }
 
+type LaunchPreset = {
+  id: string
+  label: string
+  icon: string
+  agentType: string
+  asPipeline: boolean
+  method?: string
+  seedTask: string
+}
+
+const LAUNCH_PRESETS: LaunchPreset[] = [
+  {
+    id: 'plan',
+    label: 'Plan',
+    icon: '🧭',
+    agentType: 'planner',
+    asPipeline: true,
+    method: 'bmad',
+    seedTask: 'Analyze this project and produce an implementation plan with prioritized milestones.',
+  },
+  {
+    id: 'build',
+    label: 'Build',
+    icon: '⚙️',
+    agentType: 'coder',
+    asPipeline: false,
+    seedTask: 'Implement the next scoped feature in this project and summarize changes plus verification steps.',
+  },
+  {
+    id: 'review',
+    label: 'Review',
+    icon: '🔎',
+    agentType: 'reviewer',
+    asPipeline: false,
+    seedTask: 'Run a code review for the current project and report high-priority findings first.',
+  },
+  {
+    id: 'ship-fast',
+    label: 'Ship Fast',
+    icon: '⚡',
+    agentType: 'executor',
+    asPipeline: true,
+    method: 'gsd',
+    seedTask: 'Execute the quickest safe path to ship the requested change and validate the result.',
+  },
+]
+
 export default function WorkbenchListPage() {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -127,7 +189,7 @@ export default function WorkbenchListPage() {
   // Active method stack from Methods page
   const [activeStack, setActiveStack] = useState<string[]>([])
   const [activeStackName, setActiveStackName] = useState<string>('')
-  const [phasePreview, setPhasePreview] = useState<Array<{name: string; role: string; default_model: string; artifact_type: string; has_agent?: boolean; agent_name?: string | null; has_persona?: boolean; persona_name?: string | null; resolved_model?: string | null; resolved_via?: string | null}>>([])
+  const [phasePreview, setPhasePreview] = useState<PhasePreviewItem[]>([])
   const [modelOverrides, setModelOverrides] = useState<Record<string, string>>({})
   const [customizeModels, setCustomizeModels] = useState(false)
   const [isPromotedProject, setIsPromotedProject] = useState(false)
@@ -141,6 +203,9 @@ export default function WorkbenchListPage() {
   const [runtimeEffectiveMethod, setRuntimeEffectiveMethod] = useState<string>('')
   const [runtimeLayeredMethods, setRuntimeLayeredMethods] = useState<string[]>([])
   const [runtimeStackedPromptApplied, setRuntimeStackedPromptApplied] = useState(false)
+  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null)
+  const [wbFilter, setWbFilter] = useState<SessionFilterKey>('all')
+  const [wbSort, setWbSort] = useState<SessionSortKey>('newest')
 
   const fetchSessions = useCallback(async () => {
     const apiBase = getApiBase()
@@ -509,6 +574,29 @@ export default function WorkbenchListPage() {
     }
   }
 
+  const cancelSession = async (id: string) => {
+    try {
+      const apiBase = getApiBase()
+      const authHeaders = getAuthHeaders()
+      await fetch(`${apiBase}/v1/workbench/sessions/${id}/cancel`, { method: 'POST', headers: authHeaders })
+      setSessions(prev => prev.map(s => (s.id === id ? { ...s, status: 'cancelled' } : s)))
+    } catch (e) {
+      console.error('Failed to cancel session:', e)
+    }
+  }
+
+  const deleteSession = async (id: string) => {
+    if (!confirm('Delete this session?')) return
+    try {
+      const apiBase = getApiBase()
+      const authHeaders = getAuthHeaders()
+      await fetch(`${apiBase}/v1/workbench/sessions/${id}`, { method: 'DELETE', headers: authHeaders })
+      setSessions(prev => prev.filter(s => s.id !== id))
+    } catch (e) {
+      console.error('Failed to delete session:', e)
+    }
+  }
+
   const applyGuidedPreset = (preset: 'mvp' | 'prototype' | 'review') => {
     setAsPipeline(true)
     setCustomizeModels(false)
@@ -603,6 +691,20 @@ export default function WorkbenchListPage() {
   const effectiveLaunchStack = selectedStack.length > 0 ? selectedStack : (activeStack.length > 1 ? activeStack : [])
   const stackLaunchBlocked = asPipeline && effectiveLaunchStack.length > 0 && !!selectedStackCompatibility && !selectedStackCompatibility.valid
 
+  const applyLaunchPreset = (preset: LaunchPreset) => {
+    setSelectedPresetId(preset.id)
+    setAgentType(preset.agentType)
+    setAsPipeline(preset.asPipeline)
+    if (preset.method) setPipelineMethod(preset.method)
+    if (!task.trim()) setTask(preset.seedTask)
+  }
+  const selectedRecommendation = goalRecommendations.find(rec => rec.goal_id === selectedGoalId) || null
+  const resolvedByPersonaCount = phasePreview.filter(ph => !modelOverrides[ph.name] && !model && !!ph.resolved_model).length
+  const resolvedByDefaultCount = phasePreview.filter(ph => !modelOverrides[ph.name] && !model && !ph.resolved_model).length
+  const resolvedBySessionCount = phasePreview.filter(ph => !modelOverrides[ph.name] && !!model).length
+  const resolvedByOverrideCount = phasePreview.filter(ph => !!modelOverrides[ph.name]).length
+  const launchExplainabilityStack = effectiveLaunchStack.length > 0 ? effectiveLaunchStack : (asPipeline ? [pipelineMethod] : [])
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -690,26 +792,40 @@ export default function WorkbenchListPage() {
           </div>
         )}
         {sessions.length > 0 && (
-          <div>
+          <div className="space-y-3">
             {pipelines.length > 0 && (
-              <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-2">
+              <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 flex items-center gap-2">
                 🔨 Single-Agent Sessions
                 <span className="text-xs font-normal text-gray-400">({sessions.length})</span>
               </h2>
             )}
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {sessions.map(s => (
-                <button key={s.id} onClick={() => router.push(`/workbench/${s.id}`)}
-                  className="text-left bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 hover:border-orange-300 hover:shadow-md transition-all">
-                  <div className="flex items-start justify-between mb-3">
-                    <span className="text-2xl">{AGENT_ICONS[s.agent_type] || '🤖'}</span>
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLOR[s.status] || 'bg-gray-100 text-gray-600'}`}>{STATUS_LABEL[s.status] || s.status}</span>
+            {(() => {
+              const wbCounts = {
+                all:       sessions.length,
+                active:    sessions.filter(s => s.status === 'running' || s.status === 'pending').length,
+                completed: sessions.filter(s => s.status === 'completed').length,
+                failed:    sessions.filter(s => s.status === 'failed').length,
+              }
+              let wbList = wbFilter === 'all' ? sessions
+                : wbFilter === 'active' ? sessions.filter(s => s.status === 'running' || s.status === 'pending')
+                : sessions.filter(s => s.status === wbFilter)
+              if (wbSort === 'newest') wbList = [...wbList].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+              else if (wbSort === 'oldest') wbList = [...wbList].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+              else if (wbSort === 'status') {
+                const ord: Record<string, number> = { running: 0, pending: 1, failed: 2, completed: 3, cancelled: 4 }
+                wbList = [...wbList].sort((a, b) => (ord[a.status] ?? 5) - (ord[b.status] ?? 5))
+              }
+              return (
+                <>
+                  <SessionListToolbar filter={wbFilter} sort={wbSort} counts={wbCounts} onFilterChange={setWbFilter} onSortChange={setWbSort} showSubTabs={false} />
+                  <div className="space-y-3">
+                    {wbList.map(s => (
+                      <WorkbenchSessionCard key={s.id} session={s} onOpen={(id) => router.push(`/workbench/${id}`)} onCancel={cancelSession} onDelete={deleteSession} />
+                    ))}
                   </div>
-                  <p className="text-sm font-medium text-gray-900 dark:text-white line-clamp-2 mb-2">{s.task}</p>
-                  <p className="text-xs text-gray-400">{s.agent_type} · {s.model}</p>
-                </button>
-              ))}
-            </div>
+                </>
+              )
+            })()}
           </div>
         )}
         </div>
@@ -725,6 +841,23 @@ export default function WorkbenchListPage() {
               </button>
             </div>
             <div className="px-6 py-5 space-y-4 overflow-y-auto flex-1">
+              {/* Quick Start presets */}
+              <div>
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Quick Start</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {LAUNCH_PRESETS.map(preset => (
+                    <button key={preset.id} type="button" onClick={() => applyLaunchPreset(preset)}
+                      className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-left text-sm transition-all ${
+                        selectedPresetId === preset.id
+                          ? 'border-orange-400 bg-orange-50 dark:bg-orange-900/20 text-orange-700 dark:text-orange-300'
+                          : 'border-gray-200 dark:border-gray-700 hover:border-orange-300 hover:bg-orange-50/50 dark:hover:bg-orange-900/10 text-gray-700 dark:text-gray-300'
+                      }`}>
+                      <span className="text-lg">{preset.icon}</span>
+                      <span className="font-medium">{preset.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
               {featureFlags.uiGuidedMode && (
                 <div className="rounded-lg border border-sky-200 dark:border-sky-700 bg-sky-50 dark:bg-sky-900/20 p-3 space-y-2">
                   <div className="flex items-center justify-between gap-2">
@@ -880,6 +1013,33 @@ export default function WorkbenchListPage() {
                       </div>
                     </div>
                   )}
+                </div>
+              )}
+              {asPipeline && (
+                <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-900/20 p-3 space-y-2">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">
+                    Explainability
+                  </div>
+                  <div className="text-xs text-emerald-900 dark:text-emerald-100">
+                    <span className="font-semibold">Why this method stack:</span>{' '}
+                    {selectedRecommendation?.why
+                      || (launchExplainabilityStack.length > 0
+                        ? `Pipeline uses ${launchExplainabilityStack.join(' + ')} based on your selected mode and stack configuration.`
+                        : 'Pipeline uses the selected method template for this launch.')}
+                  </div>
+                  {selectedRecommendation?.alternatives && selectedRecommendation.alternatives.length > 0 && (
+                    <div className="text-[11px] text-emerald-800 dark:text-emerald-200">
+                      Alternatives considered: {selectedRecommendation.alternatives.join(', ')}
+                    </div>
+                  )}
+                  <div className="text-xs text-emerald-900 dark:text-emerald-100">
+                    <span className="font-semibold">Why these models:</span>{' '}
+                    {resolvedByOverrideCount > 0 && `${resolvedByOverrideCount} phase override(s), `}
+                    {resolvedBySessionCount > 0 && `${resolvedBySessionCount} from session model, `}
+                    {resolvedByPersonaCount > 0 && `${resolvedByPersonaCount} from persona/agent bindings, `}
+                    {resolvedByDefaultCount > 0 && `${resolvedByDefaultCount} from template defaults`}
+                    {phasePreview.length === 0 && 'Model selection will resolve from your session model, agent persona bindings, then template defaults.'}
+                  </div>
                 </div>
               )}
               {projectId && (

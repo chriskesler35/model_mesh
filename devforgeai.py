@@ -2,9 +2,11 @@
 """
 DevForgeAI — CLI Runner
 Usage:
+    python devforgeai.py bootstrap      First-time setup (installer + guided config)
   python devforgeai.py start          Start both backend and frontend
   python devforgeai.py start backend  Start backend only
   python devforgeai.py start frontend Start frontend only
+    python devforgeai.py sync           Refresh dependencies after git pull
   python devforgeai.py stop           Stop running servers
   python devforgeai.py status         Show server status
   python devforgeai.py install        Run the installer
@@ -17,16 +19,22 @@ import subprocess
 import platform
 import time
 import shutil
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 ROOT = Path(__file__).parent.resolve()
 BACKEND_DIR = ROOT / "backend"
 FRONTEND_DIR = ROOT / "frontend"
 IS_WIN = platform.system() == "Windows"
+ROOT_ENV_FILE = ROOT / ".env"
+BACKEND_ENV_FILE = BACKEND_DIR / ".env"
+BACKEND_ENV_EXAMPLE = BACKEND_DIR / ".env.example"
 
 VENV_PYTHON = BACKEND_DIR / ("venv/Scripts/python.exe" if IS_WIN else "venv/bin/python")
 
 PID_FILE = ROOT / ".devforgeai.pids"
+LOCK_FILE = ROOT / ".devforgeai.start.lock"
 DEFAULT_BACKEND_PORT = 19001
 FALLBACK_BACKEND_PORT = 19000
 
@@ -42,6 +50,65 @@ def c(col, text):
     return f"{col}{text}{RESET}"
 
 
+def read_env_vars(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def append_env_var(path: Path, key: str, value: str):
+    content = path.read_text(encoding="utf-8") if path.exists() else ""
+    if content and not content.endswith("\n"):
+        content += "\n"
+    content += f"{key}={value}\n"
+    path.write_text(content, encoding="utf-8")
+
+
+def ensure_backend_env_file() -> bool:
+    if BACKEND_ENV_FILE.exists():
+        return True
+
+    if ROOT_ENV_FILE.exists():
+        shutil.copy(ROOT_ENV_FILE, BACKEND_ENV_FILE)
+        print(c(YELLOW, "  ⚠  backend/.env was missing. Copied values from root .env."))
+        return True
+
+    if BACKEND_ENV_EXAMPLE.exists():
+        shutil.copy(BACKEND_ENV_EXAMPLE, BACKEND_ENV_FILE)
+        print(c(YELLOW, "  ⚠  backend/.env was missing. Created from backend/.env.example."))
+        return True
+
+    return False
+
+
+def migrate_legacy_env_keys(path: Path):
+    if not path.exists():
+        return
+    values = read_env_vars(path)
+    mappings = {
+        "GITHUB_REDIRECT_URI": "GITHUB_OAUTH_REDIRECT_URL",
+        "GOOGLE_REDIRECT_URI": "GOOGLE_OAUTH_REDIRECT_URL",
+    }
+    for old_key, new_key in mappings.items():
+        if old_key in values and new_key not in values:
+            append_env_var(path, new_key, values[old_key])
+            print(c(YELLOW, f"  ⚠  Added {new_key} from legacy {old_key} in {path.name}."))
+
+
+def run_checked(cmd, cwd=None):
+    result = subprocess.run(cmd, cwd=cwd or ROOT)
+    if result.returncode != 0:
+        print(c(RED, f"  ✗  Command failed: {' '.join(cmd)}"))
+        sys.exit(result.returncode)
+
+
 def read_pids():
     if PID_FILE.exists():
         try:
@@ -52,8 +119,72 @@ def read_pids():
     return {}
 
 
+def acquire_start_lock() -> bool:
+    if LOCK_FILE.exists():
+        try:
+            old_pid = int(LOCK_FILE.read_text().strip())
+            if old_pid and is_alive(old_pid):
+                return False
+        except Exception:
+            pass
+        try:
+            LOCK_FILE.unlink(missing_ok=True)
+        except Exception:
+            return False
+    LOCK_FILE.write_text(str(os.getpid()))
+    return True
+
+
+def release_start_lock():
+    try:
+        LOCK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def write_pids(pids: dict):
     PID_FILE.write_text("\n".join(f"{k}={v}" for k, v in pids.items()))
+
+
+def list_listening_pids(port: int) -> list[int]:
+    if not IS_WIN:
+        return []
+    result = subprocess.run(
+        f'netstat -ano | findstr ":{port} " | findstr "LISTENING"',
+        capture_output=True, text=True, shell=True,
+    )
+    if result.returncode != 0:
+        return []
+    pids = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        try:
+            pids.append(int(parts[-1]))
+        except ValueError:
+            continue
+    return sorted(set(pids))
+
+
+def kill_listeners(port: int):
+    for pid in list_listening_pids(port):
+        kill_pid(pid)
+
+
+def preflight_cleanup():
+    # Enforce a single process set to avoid overlapping frontend/backend runtimes.
+    pids = read_pids()
+    for name in ("backend", "frontend"):
+        pid = pids.get(name)
+        if pid and is_alive(pid):
+            kill_pid(pid)
+
+    # Port-level cleanup catches orphans that don't belong to this PID file.
+    for port in (3001, DEFAULT_BACKEND_PORT, FALLBACK_BACKEND_PORT):
+        kill_listeners(port)
+
+    time.sleep(1.5)
 
 
 def is_alive(pid):
@@ -101,16 +232,31 @@ def resolve_backend_port() -> int:
     return DEFAULT_BACKEND_PORT
 
 
+def wait_for_http(url: str, timeout_sec: int = 45) -> bool:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=4) as resp:
+                if 200 <= resp.status < 500:
+                    return True
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            pass
+        time.sleep(1)
+    return False
+
+
 def start_backend():
     if not VENV_PYTHON.exists():
         print(c(RED, "  ✗  Virtual environment not found. Run: python install.py"))
         sys.exit(1)
-    env = os.environ.copy()
-    env_file = BACKEND_DIR / ".env"
-    if not env_file.exists():
-        print(c(YELLOW, f"  ⚠  No .env file found at {env_file}"))
-        print(c(YELLOW, "     Copy backend/.env.example → backend/.env and add API keys."))
+
+    if not ensure_backend_env_file():
+        print(c(RED, "  ✗  No .env file found and no template available to create one."))
         sys.exit(1)
+
+    migrate_legacy_env_keys(BACKEND_ENV_FILE)
+
+    env = os.environ.copy()
 
     backend_port = resolve_backend_port()
     env["DEVFORGEAI_BACKEND_PORT"] = str(backend_port)
@@ -141,7 +287,7 @@ def start_frontend(backend_port: int):
     env["DEVFORGEAI_BACKEND_PORT"] = str(backend_port)
     env["NEXT_PUBLIC_API_URL"] = f"http://localhost:{backend_port}"
     proc = subprocess.Popen(
-        "npm run dev",
+        "npm run dev:clean",
         cwd=FRONTEND_DIR,
         shell=True,
         env=env,
@@ -152,6 +298,13 @@ def start_frontend(backend_port: int):
 
 def cmd_start(target=None):
     print(f"\n{BOLD}DevForgeAI — Starting{RESET}\n")
+
+    if not acquire_start_lock():
+        print(c(RED, "  ✗  Another DevForgeAI start command is already running."))
+        print(c(YELLOW, "     If this is stale, delete .devforgeai.start.lock and retry."))
+        sys.exit(1)
+
+    preflight_cleanup()
 
     pids = {}
     procs = []
@@ -169,7 +322,25 @@ def cmd_start(target=None):
         procs.append(("frontend", p))
 
     write_pids(pids)
-    time.sleep(2)
+
+    backend_ok = True
+    frontend_ok = True
+    if target in (None, "backend"):
+        backend_ok = wait_for_http(f"http://127.0.0.1:{backend_port}/health", timeout_sec=45)
+    if target in (None, "frontend"):
+        frontend_ok = wait_for_http("http://127.0.0.1:3001", timeout_sec=75)
+
+    if not backend_ok or not frontend_ok:
+        print(c(RED, "\n  ✗  Startup health check failed."))
+        if target in (None, "backend") and not backend_ok:
+            print(c(RED, f"     Backend failed health check at http://127.0.0.1:{backend_port}/health"))
+        if target in (None, "frontend") and not frontend_ok:
+            print(c(RED, "     Frontend failed health check at http://127.0.0.1:3001"))
+        for _, p in procs:
+            kill_pid(p.pid)
+        PID_FILE.unlink(missing_ok=True)
+        release_start_lock()
+        sys.exit(1)
 
     print(f"""
   {GREEN}{BOLD}Running!{RESET}
@@ -187,6 +358,7 @@ def cmd_start(target=None):
             kill_pid(p.pid)
             print(f"  {CYAN}→{RESET}  Stopped {name}")
         PID_FILE.unlink(missing_ok=True)
+        release_start_lock()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
@@ -198,6 +370,8 @@ def cmd_start(target=None):
             p.wait()
     except KeyboardInterrupt:
         shutdown()
+    finally:
+        release_start_lock()
 
 
 def cmd_stop():
@@ -240,13 +414,46 @@ def cmd_install():
         sys.exit(1)
 
 
+def cmd_bootstrap():
+    print(f"\n{BOLD}DevForgeAI — Bootstrap{RESET}\n")
+    install_script = ROOT / "install.py"
+    if not install_script.exists():
+        print(c(RED, "  install.py not found."))
+        sys.exit(1)
+
+    configure_flag = "--configure" if sys.stdin.isatty() else "--no-config"
+    run_checked([sys.executable, str(install_script), configure_flag])
+
+
+def cmd_sync():
+    print(f"\n{BOLD}DevForgeAI — Sync (post-pull refresh){RESET}\n")
+
+    if not VENV_PYTHON.exists():
+        print(c(RED, "  ✗  backend/venv is missing. Run: python devforgeai.py bootstrap"))
+        sys.exit(1)
+
+    print(f"  {CYAN}→{RESET}  Updating backend dependencies...")
+    run_checked([str(VENV_PYTHON), "-m", "pip", "install", "--upgrade", "pip"], cwd=BACKEND_DIR)
+    run_checked([str(VENV_PYTHON), "-m", "pip", "install", "-r", "requirements.txt"], cwd=BACKEND_DIR)
+
+    print(f"  {CYAN}→{RESET}  Updating frontend dependencies...")
+    run_checked(["npm", "install", "--loglevel=error"], cwd=FRONTEND_DIR)
+
+    if ensure_backend_env_file():
+        migrate_legacy_env_keys(BACKEND_ENV_FILE)
+
+    print(c(GREEN, "\n  ✓  Sync complete. You can now run: python devforgeai.py start\n"))
+
+
 def usage():
     print(f"""
 {BOLD}DevForgeAI CLI{RESET}
 
+    {CYAN}python devforgeai.py bootstrap{RESET}       First-time guided setup
   {CYAN}python devforgeai.py start{RESET}           Start backend + frontend
   {CYAN}python devforgeai.py start backend{RESET}   Start backend only
   {CYAN}python devforgeai.py start frontend{RESET}  Start frontend only
+    {CYAN}python devforgeai.py sync{RESET}            Post-pull dependency refresh
   {CYAN}python devforgeai.py stop{RESET}            Stop running servers
   {CYAN}python devforgeai.py status{RESET}          Show server status
   {CYAN}python devforgeai.py install{RESET}         Run the installer
@@ -258,9 +465,13 @@ if __name__ == "__main__":
 
     if not args or args[0] in ("-h", "--help", "help"):
         usage()
+    elif args[0] == "bootstrap":
+        cmd_bootstrap()
     elif args[0] == "start":
         target = args[1] if len(args) > 1 else None
         cmd_start(target)
+    elif args[0] == "sync":
+        cmd_sync()
     elif args[0] == "stop":
         cmd_stop()
     elif args[0] == "status":

@@ -23,6 +23,7 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
 const ALL_TOOLS = Object.keys(TOOL_DESCRIPTIONS)
 
 interface Persona { id: string; name: string; description?: string; is_default?: boolean }
+interface ModelOption { id: string; model_id: string; display_name?: string; provider_name?: string }
 
 interface AgentData {
   id: string; name: string; agent_type: string; description?: string
@@ -81,6 +82,7 @@ export default function AgentDetailPage() {
 
   const [agent, setAgent] = useState<AgentData | null>(null)
   const [personas, setPersonas] = useState<Persona[]>([])
+  const [models, setModels] = useState<ModelOption[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState(false)
@@ -109,10 +111,12 @@ export default function AgentDetailPage() {
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<number>>(new Set())
 
   const loadData = useCallback(async () => {
-    const [personasRes] = await Promise.all([
-      fetch(`${API_BASE}/v1/personas`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] }))
+    const [personasRes, modelsRes] = await Promise.all([
+      fetch(`${API_BASE}/v1/personas`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+      fetch(`${API_BASE}/v1/models?active_only=true&usable_only=true&validated_only=true&chat_only=true`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
     ])
     setPersonas(personasRes.data || [])
+    setModels((modelsRes.data || []) as ModelOption[])
 
     if (agentId !== 'new') {
       const agentData = await fetch(`${API_BASE}/v1/agents/${agentId}`, { headers: AUTH_HEADERS })
@@ -776,9 +780,29 @@ export default function AgentDetailPage() {
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                 Direct Model ID <span className="text-gray-400 font-normal">(fallback if no persona)</span>
               </label>
-              <input value={form.model_id} onChange={e => setForm(f => ({ ...f, model_id: e.target.value }))}
-                placeholder="e.g. ollama/glm4:latest"
-                className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-orange-400" />
+              <select
+                value={form.model_id}
+                onChange={e => setForm(f => ({ ...f, model_id: e.target.value }))}
+                className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
+              >
+                <option value="">Select a validated model</option>
+                {Object.entries(
+                  models.reduce((acc, m) => {
+                    const provider = m.provider_name || 'other'
+                    if (!acc[provider]) acc[provider] = []
+                    acc[provider].push(m)
+                    return acc
+                  }, {} as Record<string, ModelOption[]>)
+                ).map(([provider, providerModels]) => (
+                  <optgroup key={provider} label={provider.charAt(0).toUpperCase() + provider.slice(1)}>
+                    {providerModels.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.display_name || m.model_id}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
             </div>
           )}
 

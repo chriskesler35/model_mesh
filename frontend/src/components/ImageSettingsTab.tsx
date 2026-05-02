@@ -24,6 +24,13 @@ interface ComfyEndpointsResponse {
   active_url?: string | null
 }
 
+interface RuntimeCapabilities {
+  image_providers?: {
+    'comfyui-local'?: boolean
+    'gemini-imagen'?: boolean
+  }
+}
+
 const SETTING_FIELDS = [
   {
     key: 'comfyui_dir',
@@ -89,6 +96,7 @@ export default function ImageSettingsTab() {
   const [workflows, setWorkflows] = useState<any[]>([])
   const [comfyEndpoints, setComfyEndpoints] = useState<ComfyEndpoint[]>([])
   const [activeComfyUrl, setActiveComfyUrl] = useState<string | null>(null)
+  const [runtimeCapabilities, setRuntimeCapabilities] = useState<RuntimeCapabilities | null>(null)
 
   const fetchEndpoints = useCallback(async () => {
     try {
@@ -104,25 +112,40 @@ export default function ImageSettingsTab() {
 
   const fetchSettings = useCallback(async () => {
     try {
-      const [settingsRes, statusRes, wfRes, endpointsRes] = await Promise.all([
+      const [settingsRes, statusRes, wfRes, endpointsRes, runtimeCapabilitiesRes] = await Promise.all([
         fetch(`${API_BASE}/v1/settings/app`, { headers: AUTH_HEADERS }).then(r => r.json()),
         fetch(`${API_BASE}/v1/comfyui/status`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ status: 'offline' })),
         fetch(`${API_BASE}/v1/workflows`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
         fetch(`${API_BASE}/v1/comfyui/endpoints`, { headers: AUTH_HEADERS })
           .then(r => r.json())
           .catch(() => ({ data: [], active_url: null } as ComfyEndpointsResponse)),
+        fetch(`${API_BASE}/v1/runtime/capabilities`, { headers: AUTH_HEADERS })
+          .then(r => r.json())
+          .catch(() => ({} as RuntimeCapabilities)),
       ])
       setSettings(settingsRes.data || {})
       setComfyStatus(statusRes.status === 'online' ? 'online' : 'offline')
       setWorkflows(wfRes.data || [])
       setComfyEndpoints(endpointsRes.data || [])
       setActiveComfyUrl(endpointsRes.active_url || null)
+      setRuntimeCapabilities(runtimeCapabilitiesRes || null)
     } catch {
       // ignore
     } finally {
       setLoading(false)
     }
   }, [])
+
+  const comfyImageProviderAvailable = runtimeCapabilities?.image_providers?.['comfyui-local'] ?? (comfyStatus === 'online')
+
+  useEffect(() => {
+    if (comfyImageProviderAvailable) return
+    const persisted = settings['default_image_provider']?.value || ''
+    const current = dirty['default_image_provider'] ?? persisted
+    if (current === 'comfyui') {
+      setDirty(prev => ({ ...prev, default_image_provider: 'gemini' }))
+    }
+  }, [comfyImageProviderAvailable, settings, dirty])
 
   useEffect(() => { fetchSettings() }, [fetchSettings])
 
@@ -232,9 +255,15 @@ export default function ImageSettingsTab() {
                         onChange={e => setDirtyValue(field.key, e.target.value)}
                         className="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white px-3 py-2 text-sm focus:ring-orange-400 focus:border-orange-400"
                       >
-                        {field.options.map(opt => (
-                          <option key={opt.value} value={opt.value}>{opt.label}</option>
-                        ))}
+                        {field.options.map(opt => {
+                          const isComfyOption = field.key === 'default_image_provider' && opt.value === 'comfyui'
+                          const disabled = isComfyOption && !comfyImageProviderAvailable
+                          return (
+                            <option key={opt.value} value={opt.value} disabled={disabled}>
+                              {disabled ? `${opt.label} (Unavailable)` : opt.label}
+                            </option>
+                          )
+                        })}
                       </select>
                     ) : (
                       <input

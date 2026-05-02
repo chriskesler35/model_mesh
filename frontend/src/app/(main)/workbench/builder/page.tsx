@@ -34,6 +34,13 @@ interface CustomAgent {
   is_active: boolean
 }
 
+interface ModelOption {
+  id: string
+  model_id: string
+  display_name?: string
+  provider_name?: string
+}
+
 interface WorkflowEdge {
   id: string
   source: string
@@ -99,7 +106,7 @@ export default function WorkflowBuilderPage() {
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null)
   const [handleDragSource, setHandleDragSource] = useState<string | null>(null)
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null)
-  const [availableModels, setAvailableModels] = useState<string[]>([])
+  const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
 
   // Run workflow state
   const [showRunModal, setShowRunModal] = useState(false)
@@ -143,9 +150,24 @@ export default function WorkflowBuilderPage() {
         )
         if (!res.ok) return
         const body = await res.json()
-        const models: string[] = (body.data ?? body.models ?? [])
-          .map((m: any) => typeof m === 'string' ? m : m.model_id || m.name)
-          .filter(Boolean)
+        const models: ModelOption[] = (body.data ?? body.models ?? [])
+          .map((m: any) => {
+            if (typeof m === 'string') {
+              return {
+                id: m,
+                model_id: m,
+                display_name: m,
+                provider_name: 'other',
+              }
+            }
+            return {
+              id: m.id || m.model_id || m.name,
+              model_id: m.model_id || m.name,
+              display_name: m.display_name,
+              provider_name: m.provider_name,
+            }
+          })
+          .filter((m: ModelOption) => Boolean(m.id) && Boolean(m.model_id))
         if (!cancelled) setAvailableModels(models)
       } catch { /* silent — model dropdown shows only Default */ }
     })()
@@ -996,8 +1018,19 @@ export default function WorkflowBuilderPage() {
                       className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
                     >
                       <option value="">Default</option>
-                      {availableModels.map((m) => (
-                        <option key={m} value={m}>{m}</option>
+                      {Object.entries(
+                        availableModels.reduce((acc, model) => {
+                          const provider = model.provider_name || 'other'
+                          if (!acc[provider]) acc[provider] = []
+                          acc[provider].push(model)
+                          return acc
+                        }, {} as Record<string, ModelOption[]>)
+                      ).map(([provider, providerModels]) => (
+                        <optgroup key={provider} label={provider.charAt(0).toUpperCase() + provider.slice(1)}>
+                          {providerModels.map((model) => (
+                            <option key={model.id} value={model.id}>{model.display_name || model.model_id}</option>
+                          ))}
+                        </optgroup>
                       ))}
                     </select>
                   </div>

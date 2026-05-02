@@ -14,6 +14,7 @@ export interface SkillCardProps {
   isInstalled?: boolean;
   onSelect: (skillId: string) => void;
   onInstallClick: (skillId: string) => void;
+  onRemoveClick: (skillId: string) => void;
 }
 
 const complexityColors: Record<string, string> = {
@@ -45,14 +46,25 @@ export function SkillCard({
   isInstalled = false,
   onSelect,
   onInstallClick,
+  onRemoveClick,
 }: SkillCardProps) {
   const handleCardClick = () => {
+    onSelect(skillId);
+  };
+
+  const handleViewDetailsClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
     onSelect(skillId);
   };
 
   const handleInstallClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     onInstallClick(skillId);
+  };
+
+  const handleRemoveClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onRemoveClick(skillId);
   };
 
   return (
@@ -129,16 +141,33 @@ export function SkillCard({
         </div>
       </CardContent>
 
-      <CardFooter>
+      <CardFooter className="flex gap-2">
         <Button
-          onClick={handleInstallClick}
-          disabled={isInstalled}
-          variant={isInstalled ? "outline" : "default"}
+          onClick={handleViewDetailsClick}
+          variant="outline"
           size="sm"
-          className="w-full"
+          className="flex-1"
         >
-          {isInstalled ? 'Installed' : 'View Details'}
+          View Details
         </Button>
+        {isInstalled ? (
+          <Button
+            onClick={handleRemoveClick}
+            variant="outline"
+            size="sm"
+            className="flex-1 border-red-200 text-red-700 hover:bg-red-50 hover:text-red-800"
+          >
+            Remove
+          </Button>
+        ) : (
+          <Button
+            onClick={handleInstallClick}
+            size="sm"
+            className="flex-1"
+          >
+            Install
+          </Button>
+        )}
       </CardFooter>
     </Card>
   );

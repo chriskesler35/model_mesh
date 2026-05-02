@@ -1,13 +1,16 @@
 'use client';
 
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { Input } from '@/components/ui/input';
-import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { SkillCard } from '@/components/marketplace/SkillCard';
 import { FilterPanel } from '@/components/marketplace/FilterPanel';
 import { SkillDetailPane } from '@/components/marketplace/SkillDetailPane';
 import { InstallWizard } from '@/components/marketplace/InstallWizard';
+import { RemoveSkillModal } from '@/components/marketplace/RemoveSkillModal';
+import { useInstalledSkills } from '@/hooks/useInstalledSkills';
+import { useToast } from '@/app/ToastProvider';
+import { AUTH_HEADERS } from '@/lib/config';
 import { Loader2, AlertCircle } from 'lucide-react';
 
 interface Skill {
@@ -32,11 +35,25 @@ interface FilterOptions {
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://127.0.0.1:19001';
 
+const SKILL_METHOD_BRIDGE: Record<string, string> = {
+  'bmad-core': 'bmad',
+  'gsd-core': 'gsd',
+  'superpowers': 'superpowers',
+};
+
 export default function MarketplacePage() {
+  const { addToast } = useToast();
+  const {
+    installedSkills,
+    installedSkillIds,
+    addInstalledSkill,
+    mergeInstalledSkills,
+    removeInstalledSkill,
+  } = useInstalledSkills();
+
   // State
   const [skills, setSkills] = useState<Skill[]>([]);
   const [filterOptions, setFilterOptions] = useState<FilterOptions | null>(null);
-  const [installedSkills, setInstalledSkills] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -54,6 +71,9 @@ export default function MarketplacePage() {
   const [installingSkillId, setInstallingSkillId] = useState<string | null>(null);
   const [showInstallWizard, setShowInstallWizard] = useState(false);
 
+  // Remove Flow
+  const [removingSkillId, setRemovingSkillId] = useState<string | null>(null);
+
   // Fetch filter options and skills
   useEffect(() => {
     const fetchData = async () => {
@@ -62,22 +82,23 @@ export default function MarketplacePage() {
         setError(null);
 
         // Fetch filter options
-        const filterRes = await fetch(`${API_BASE}/v1/marketplace/filters`);
+        const filterRes = await fetch('/api/marketplace/filters');
         if (!filterRes.ok) throw new Error('Failed to load filter options');
         const filters: FilterOptions = await filterRes.json();
         setFilterOptions(filters);
 
         // Fetch all skills (initial load)
-        const skillRes = await fetch(`${API_BASE}/v1/marketplace/skills`);
+        const skillRes = await fetch('/api/marketplace/skills');
         if (!skillRes.ok) throw new Error('Failed to load skills');
         const skillData = await skillRes.json();
         setSkills(skillData.results || []);
 
-        // Fetch installed skills (currently empty in Phase 5)
         const installedRes = await fetch(`${API_BASE}/v1/skills/installed`);
         if (installedRes.ok) {
           const installed = await installedRes.json();
-          setInstalledSkills(installed.map((s: any) => s.skill_id));
+          if (Array.isArray(installed) && installed.length > 0) {
+            mergeInstalledSkills(installed);
+          }
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'An error occurred');
@@ -87,7 +108,7 @@ export default function MarketplacePage() {
     };
 
     fetchData();
-  }, []);
+  }, [mergeInstalledSkills]);
 
   // Fetch filtered results when search or filters change
   const fetchFilteredSkills = useCallback(async () => {
@@ -99,7 +120,7 @@ export default function MarketplacePage() {
       if (selectedComplexity) params.append('complexity', selectedComplexity);
       if (selectedTrustLevel) params.append('trust_level', selectedTrustLevel);
 
-      const url = `${API_BASE}/v1/marketplace/skills${params.toString() ? '?' + params.toString() : ''}`;
+      const url = `/api/marketplace/skills${params.toString() ? '?' + params.toString() : ''}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error('Failed to search skills');
       const data = await res.json();
@@ -137,9 +158,13 @@ export default function MarketplacePage() {
     setShowInstallWizard(true);
   };
 
+  const handleRemoveClick = (skillId: string) => {
+    setRemovingSkillId(skillId);
+  };
+
   // Handle install start
   const handleStartInstall = async (skillId: string) => {
-    const res = await fetch(`${API_BASE}/v1/marketplace/skill/${skillId}/install`, {
+    const res = await fetch(`/api/marketplace/skill/${skillId}/install`, {
       method: 'POST',
     });
     if (!res.ok) throw new Error('Failed to start install');
@@ -149,16 +174,53 @@ export default function MarketplacePage() {
   // Handle poll progress
   const handlePollProgress = async (jobId: string) => {
     if (!installingSkillId) throw new Error('No skill selected');
-    const res = await fetch(`${API_BASE}/v1/marketplace/skill/${installingSkillId}/install/progress/${jobId}`);
+    const res = await fetch(`/api/marketplace/skill/${installingSkillId}/install/progress/${jobId}`);
     if (!res.ok) throw new Error('Failed to fetch progress');
     return res.json();
   };
 
   // Handle install success
-  const handleInstallSuccess = (skillId: string) => {
-    setInstalledSkills(prev => [...new Set([...prev, skillId])]);
-    // Re-fetch skills to update badges
-    setSkills(prev => prev.map(s => s));
+  const handleInstallSuccess = async (skillId: string) => {
+    const installedSkill = skills.find((skill) => skill.skill_id === skillId) || selectedSkill;
+
+    if (installedSkill && installedSkill.skill_id === skillId) {
+      try {
+        const res = await fetch(`${API_BASE}/v1/skills/${skillId}/add`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(installedSkill),
+        });
+        if (!res.ok) {
+          throw new Error('Failed to persist installed skill');
+        }
+      } catch {
+        // Keep UX resilient: local persistence still records the install.
+      }
+
+      addInstalledSkill(installedSkill);
+    }
+
+    const bridgedMethodId = SKILL_METHOD_BRIDGE[skillId];
+    if (bridgedMethodId) {
+      try {
+        await fetch(`${API_BASE}/v1/methods/activate`, {
+          method: 'POST',
+          headers: AUTH_HEADERS,
+          body: JSON.stringify({ method_id: bridgedMethodId }),
+        });
+      } catch {
+        // Installing the skill should still succeed even if method activation fails.
+      }
+    }
+
+    addToast({
+      type: 'success',
+      title: 'Skill installed',
+      message: bridgedMethodId
+        ? `${installedSkill?.name || skillId} installed and mapped to ${bridgedMethodId.toUpperCase()} method.`
+        : `${installedSkill?.name || skillId} is now available in your installed skills.`,
+      autoClose: 3000,
+    });
   };
 
   // Handle install wizard close
@@ -166,6 +228,35 @@ export default function MarketplacePage() {
     setShowInstallWizard(false);
     setInstallingSkillId(null);
   };
+
+  const handleConfirmRemove = async () => {
+    if (!removingSkillId) {
+      return;
+    }
+
+    const removedSkill = installedSkills.find((skill) => skill.skill_id === removingSkillId);
+    try {
+      await fetch(`${API_BASE}/v1/skills/${removingSkillId}/remove`, {
+        method: 'POST',
+      });
+    } catch {
+      // Local removal remains available even if backend sync fails.
+    }
+
+    removeInstalledSkill(removingSkillId);
+    setRemovingSkillId(null);
+
+    addToast({
+      type: 'info',
+      title: 'Skill removed',
+      message: `${removedSkill?.name || removingSkillId} was removed from your installed skills.`,
+      autoClose: 3000,
+    });
+  };
+
+  const removingSkill = installedSkills.find((skill) => skill.skill_id === removingSkillId)
+    || skills.find((skill) => skill.skill_id === removingSkillId)
+    || null;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
@@ -256,9 +347,10 @@ export default function MarketplacePage() {
                             languages={skill.languages}
                             complexity={skill.complexity}
                             trustLevel={skill.trust_level}
-                            isInstalled={installedSkills.includes(skill.skill_id)}
+                            isInstalled={installedSkillIds.includes(skill.skill_id)}
                             onSelect={handleSelectSkill}
                             onInstallClick={handleInstallClick}
+                            onRemoveClick={handleRemoveClick}
                           />
                         ))}
                       </div>
@@ -280,9 +372,10 @@ export default function MarketplacePage() {
                       trustLevel={selectedSkill.trust_level}
                       installUrl={selectedSkill.install_url}
                       manifestUrl={selectedSkill.manifest_url}
-                      isInstalled={installedSkills.includes(selectedSkill.skill_id)}
+                      isInstalled={installedSkillIds.includes(selectedSkill.skill_id)}
                       onClose={() => setSelectedSkill(null)}
                       onInstallClick={() => handleInstallClick(selectedSkill.skill_id)}
+                      onRemoveClick={() => handleRemoveClick(selectedSkill.skill_id)}
                     />
                   ) : (
                     <Card className="p-8 text-center h-full flex items-center justify-center bg-gray-50">
@@ -308,6 +401,13 @@ export default function MarketplacePage() {
           onPollProgress={handlePollProgress}
         />
       )}
+
+      <RemoveSkillModal
+        isOpen={!!removingSkill}
+        skillName={removingSkill?.name || 'this skill'}
+        onClose={() => setRemovingSkillId(null)}
+        onConfirm={handleConfirmRemove}
+      />
     </div>
   );
 }

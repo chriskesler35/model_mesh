@@ -134,29 +134,80 @@ class AgentRunner:
     # ------------------------------------------------------------------
 
     def _build_system_prompt(self) -> str:
-        """Build system prompt with tool-use instructions appended."""
-        base = getattr(self.agent, "system_prompt", "") or ""
-        tools = getattr(self.agent, "tools", []) or []
+        """Build system prompt with tool-use instructions appended.
 
-        if not tools:
+        For models that support native function calling the tool schemas are
+        passed via LiteLLM's ``tools=`` parameter, so we only append a brief
+        note.  For text-based fallback models we embed the full CMD: fragment
+        so the model knows what syntax to use.
+        """
+        from app.services.tool_registry import (
+            get_tool_prompt_fragment,
+            provider_supports_function_calling,
+            resolve_agent_tools,
+        )
+
+        base = getattr(self.agent, "system_prompt", "") or ""
+        tool_names = resolve_agent_tools(getattr(self.agent, "tools", None))
+
+        if not tool_names:
             return base
 
-        tool_instructions = (
-            f"\n\nYou have access to these tools: {', '.join(tools)}\n"
-            "When you need to run a shell command, output it on its own line "
-            "in the format:\n"
-            "  CMD: <command>\n"
-            "You may include multiple CMD: lines in a single response.\n"
-            "When you are done with the task, output DONE: followed by your "
-            "final answer on the same line."
+        uses_native = provider_supports_function_calling(
+            self.provider.name, self.model.model_id or ""
         )
-        return base + tool_instructions
 
-    async def _call_llm(self, messages: list) -> tuple[str, int, int]:
-        """Make one LLM call and return (response_text, input_tokens, output_tokens)."""
+        if uses_native:
+            # The tool schemas are sent separately; just remind the model.
+            suffix = (
+                "\n\nYou have access to tools (read_file, write_file, list_dir, "
+                "run_shell, install_package, web_fetch). Use them to complete the "
+                "task. When finished, provide your final answer."
+            )
+        else:
+            suffix = "\n\n" + get_tool_prompt_fragment(tool_names)
+
+        return base + suffix
+
+    async def _call_llm(self, messages: list) -> tuple[str, list, int, int]:
+        """Make one LLM call, returning (response_text, tool_calls, input_tokens, output_tokens).
+
+        When the provider supports native function calling (OpenAI tool_calls format),
+        uses ``call_model_with_tools`` so the model receives structured schemas and
+        returns structured JSON arguments.  Falls back to plain text streaming with
+        CMD: parsing for models that do not support function calling.
+
+        ``tool_calls`` is a list of dicts: [{"id", "name", "arguments"}, ...]
+        An empty list means the model responded with plain text only.
+        """
         from app.services.model_client import ModelClient
+        from app.services.tool_registry import (
+            get_tool_schemas,
+            provider_supports_function_calling,
+            resolve_agent_tools,
+        )
 
         client = ModelClient()
+        tool_names = resolve_agent_tools(getattr(self.agent, "tools", None))
+        uses_native = bool(tool_names) and provider_supports_function_calling(
+            self.provider.name, self.model.model_id or ""
+        )
+
+        if uses_native:
+            schemas = get_tool_schemas(tool_names)
+            response_text, tool_calls, input_tokens, output_tokens = (
+                await client.call_model_with_tools(
+                    model=self.model,
+                    provider=self.provider,
+                    messages=messages,
+                    tools=schemas,
+                    temperature=0.2,
+                    max_tokens=8000,
+                )
+            )
+            return response_text, tool_calls, input_tokens, output_tokens
+
+        # ── Text-streaming fallback (CMD: blocks) ────────────────────────────
         stream = await client.call_model(
             model=self.model,
             provider=self.provider,
@@ -171,7 +222,6 @@ class AgentRunner:
         output_tokens = 0
 
         async for chunk in stream:
-            # Extract text delta
             delta = ""
             try:
                 if hasattr(chunk, "choices") and chunk.choices:
@@ -188,7 +238,6 @@ class AgentRunner:
             if delta:
                 chunks.append(delta)
 
-            # Capture usage from final chunk
             try:
                 usage = None
                 if hasattr(chunk, "usage") and chunk.usage:
@@ -207,7 +256,7 @@ class AgentRunner:
             except Exception:
                 pass
 
-        return "".join(chunks), input_tokens, output_tokens
+        return "".join(chunks), [], input_tokens, output_tokens
 
     async def _execute_commands(self, commands: list[str]) -> list[dict]:
         """Execute parsed CMD: commands and return results."""
@@ -256,9 +305,52 @@ class AgentRunner:
 
         return results
 
+    async def _execute_tool_calls(self, tool_calls: list[dict]) -> list[dict]:
+        """Execute native function-call tool_calls and return structured results.
+
+        Each item in ``tool_calls`` is {"id", "name", "arguments"}.
+        Returns a parallel list of result dicts with "success", "output", "name", "id".
+        """
+        from app.services.command_executor import execute_tool_call
+
+        results: list[dict] = []
+        for tc in tool_calls:
+            name = tc.get("name", "")
+            args = tc.get("arguments", {})
+            try:
+                result = await execute_tool_call(name, args, self.project_path)
+            except Exception as exc:
+                logger.error("Tool call '%s' raised: %s", name, exc)
+                result = {"success": False, "output": str(exc)}
+
+            results.append(
+                {
+                    "id": tc.get("id", ""),
+                    "name": name,
+                    "arguments": args,
+                    "success": result.get("success", False),
+                    "output": result.get("output", ""),
+                }
+            )
+        return results
+
+    @staticmethod
+    def _format_native_tool_results(results: list[dict]) -> str:
+        """Format native tool call results for injection into the next LLM turn."""
+        parts: list[str] = []
+        for r in results:
+            status = "OK" if r["success"] else "ERROR"
+            output = (r.get("output") or "").strip()
+            if len(output) > 4000:
+                output = output[:4000] + "\n…(truncated)"
+            parts.append(
+                f"[tool: {r['name']} | {status}]\n{output}"
+            )
+        return "\n\n".join(parts)
+
     @staticmethod
     def _format_tool_results(results: list[dict]) -> str:
-        """Format tool results as context for the next LLM turn."""
+        """Format CMD: tool results as context for the next LLM turn."""
         parts: list[str] = []
         for r in results:
             lines = [f"$ {r['command']}", f"[exit={r['exit_code']}]"]
@@ -281,9 +373,61 @@ class AgentRunner:
     # Public API — non-streaming
     # ------------------------------------------------------------------
 
-    async def run(self, task: str, context: Optional[dict] = None) -> dict:
-        """Execute agent with iterative tool loop. Returns final result dict."""
+    async def run(
+        self,
+        task: str,
+        context: Optional[dict] = None,
+        *,
+        agentic_emit=None,
+        session_id: Optional[str] = None,
+    ) -> dict:
+        """Execute agent with iterative tool loop. Returns final result dict.
+
+        Parameters
+        ----------
+        task:
+            The user task string.
+        context:
+            Optional extra context dict.
+        agentic_emit:
+            Optional async ``(event_dict) -> None`` callback wired to the
+            workbench SSE push helper.  When provided the run passes through
+            the full AgenticOrchestrator state machine so every state
+            transition is emitted as a telemetry event.
+        session_id:
+            Workbench session owning this run (used for goal extraction context).
+        """
         from app.services.command_executor import parse_cmd_blocks
+
+        # ── Agentic orchestration wrapper ─────────────────────────────
+        # When an emit callback is provided the run is driven through the
+        # goal → plan → execute → verify state machine so telemetry reflects
+        # true agentic behaviour rather than raw iteration events only.
+        if agentic_emit is not None:
+            from app.services.agentic_orchestrator import AgenticOrchestrator
+
+            orchestrator = AgenticOrchestrator(
+                session_id=session_id or "standalone",
+                emit=agentic_emit,
+            )
+
+            async def _execute_fn(prompt, goal, plan):
+                # Run the actual iteration loop without re-entering orchestration
+                return await self.run(prompt, context)
+
+            orch_result = await orchestrator.run(task, _execute_fn)
+            # Merge orchestrator metadata into the underlying run result
+            inner_result = orch_result.get("result", {})
+            inner_result.update(
+                {
+                    "agentic_run_id": orch_result["run_id"],
+                    "agentic_goal_id": orch_result["goal_id"],
+                    "agentic_plan_id": orch_result["plan_id"],
+                    "agentic_state_history": orch_result["state_history"],
+                    "agentic_verification": orch_result["verification"],
+                }
+            )
+            return inner_result
 
         run_id = str(uuid.uuid4())
         start_time = time.time()
@@ -323,7 +467,7 @@ class AgentRunner:
 
             # Call LLM
             try:
-                response_text, in_tok, out_tok = await self._call_llm(messages)
+                response_text, native_tool_calls, in_tok, out_tok = await self._call_llm(messages)
                 total_input_tokens += in_tok
                 total_output_tokens += out_tok
             except Exception as e:
@@ -335,6 +479,45 @@ class AgentRunner:
                     "error": str(e),
                 })
                 break
+
+            # ── Native function-call path ─────────────────────────────
+            if native_tool_calls:
+                tool_results = await self._execute_tool_calls(native_tool_calls)
+                self.iterations.append({
+                    "iteration": iteration,
+                    "type": "tool_use",
+                    "response_preview": response_text[:500],
+                    "tool_calls": [
+                        {"name": r["name"], "success": r["success"]}
+                        for r in tool_results
+                    ],
+                })
+
+                # Feed results back using OpenAI tool_calls multi-turn format
+                assistant_msg: dict = {"role": "assistant", "content": response_text or None}
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": r["id"],
+                        "type": "function",
+                        "function": {
+                            "name": r["name"],
+                            "arguments": json.dumps(r["arguments"]),
+                        },
+                    }
+                    for r in tool_results
+                ]
+                messages.append(assistant_msg)
+                for r in tool_results:
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": r["id"],
+                            "content": r["output"],
+                        }
+                    )
+                continue
+
+            # ── Text-parsing fallback path (CMD: blocks) ──────────────
 
             # Check for DONE signal
             done_answer = self._check_done(response_text)
@@ -461,6 +644,7 @@ class AgentRunner:
         total_input_tokens = 0
         total_output_tokens = 0
 
+        client = ModelClient()
         yield {"event": "run_started", "run_id": run_id}
 
         for iteration in range(self.max_iterations):
@@ -475,9 +659,104 @@ class AgentRunner:
 
             yield {"event": "iteration_started", "iteration": iteration}
 
-            # Stream LLM response
-            client = ModelClient()
+            # ── Branch: native function calling vs text streaming ─────
+            from app.services.tool_registry import (
+                get_tool_schemas,
+                provider_supports_function_calling,
+                resolve_agent_tools,
+            )
 
+            tool_names = resolve_agent_tools(getattr(self.agent, "tools", None))
+            uses_native = bool(tool_names) and provider_supports_function_calling(
+                self.provider.name, self.model.model_id or ""
+            )
+
+            if uses_native:
+                # Native tool-calling: non-streaming, structured responses
+                schemas = get_tool_schemas(tool_names)
+                try:
+                    response_text, native_tool_calls, in_tok, out_tok = (
+                        await client.call_model_with_tools(
+                            model=self.model,
+                            provider=self.provider,
+                            messages=messages,
+                            tools=schemas,
+                            temperature=0.2,
+                            max_tokens=8000,
+                        )
+                    )
+                    total_input_tokens += in_tok
+                    total_output_tokens += out_tok
+                except Exception as e:
+                    yield {"event": "error", "iteration": iteration, "message": str(e)}
+                    return
+
+                if response_text:
+                    yield {"event": "chunk", "data": response_text}
+
+                if native_tool_calls:
+                    for tc in native_tool_calls:
+                        yield {
+                            "event": "tool_call",
+                            "iteration": iteration,
+                            "command": f"{tc['name']}({json.dumps(tc['arguments'])})",
+                        }
+
+                    tc_results = await self._execute_tool_calls(native_tool_calls)
+
+                    for r in tc_results:
+                        yield {
+                            "event": "tool_result",
+                            "iteration": iteration,
+                            "command": r["name"],
+                            "success": r["success"],
+                            "stdout": r["output"][:500],
+                            "stderr": "",
+                            "exit_code": 0 if r["success"] else -1,
+                        }
+
+                    yield {"event": "iteration_complete", "iteration": iteration}
+
+                    # Feed results back in OpenAI multi-turn format
+                    assistant_msg: dict = {
+                        "role": "assistant",
+                        "content": response_text or None,
+                        "tool_calls": [
+                            {
+                                "id": r["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": r["name"],
+                                    "arguments": json.dumps(r["arguments"]),
+                                },
+                            }
+                            for r in tc_results
+                        ],
+                    }
+                    messages.append(assistant_msg)
+                    for r in tc_results:
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": r["id"],
+                                "content": r["output"],
+                            }
+                        )
+                    continue
+
+                # No tool calls — final answer
+                yield {
+                    "event": "done",
+                    "output": response_text,
+                    "run_id": run_id,
+                    "iteration_count": iteration + 1,
+                    "input_tokens": total_input_tokens,
+                    "output_tokens": total_output_tokens,
+                    "duration_ms": int((time.time() - start_time) * 1000),
+                }
+                return
+
+            # ── Text-streaming path (CMD: blocks) ────────────────────
             chunks: list[str] = []
             try:
                 stream = await client.call_model(

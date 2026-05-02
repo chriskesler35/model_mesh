@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     # Rate Limiting (requests per minute/hour)
     rate_limit_rpm: int = 60  # 60 requests per minute
     rate_limit_rph: int = 1000  # 1000 requests per hour
+
+    # Feature flags (staged rollout)
+    ui_guided_mode: bool = True
+    method_launcher_v1: bool = False
+    skills_marketplace_alpha: bool = False
     
     class Config:
         env_file = [".env", "../.env"]

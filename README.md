@@ -49,7 +49,37 @@ git clone https://github.com/chriskesler35/model_mesh.git
 cd model_mesh
 ```
 
-### 2. Backend setup
+### 2. Bootstrap setup (recommended)
+
+Run one command from the repo root:
+
+```bash
+python devforgeai.py bootstrap
+```
+
+What this does:
+- Installs backend + frontend dependencies
+- Creates/normalizes `backend/.env`
+- Launches a guided config walkthrough for API keys and local endpoints
+- Fixes legacy env key names automatically (for older clones)
+- Enables capability-aware defaults so local-only features stay hidden/disabled when local services are unavailable
+
+### 3. Start
+
+```bash
+python devforgeai.py start
+```
+
+### 4. Open
+
+- **App:** http://localhost:3001
+- **API docs:** http://localhost:19001/docs
+
+---
+
+## Manual Setup (advanced)
+
+### Backend setup
 
 ```bash
 cd backend
@@ -63,7 +93,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Configure
+### Configure
 
 Copy the example env file and fill in your keys:
 
@@ -92,57 +122,30 @@ TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_IDS=
 ```
 
-### 4. Frontend setup
+### Frontend setup
 
 ```bash
 cd ../frontend
 npm install
 ```
 
-### 5. Start
+### Start (One-Command Reliable Path)
 
-**Option A - Background, no windows (recommended on Windows):**
-```
-# Install PM2 once
-npm install -g pm2
-pm2 set pm2:windowsHide true
+Use the hardened startup command:
 
-# Then just double-click:
-start-hidden.vbs   ← starts everything silently, shows a small confirmation popup
-stop-hidden.vbs    ← stops everything
-```
-
-Manage from the **Settings → ⚙️ Server** tab in the UI, or via CLI:
 ```bash
-pm2 list              # see status
-pm2 logs              # tail live logs
-pm2 restart all       # restart both
-pm2 stop all          # stop both
+python devforgeai.py start
 ```
 
-**Option B - start.bat (Windows, quick):**
-```
+This path now enforces a single runtime instance, cleans stale listeners, starts frontend with a clean cache pass, and blocks until backend/frontend health checks pass.
+
+Windows wrappers call the same hardened path:
+
+```bat
 start.bat
 ```
-Checks if ports are free, launches backend + frontend in separate windows.
 
-**Option C - Terminal windows (easier for development/debugging):**
-
-Terminal 1 - Backend:
-```bash
-cd backend
-venv\Scripts\activate          # Windows
-# source venv/bin/activate    # macOS/Linux
-python -m uvicorn app.main:app --host 0.0.0.0 --port 19001
-```
-
-Terminal 2 - Frontend:
-```bash
-cd frontend
-npm run dev
-```
-
-### 6. Open
+### Open
 
 - **App:** http://localhost:3001
 - **API docs:** http://localhost:19001/docs
@@ -159,21 +162,11 @@ If you already have DevForgeAI installed and just want the latest changes:
 # 1. Pull latest code
 git pull origin main
 
-# 2. Update backend dependencies (always run this after a pull)
-cd backend
-venv\Scripts\activate        # Windows
-# source venv/bin/activate  # macOS/Linux
-pip install -r requirements.txt
+# 2. Refresh dependencies and config compatibility
+python devforgeai.py sync
 
-# 3. Update frontend dependencies (run this after a pull)
-cd ../frontend
-npm install
-
-# 4. Restart
-# If running via PM2 (background mode):
-pm2 restart all
-
-# If running in terminal windows: stop them (Ctrl+C) and start again
+# 3. Restart
+python devforgeai.py start
 ```
 
 **What happens automatically on restart - you don't need to do these:**
@@ -199,7 +192,7 @@ pm2 restart all
 
 > **Self-healing:** The frontend automatically clears stale caches on startup. If a page crashes at runtime, error boundaries catch it and attempt auto-recovery before showing a manual retry UI — you should never see a blank white page.
 
-> **Rule of thumb:** after every `git pull`, always run `pip install -r requirements.txt` and `npm install` before restarting. It's fast when nothing changed and prevents 99% of post-update errors.
+> **Rule of thumb:** after every `git pull`, run `python devforgeai.py sync` before restarting.
 
 ---
 
@@ -222,6 +215,7 @@ pm2 restart all
 
 ### Image Generation
 - **Provider choice** - Gemini Imagen (cloud) or ComfyUI (local) with auto-fallback
+- **Capability-aware provider gating** - local image options are auto-disabled when ComfyUI is offline; UI falls back to cloud automatically
 - **Workflow templates** - SDXL Standard, Flux Schnell (fast), Flux Dev (quality), Flux Uncensored + LoRA, SD 1.5 — or add your own
 - **Checkpoint picker** - auto-discovers models from your ComfyUI install, filtered by workflow compatibility
 - **LoRA support** - auto-discovers LoRA models from ComfyUI, with strength slider; dynamically injected into any workflow
@@ -258,6 +252,7 @@ pm2 restart all
 - **Memory Files** - USER.md, CONTEXT.md, PREFERENCES.md injected into every chat
 - **Preferences** - View, toggle, add, delete learned preferences; detect from chat
 - **Image Generation** - Configure ComfyUI path, Python executable, URL, GPU devices, default provider/workflow
+- **Runtime Mode Badge** - shows `Hybrid`, `Cloud-only`, `Local-only`, or `Limited/Offline` with quick signal chips for ComfyUI/Ollama/Cloud availability
 - **Conversations** - Browse and delete conversation history
 - **Remote** - Telegram bot config, Tailscale setup
 - **⚙️ Server** - Uptime, health checks, one-click backend restart
@@ -321,9 +316,9 @@ DevForgeAI automatically works from any device on your network. The frontend det
 
 | You access from | Frontend auto-connects to |
 |---|---|
-| `http://localhost:3001` | `http://localhost:19000` |
-| `http://192.168.1.50:3001` (LAN) | `http://192.168.1.50:19000` |
-| `http://100.x.x.x:3001` (Tailscale) | `http://100.x.x.x:19000` |
+| `http://localhost:3001` | `http://localhost:19001` |
+| `http://192.168.1.50:3001` (LAN) | `http://192.168.1.50:19001` |
+| `http://100.x.x.x:3001` (Tailscale) | `http://100.x.x.x:19001` |
 
 Override: set `NEXT_PUBLIC_API_URL` in `frontend/.env.local` to hardcode a specific backend URL.
 
@@ -333,7 +328,7 @@ If you use [Tailscale](https://tailscale.com) for remote access, add firewall ru
 
 ```powershell
 # Windows - allow Tailscale subnet only
-netsh advfirewall firewall add rule name="DevForgeAI API (19000)" dir=in action=allow protocol=tcp localport=19000 remoteip=100.64.0.0/10
+netsh advfirewall firewall add rule name="DevForgeAI API (19001)" dir=in action=allow protocol=tcp localport=19001 remoteip=100.64.0.0/10
 netsh advfirewall firewall add rule name="DevForgeAI Frontend (3001)" dir=in action=allow protocol=tcp localport=3001 remoteip=100.64.0.0/10
 ```
 
@@ -342,7 +337,7 @@ netsh advfirewall firewall add rule name="DevForgeAI Frontend (3001)" dir=in act
 For local network access without Tailscale, allow your LAN subnet:
 
 ```powershell
-netsh advfirewall firewall add rule name="DevForgeAI API (LAN)" dir=in action=allow protocol=tcp localport=19000 remoteip=192.168.0.0/16
+netsh advfirewall firewall add rule name="DevForgeAI API (LAN)" dir=in action=allow protocol=tcp localport=19001 remoteip=192.168.0.0/16
 netsh advfirewall firewall add rule name="DevForgeAI Frontend (LAN)" dir=in action=allow protocol=tcp localport=3001 remoteip=192.168.0.0/16
 ```
 

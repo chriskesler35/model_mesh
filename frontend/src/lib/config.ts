@@ -8,7 +8,7 @@
  * Override: set NEXT_PUBLIC_API_URL in .env.local
  */
 
-const BACKEND_PORT = '19000'
+const BACKEND_PORT = '19001'
 
 function trimTrailingSlash(url: string): string {
   return url.replace(/\/+$/, '')

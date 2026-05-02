@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from 'react'
 
+const AUTO_HEAL_ATTEMPTED_KEY = 'devforgeai_global_error_autoheal_attempted'
+
 /**
  * Global error boundary — catches fatal React errors that crash the entire app.
  * Automatically attempts self-healing (cache clear + retry) before showing manual recovery UI.
@@ -20,7 +22,24 @@ export default function GlobalError({
   useEffect(() => {
     let cancelled = false
     const selfHeal = async () => {
+      if (process.env.NODE_ENV !== 'production') {
+        if (!cancelled) {
+          setHealing(false)
+          setHealResult('Auto-recovery is disabled in development mode.')
+        }
+        return
+      }
+      if (typeof window !== 'undefined' && sessionStorage.getItem(AUTO_HEAL_ATTEMPTED_KEY) === '1') {
+        if (!cancelled) {
+          setHealing(false)
+          setHealResult('Auto-recovery was already attempted in this tab. Use manual recovery options below.')
+        }
+        return
+      }
       try {
+        if (typeof window !== 'undefined') {
+          sessionStorage.setItem(AUTO_HEAL_ATTEMPTED_KEY, '1')
+        }
         // Try to clear the frontend cache via the health API
         await fetch('/api/health', {
           method: 'POST',

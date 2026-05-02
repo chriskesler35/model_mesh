@@ -13,6 +13,14 @@ from app.schemas.user_profile import (
     PreferenceCreate, PreferenceUpdate, PreferenceResponse, PreferenceList,
     ModificationResponse, ModificationList
 )
+from app.schemas.agentic import (
+    AgenticRunState,
+    AgenticGoal,
+    AgenticPlan,
+    AgenticStep,
+    AgenticEvent,
+    AgenticScore,
+)
 
 __all__ = [
     "ErrorResponse", "ErrorDetail",
@@ -26,4 +34,5 @@ __all__ = [
     "MemoryFileCreate", "MemoryFileUpdate", "MemoryFileResponse", "MemoryFileList",
     "PreferenceCreate", "PreferenceUpdate", "PreferenceResponse", "PreferenceList",
     "ModificationResponse", "ModificationList",
+    "AgenticRunState", "AgenticGoal", "AgenticPlan", "AgenticStep", "AgenticEvent", "AgenticScore",
 ]

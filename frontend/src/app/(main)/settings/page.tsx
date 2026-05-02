@@ -655,6 +655,16 @@ interface UserProfile {
   preferences: Record<string, any>
 }
 
+interface RuntimeCapabilitiesSummary {
+  local?: {
+    comfyui_available?: boolean
+    ollama_available?: boolean
+  }
+  cloud?: {
+    any_available?: boolean
+  }
+}
+
 
 
 // ─── Conversations Tab ────────────────────────────────────────────────────────
@@ -1156,6 +1166,12 @@ export default function SettingsPage() {
   const [budgetLimit, setBudgetLimit] = useState<string>('')
   const [budgetSaving, setBudgetSaving] = useState(false)
   const [budgetSaved, setBudgetSaved] = useState(false)
+  const [runtimeMode, setRuntimeMode] = useState<'checking' | 'hybrid' | 'cloud-only' | 'local-only' | 'offline'>('checking')
+  const [runtimeSignals, setRuntimeSignals] = useState<{ comfyui: boolean; ollama: boolean; cloud: boolean }>({
+    comfyui: false,
+    ollama: false,
+    cloud: false,
+  })
 
   const saveProfile = async () => {
     if (!profile) return
@@ -1190,16 +1206,35 @@ export default function SettingsPage() {
   useEffect(() => {
     async function fetchData() {
       try {
-        const [profileRes, memoryRes] = await Promise.all([
+        const [profileRes, memoryRes, runtimeCaps] = await Promise.all([
           fetch(`${API_BASE}/v1/user`, {
             headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
           }).then(r => r.json()),
           fetch(`${API_BASE}/v1/memory`, {
             headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
-          }).then(r => r.json())
+          }).then(r => r.json()),
+          fetch(`${API_BASE}/v1/runtime/capabilities`, { headers: AUTH_HEADERS })
+            .then(r => r.json())
+            .catch(() => ({} as RuntimeCapabilitiesSummary)),
         ])
         setProfile(profileRes)
         setMemoryFiles(memoryRes.data || [])
+
+        const comfyuiAvailable = Boolean(runtimeCaps?.local?.comfyui_available)
+        const ollamaAvailable = Boolean(runtimeCaps?.local?.ollama_available)
+        const localAvailable = Boolean(comfyuiAvailable || ollamaAvailable)
+        const cloudAvailable = Boolean(runtimeCaps?.cloud?.any_available)
+
+        setRuntimeSignals({
+          comfyui: comfyuiAvailable,
+          ollama: ollamaAvailable,
+          cloud: cloudAvailable,
+        })
+        if (localAvailable && cloudAvailable) setRuntimeMode('hybrid')
+        else if (!localAvailable && cloudAvailable) setRuntimeMode('cloud-only')
+        else if (localAvailable && !cloudAvailable) setRuntimeMode('local-only')
+        else setRuntimeMode('offline')
+
         // Fetch budget
         try {
           const budgetRes = await fetch(`${API_BASE}/v1/stats/budget`, {
@@ -1272,13 +1307,50 @@ export default function SettingsPage() {
     )
   }
 
+  const runtimeModeStyle: Record<typeof runtimeMode, string> = {
+    checking: 'bg-gray-100 text-gray-700 border-gray-200',
+    hybrid: 'bg-emerald-100 text-emerald-800 border-emerald-200',
+    'cloud-only': 'bg-blue-100 text-blue-800 border-blue-200',
+    'local-only': 'bg-violet-100 text-violet-800 border-violet-200',
+    offline: 'bg-amber-100 text-amber-800 border-amber-200',
+  }
+
+  const runtimeModeLabel: Record<typeof runtimeMode, string> = {
+    checking: 'Runtime: Checking',
+    hybrid: 'Runtime: Hybrid (Local + Cloud)',
+    'cloud-only': 'Runtime: Cloud-only',
+    'local-only': 'Runtime: Local-only',
+    offline: 'Runtime: Limited / Offline',
+  }
+
   return (
     <div>
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
-        <p className="mt-1 text-sm text-gray-500">
-          Manage your profile, memory files, and preferences
-        </p>
+      <div className="mb-8 flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Manage your profile, memory files, and preferences
+          </p>
+        </div>
+        <div className="flex flex-col items-end gap-1.5">
+          <span
+            title={`ComfyUI: ${runtimeSignals.comfyui ? 'online' : 'offline'} | Ollama: ${runtimeSignals.ollama ? 'online' : 'offline'} | Cloud providers: ${runtimeSignals.cloud ? 'configured' : 'not configured'}`}
+            className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium whitespace-nowrap ${runtimeModeStyle[runtimeMode]}`}
+          >
+            {runtimeModeLabel[runtimeMode]}
+          </span>
+          <div className="flex items-center gap-1.5 text-[11px]">
+            <span className={`inline-flex items-center rounded-full px-2 py-0.5 ${runtimeSignals.comfyui ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-500'}`}>
+              ComfyUI {runtimeSignals.comfyui ? 'on' : 'off'}
+            </span>
+            <span className={`inline-flex items-center rounded-full px-2 py-0.5 ${runtimeSignals.ollama ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-500'}`}>
+              Ollama {runtimeSignals.ollama ? 'on' : 'off'}
+            </span>
+            <span className={`inline-flex items-center rounded-full px-2 py-0.5 ${runtimeSignals.cloud ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-500'}`}>
+              Cloud {runtimeSignals.cloud ? 'on' : 'off'}
+            </span>
+          </div>
+        </div>
       </div>
 
       {/* Tabs */}

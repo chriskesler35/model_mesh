@@ -236,6 +236,17 @@ function SandboxPanel({ projectId }: { projectId: string }) {
 
 
 interface FileNode { name: string; path: string; type: 'file' | 'dir'; size: number; children?: FileNode[] }
+interface WorkbenchSessionLite {
+  id: string
+  project_id: string | null
+  agent_type?: string
+  status: string
+}
+
+const WORKBENCH_SEED_TASK: Record<string, string> = {
+  coder: 'Continue building this project. Focus on the next scoped improvement and summarize verification steps.',
+  reviewer: 'Run a code review for this project and report the most important findings first.',
+}
 
 const FILE_ICONS: Record<string, string> = {
   py: '🐍', ts: '🔷', tsx: '🔷', js: '🟨', jsx: '🟨', json: '📋',
@@ -396,6 +407,52 @@ export default function ProjectDetailPage() {
     setSaving(false)
   }
 
+  const openProjectSession = async (preferredAgent: string = 'coder') => {
+    try {
+      const listRes = await fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH_HEADERS })
+      const listData = listRes.ok ? await listRes.json() : { data: [] }
+      const sessions: WorkbenchSessionLite[] = (listData?.data || []).filter((s: WorkbenchSessionLite) => s.project_id === id)
+
+      const matchesPreferredAgent = (s: WorkbenchSessionLite) => (s.agent_type || 'coder') === preferredAgent
+      const isContinuable = (s: WorkbenchSessionLite) => !['completed', 'failed', 'cancelled'].includes(s.status)
+
+      const reusable =
+        sessions.find(s => matchesPreferredAgent(s) && (s.status === 'running' || s.status === 'pending' || s.status === 'waiting')) ||
+        sessions.find(s => matchesPreferredAgent(s) && isContinuable(s)) ||
+        sessions.find(s => isContinuable(s))
+
+      if (reusable?.id) {
+        router.push(`/workbench/${reusable.id}`)
+        return
+      }
+
+      const createRes = await fetch(`${API_BASE}/v1/workbench/sessions`, {
+        method: 'POST',
+        headers: AUTH_HEADERS,
+        body: JSON.stringify({
+          project_id: id,
+          agent_type: preferredAgent,
+          task: WORKBENCH_SEED_TASK[preferredAgent] || WORKBENCH_SEED_TASK.coder,
+        }),
+      })
+
+      if (!createRes.ok) {
+        throw new Error(`HTTP ${createRes.status}`)
+      }
+
+      const created = await createRes.json()
+      if (created?.id) {
+        router.push(`/workbench/${created.id}`)
+        return
+      }
+
+      throw new Error('Session create returned no id')
+    } catch {
+      const query = new URLSearchParams({ project: id, agent_type: preferredAgent })
+      router.push(`/workbench?${query.toString()}`)
+    }
+  }
+
   if (loading) return (
     <div className="flex justify-center py-16">
       <div className="flex gap-1.5">{[0,1,2].map(i => <div key={i} className="w-2 h-2 bg-orange-400 rounded-full animate-bounce" style={{ animationDelay: `${i*0.15}s` }} />)}</div>
@@ -460,7 +517,7 @@ export default function ProjectDetailPage() {
             >🔓 Full</button>
           </div>
 
-          <button onClick={() => router.push(`/workbench?project=${id}`)}
+          <button onClick={() => openProjectSession('coder')}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-orange-500 hover:bg-orange-600 text-white text-xs font-medium rounded-lg transition-colors">
             🚀 Open in Workbench
           </button>

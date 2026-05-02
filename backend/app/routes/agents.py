@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from app.database import get_db, AsyncSessionLocal
 from app.models.agent import Agent, DEFAULT_AGENTS
 from app.models.agent_run import AgentRun
-from app.models import Persona, Model
+from app.models import Persona
 from app.middleware.auth import verify_api_key
 from app.middleware.rbac import require_role
 from pydantic import BaseModel
@@ -30,6 +30,31 @@ router = APIRouter(prefix="/v1/agents", tags=["agents"], dependencies=[Depends(v
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _parse_optional_uuid(value: Optional[str], field_name: str):
+    if value in (None, ""):
+        return None
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a valid model/persona ID.")
+
+
+async def _ensure_model_assignment_usable(model_ref: Optional[str]) -> None:
+    """Validate model assignment using the same runtime resolver contract."""
+    if not model_ref:
+        return
+    from app.routes.workbench import _resolve_model
+
+    resolved_model, _ = await _resolve_model(model_ref)
+    if not resolved_model:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{model_ref}' is not active, validated, and ready for runtime use. "
+                "Choose a validated model from the Models page."
+            ),
+        )
 
 async def _resolve_agent_model(agent: Agent, db: AsyncSession) -> dict:
     """
@@ -65,10 +90,8 @@ async def _resolve_agent_model(agent: Agent, db: AsyncSession) -> dict:
                 resolved["effective_system_prompt"] = "\n\n".join(parts)
 
                 if persona.primary_model_id:
-                    model_result = await db.execute(
-                        select(Model).where(Model.id == persona.primary_model_id)
-                    )
-                    model = model_result.scalar_one_or_none()
+                    from app.routes.workbench import _resolve_model
+                    model, _ = await _resolve_model(str(persona.primary_model_id))
                     if model:
                         resolved["resolved_model_id"] = str(model.id)
                         resolved["resolved_model_name"] = model.display_name or model.model_id
@@ -79,10 +102,8 @@ async def _resolve_agent_model(agent: Agent, db: AsyncSession) -> dict:
     # Fall back to direct model_id
     if not resolved["resolved_model_id"] and agent.model_id:
         try:
-            model_result = await db.execute(
-                select(Model).where(Model.id == agent.model_id)
-            )
-            model = model_result.scalar_one_or_none()
+            from app.routes.workbench import _resolve_model
+            model, _ = await _resolve_model(str(agent.model_id))
             if model:
                 resolved["resolved_model_id"] = str(model.id)
                 resolved["resolved_model_name"] = model.display_name or model.model_id
@@ -261,14 +282,19 @@ async def create_agent(agent: AgentCreate, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(UserProfile).limit(1))
     user = result.scalar_one_or_none()
 
+    model_uuid = _parse_optional_uuid(agent.model_id, "model_id")
+    persona_uuid = _parse_optional_uuid(agent.persona_id, "persona_id")
+    if model_uuid:
+        await _ensure_model_assignment_usable(str(model_uuid))
+
     new_agent = Agent(
         id=uuid.uuid4(),
         name=agent.name,
         agent_type=agent.agent_type,
         description=agent.description,
         system_prompt=agent.system_prompt,
-        model_id=uuid.UUID(agent.model_id) if agent.model_id else None,
-        persona_id=uuid.UUID(agent.persona_id) if agent.persona_id else None,
+        model_id=model_uuid,
+        persona_id=persona_uuid,
         tools=agent.tools,
         memory_enabled=agent.memory_enabled,
         max_iterations=agent.max_iterations,
@@ -345,6 +371,11 @@ async def update_agent(agent_id: str, updates: AgentUpdate, db: AsyncSession = D
         user_result = await db.execute(select(UserProfile).limit(1))
         user = user_result.scalar_one_or_none()
 
+        model_uuid = _parse_optional_uuid(updates.model_id, "model_id")
+        persona_uuid = _parse_optional_uuid(updates.persona_id, "persona_id")
+        if model_uuid:
+            await _ensure_model_assignment_usable(str(model_uuid))
+
         agent = Agent(
             id=uuid.uuid4(),
             name=updates.name or default_data["name"],
@@ -357,8 +388,8 @@ async def update_agent(agent_id: str, updates: AgentUpdate, db: AsyncSession = D
             timeout_seconds=updates.timeout_seconds or default_data.get("timeout_seconds", 300),
             is_active=True,
             user_id=user.id if user else None,
-            model_id=uuid.UUID(updates.model_id) if updates.model_id else None,
-            persona_id=uuid.UUID(updates.persona_id) if updates.persona_id else None,
+            model_id=model_uuid,
+            persona_id=persona_uuid,
         )
         db.add(agent)
         await db.commit()
@@ -383,9 +414,12 @@ async def update_agent(agent_id: str, updates: AgentUpdate, db: AsyncSession = D
             setattr(agent, field, val)
 
     if updates.model_id is not None:
-        agent.model_id = uuid.UUID(updates.model_id) if updates.model_id else None
+        model_uuid = _parse_optional_uuid(updates.model_id, "model_id")
+        if model_uuid:
+            await _ensure_model_assignment_usable(str(model_uuid))
+        agent.model_id = model_uuid
     if updates.persona_id is not None:
-        agent.persona_id = uuid.UUID(updates.persona_id) if updates.persona_id else None
+        agent.persona_id = _parse_optional_uuid(updates.persona_id, "persona_id")
 
     await db.commit()
     await db.refresh(agent)
@@ -423,54 +457,17 @@ class AgentRunRequest(BaseModel):
 async def _resolve_model_for_run(model_id: str):
     """Resolve (Model, Provider) ORM objects for a model_id string.
 
-    Reuses the same pattern as workbench._resolve_model but avoids a
-    cross-module import so agents.py stays self-contained.
+    Reuses the exact workbench runtime resolver contract.
     """
-    from app.database import AsyncSessionLocal
-    from app.models.model import Model as ModelORM
-    from app.models.provider import Provider as ProviderORM
-    from app.services.provider_credentials import has_provider_api_key
+    from app.routes.workbench import _resolve_model
 
-    async with AsyncSessionLocal() as db:
-        # Exact match
-        result = await db.execute(
-            select(ModelORM, ProviderORM)
-            .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
-            .where(ModelORM.model_id == model_id)
-            .limit(1)
-        )
-        row = result.first()
-        if row:
-            if not has_provider_api_key(row[1].name):
-                logger.error(
-                    "Model '%s' matched but provider '%s' has no credentials",
-                    model_id, row[1].name,
-                )
-                return None, None
-            return row[0], row[1]
-
-        # Fuzzy partial match
-        last_part = model_id.split("/")[-1]
-        result = await db.execute(
-            select(ModelORM, ProviderORM)
-            .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
-            .where(ModelORM.model_id.contains(last_part))
-            .where(ModelORM.is_active == True)
-        )
-        for m, p in result:
-            if has_provider_api_key(p.name):
-                logger.info(
-                    "Model '%s' fuzzy-matched to '%s' via %s",
-                    model_id, m.model_id, p.name,
-                )
-                return m, p
-
-        logger.error("Could not resolve model '%s'", model_id)
-    return None, None
+    return await _resolve_model(model_id)
 
 
 async def _resolve_agent_model_id(agent, db: AsyncSession) -> Optional[str]:
     """Get the effective model_id string for an agent (persona → direct → None)."""
+    from app.routes.workbench import _resolve_model
+
     # Try persona's primary model first
     if agent.persona_id:
         try:
@@ -479,10 +476,7 @@ async def _resolve_agent_model_id(agent, db: AsyncSession) -> Optional[str]:
             )
             persona = persona_result.scalar_one_or_none()
             if persona and persona.primary_model_id:
-                model_result = await db.execute(
-                    select(Model).where(Model.id == persona.primary_model_id)
-                )
-                model = model_result.scalar_one_or_none()
+                model, _ = await _resolve_model(str(persona.primary_model_id))
                 if model:
                     return model.model_id
         except Exception as e:
@@ -491,10 +485,7 @@ async def _resolve_agent_model_id(agent, db: AsyncSession) -> Optional[str]:
     # Direct model_id
     if agent.model_id:
         try:
-            model_result = await db.execute(
-                select(Model).where(Model.id == agent.model_id)
-            )
-            model = model_result.scalar_one_or_none()
+            model, _ = await _resolve_model(str(agent.model_id))
             if model:
                 return model.model_id
         except Exception as e:

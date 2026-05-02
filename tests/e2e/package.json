@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "scripts": {
     "test": "npx playwright test",
+    "test:regression": "npx playwright test specs/10-regression-route-coverage.spec.ts specs/11-regression-link-integrity.spec.ts",
     "test:headed": "npx playwright test --headed",
     "test:ui": "npx playwright test --ui",
     "report": "npx playwright show-report"

@@ -52,6 +52,13 @@ interface Persona {
   is_default?: boolean
 }
 
+interface RuntimeCapabilities {
+  image_providers?: {
+    'comfyui-local'?: boolean
+    'gemini-imagen'?: boolean
+  }
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function timeAgo(dateStr: string | null): string {
   if (!dateStr) return ''
@@ -1657,12 +1664,15 @@ export default function ChatPage() {
         break
       case '/image':
         if (arg) {
+          const provider = sanitizeImageProvider(lastImageProviderRef.current)
           // Pre-fill prompt and auto-submit
           setImagePrompt(arg)
+          setImageProvider(provider)
           setShowImageGen(true)
           // Small delay to let state settle, then fire generation
-          setTimeout(() => generateImage(arg), 50)
+          setTimeout(() => generateImage(arg, provider), 50)
         } else {
+          setImageProvider(sanitizeImageProvider(lastImageProviderRef.current))
           setShowImageGen(true)
         }
         break
@@ -1680,10 +1690,14 @@ export default function ChatPage() {
       }
       case '/model': {
         if (arg) {
-          const match = personas.find(p => p.name.toLowerCase().includes(arg.toLowerCase()) || p.id === arg)
+          const match = models.find(m =>
+            (m.display_name || '').toLowerCase().includes(arg.toLowerCase()) ||
+            m.model_id.toLowerCase().includes(arg.toLowerCase()) ||
+            m.id === arg
+          )
           if (match) {
-            setSelectedPersonaId(match.id)
-            addToast({ type: 'success', title: 'Model switched', message: match.name, autoClose: 2000 })
+            setSelectedModelId(match.model_id)
+            addToast({ type: 'success', title: 'Model switched', message: match.display_name || match.model_id, autoClose: 2000 })
           } else {
             addToast({ type: 'error', title: 'Not found', message: `No match for "${arg}"`, autoClose: 3000 })
           }
@@ -1708,18 +1722,29 @@ export default function ChatPage() {
         break
       }
     }
-  }, [activeConvId, messages, personas, addToast, setUserExists])
+  }, [activeConvId, messages, personas, models, addToast, setUserExists])
 
   const [showImageGen, setShowImageGen] = useState(false)
   const [imagePrompt, setImagePrompt] = useState('')
   const [generatingImage, setGeneratingImage] = useState(false)
   const [imageProvider, setImageProvider] = useState<'gemini-imagen' | 'comfyui-local'>('gemini-imagen')
+  // Track the provider used for the most recent generated image so adjustments default to the same one
+  const lastImageProviderRef = useRef<'gemini-imagen' | 'comfyui-local'>('gemini-imagen')
 
   // Workflow list for ComfyUI — user picks one saved workflow, nothing else.
   // To change checkpoint/LoRA/size/negative prompt, edit and save the workflow in ComfyUI.
   const [workflows, setWorkflows] = useState<Array<{id: string, name: string, description: string, category: string}>>([])
   const [selectedWorkflowId, setSelectedWorkflowId] = useState('sdxl-standard')
   const [comfyStatus, setComfyStatus] = useState<'online' | 'offline' | 'checking'>('checking')
+  const [runtimeCapabilities, setRuntimeCapabilities] = useState<RuntimeCapabilities | null>(null)
+  const comfyLocalAvailable = runtimeCapabilities?.image_providers?.['comfyui-local'] ?? (comfyStatus === 'online')
+
+  const sanitizeImageProvider = useCallback((provider: 'gemini-imagen' | 'comfyui-local') => {
+    if (provider === 'comfyui-local' && !comfyLocalAvailable) {
+      return 'gemini-imagen' as const
+    }
+    return provider
+  }, [comfyLocalAvailable])
 
   // Track pending image tasks: taskId → assistantMessageId
   const pendingImageTasksRef = useRef<Map<string, string | { msgId: string; startedAt: number }>>(new Map())
@@ -1736,21 +1761,35 @@ export default function ChatPage() {
     if (!showImageGen) return
     const load = async () => {
       try {
-        const [wfRes, stRes] = await Promise.all([
+        const [wfRes, stRes, capsRes] = await Promise.all([
           fetch(`${API_BASE}/v1/workflows`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
           fetch(`${API_BASE}/v1/comfyui/status`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ status: 'offline' })),
+          fetch(`${API_BASE}/v1/runtime/capabilities`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({} as RuntimeCapabilities)),
         ])
         setWorkflows(wfRes.data || [])
         setComfyStatus(stRes.status === 'online' ? 'online' : 'offline')
+        setRuntimeCapabilities(capsRes || null)
         // Default to the first workflow if current selection isn't in the list
         if (wfRes.data?.length > 0 && !wfRes.data.find((w: any) => w.id === selectedWorkflowId)) {
           setSelectedWorkflowId(wfRes.data[0].id)
+        }
+        if ((capsRes?.image_providers?.['comfyui-local'] ?? false) === false) {
+          setImageProvider('gemini-imagen')
+          lastImageProviderRef.current = 'gemini-imagen'
         }
       } catch { /* silent */ }
     }
     load()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showImageGen])
+
+  useEffect(() => {
+    if (comfyLocalAvailable) return
+    if (imageProvider === 'comfyui-local') {
+      setImageProvider('gemini-imagen')
+      lastImageProviderRef.current = 'gemini-imagen'
+    }
+  }, [comfyLocalAvailable, imageProvider])
 
   // ── Poll for image task completion → inject inline ────────────────────────
   // Helper to handle a completed image task
@@ -1834,12 +1873,47 @@ export default function ChatPage() {
     return () => clearInterval(interval)
   }, [handleImageTaskComplete])
 
+  const fetchValidatedChatModels = useCallback(async (): Promise<Model[]> => {
+    const all: Model[] = []
+    const pageSize = 200
+    let offset = 0
+    let hasMore = true
+
+    while (hasMore) {
+      const res = await fetch(
+        `${API_BASE}/v1/models?active_only=true&usable_only=true&validated_only=true&chat_only=true&limit=${pageSize}&offset=${offset}`,
+        { headers: AUTH_HEADERS }
+      )
+      if (!res.ok) break
+
+      const payload = await res.json().catch(() => ({ data: [], has_more: false }))
+      const page = (payload?.data || []) as Model[]
+      all.push(...page.filter((m: Model) => m.is_active))
+
+      hasMore = Boolean(payload?.has_more) && page.length > 0
+      offset += pageSize
+
+      // Hard stop to avoid accidental infinite loops if backend pagination metadata breaks.
+      if (offset > 5000) break
+    }
+
+    // Deduplicate by provider+model_id to avoid duplicate options while
+    // preserving same model IDs that exist under different providers.
+    const seen = new Set<string>()
+    return all.filter((m) => {
+      const key = `${m.provider_name || 'unknown'}::${m.model_id || ''}`
+      if (!m.model_id || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }, [])
+
   // ── Init ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     const init = async () => {
       try {
-        const [modelsRes, personasRes, convsRes, identityRes] = await Promise.all([
-          fetch(`${API_BASE}/v1/models?active_only=true&usable_only=true&validated_only=true&chat_only=true`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+        const [models, personasRes, convsRes, identityRes] = await Promise.all([
+          fetchValidatedChatModels(),
           fetch(`${API_BASE}/v1/personas`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
           fetch(`${API_BASE}/v1/conversations?limit=100&pinned_first=true`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
           fetch(`${API_BASE}/v1/identity/status`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({})),
@@ -1847,8 +1921,7 @@ export default function ChatPage() {
 
         const ps: Persona[] = personasRes.data || []
         setPersonas(ps)
-        const ms: Model[] = (modelsRes.data || []).filter((m: Model) => m.is_active)
-        setModels(ms)
+        setModels(models)
 
         const defaultP = ps.find(p => p.is_default) || ps[0]
         if (defaultP) setSelectedPersonaId(defaultP.id)
@@ -2036,13 +2109,111 @@ export default function ChatPage() {
   // Detect image generation intent from natural language
   const detectImageIntent = (text: string): string | null => {
     const lower = text.toLowerCase()
-    const imageVerbs = ['generate', 'create', 'make', 'draw', 'paint', 'render', 'design', 'produce', 'show me']
-    const imageNouns = ['image', 'picture', 'photo', 'illustration', 'artwork', 'drawing', 'painting', 'portrait', 'wallpaper', 'logo', 'icon', 'banner']
-    const hasVerb = imageVerbs.some(v => lower.includes(v))
-    const hasNoun = imageNouns.some(n => lower.includes(n))
-    if (hasVerb && hasNoun) return text
-    // Also catch "/imagine" style
-    if (lower.startsWith('/imagine ') || lower.startsWith('/img ')) return text.split(' ').slice(1).join(' ')
+
+    // Slash commands take priority
+    if (lower.startsWith('/imagine ') || lower.startsWith('/img ')) {
+      return text.split(' ').slice(1).join(' ')
+    }
+
+    // Never auto-route long or structured planning prompts.
+    // These often mention image generation as part of architecture discussion.
+    const planningSignals = [
+      'proof out',
+      'project concept',
+      'workable project',
+      'walk through',
+      'how it tests my stack',
+      'memory/context',
+      'latency/reliability',
+      'why it\'s good',
+      'state-heavy',
+      'rpg',
+      'visual novel',
+      'build a project',
+    ]
+    if (text.length > 280 || text.includes('\n') || planningSignals.some(signal => lower.includes(signal))) {
+      return null
+    }
+
+    // Reject modification/adjustment requests — these refer to an EXISTING image and should
+    // go to the LLM naturally rather than triggering a fresh image generation job.
+    const imageEditPatterns = [
+      'adjust the image',
+      'adjust this image',
+      'adjust that image',
+      'edit the image',
+      'edit this image',
+      'edit that image',
+      'modify the image',
+      'modify this image',
+      'change the image',
+      'change this image',
+      'update the image',
+      'update this image',
+      'improve the image',
+      'improve this image',
+      'enhance the image',
+      'enhance this image',
+      'tweak the image',
+      'tweak this image',
+      'fix the image',
+      'fix this image',
+      'refine the image',
+      'refine this image',
+      'regenerate the image',
+      'remake the image',
+      'redo the image',
+      'this image',
+      'that image',
+      'the previous image',
+      'last image',
+      'the generated image',
+    ]
+    if (imageEditPatterns.some(pattern => lower.includes(pattern))) {
+      return null
+    }
+
+    // Reject common non-image context patterns that use similar keywords
+    const nonImagePatterns = [
+      'create a concept',
+      'create concept',
+      'design concept',
+      'design document',
+      'create design',
+      'design architecture',
+      'create architecture',
+      'architecture design',
+      'design pattern',
+      'create pattern',
+      'build a concept',
+      'build concept',
+      'design system',
+      'create system',
+      'design spec',
+      'create spec',
+    ]
+    if (nonImagePatterns.some(pattern => lower.includes(pattern))) {
+      return null
+    }
+
+    // Route only when the prompt is a clear image command.
+    const explicitImageCommand = /^(please\s+)?(generate|create|draw|paint|render|make|show)\s+(me\s+)?(an?\s+)?(image|picture|photo|illustration|artwork|drawing|painting|portrait|wallpaper|logo|icon|banner)\b/i
+    if (explicitImageCommand.test(text.trim())) {
+      return text
+    }
+
+    const strongImagePhrases = [
+      'generate an image of',
+      'generate a picture of',
+      'create an image of',
+      'create a picture of',
+      'draw an image of',
+      'draw a picture of',
+      'show me an image of',
+      'show me a picture of',
+    ]
+    if (strongImagePhrases.some(v => lower.includes(v))) return text
+
     return null
   }
 
@@ -2197,13 +2368,28 @@ export default function ChatPage() {
     ? [...messages].reverse().find(m => m.role === 'assistant' && !m.streaming && m.content && !m.content.startsWith('Error:'))?.content ?? null
     : null
 
-  const generateImage = async (overridePrompt?: string) => {
+  const generateImage = async (
+    overridePrompt?: string,
+    overrideProvider?: 'gemini-imagen' | 'comfyui-local'
+  ) => {
     const prompt = (overridePrompt ?? imagePrompt).trim()
     if (!prompt || generatingImage) return
     setGeneratingImage(true)
     setShowImageGen(false)
 
-    const provider = imageProvider
+    const requestedProvider = overrideProvider ?? imageProvider
+    const provider = sanitizeImageProvider(requestedProvider)
+    if (requestedProvider === 'comfyui-local' && provider === 'gemini-imagen') {
+      addToast({
+        type: 'info',
+        title: 'ComfyUI unavailable',
+        message: 'Switched to Gemini (Cloud) for this image.',
+        autoClose: 2800,
+      })
+      setImageProvider('gemini-imagen')
+    }
+    // Record the provider so the panel defaults to the same one next time
+    lastImageProviderRef.current = provider
     const wfId = provider === 'comfyui-local' ? selectedWorkflowId : undefined
     const wfName = workflows.find(w => w.id === wfId)?.name
     // Gemini-only size. For ComfyUI, size comes from the workflow.
@@ -2691,6 +2877,8 @@ export default function ChatPage() {
                       setImagePrompt(input)
                       setInput('')
                     }
+                    // Keep follow-up image tweaks on the same provider as the last generated image.
+                    setImageProvider(sanitizeImageProvider(lastImageProviderRef.current))
                   } else {
                     // image → chat: carry image draft into chat input
                     if (imagePrompt.trim() && !input.trim()) {
@@ -2723,14 +2911,20 @@ export default function ChatPage() {
                   <div className="flex gap-2 items-center flex-wrap">
                     <select
                       value={imageProvider}
-                      onChange={e => setImageProvider(e.target.value as any)}
+                      onChange={e => setImageProvider(sanitizeImageProvider(e.target.value as any))}
                       className="text-xs rounded-lg border border-purple-200 dark:border-purple-700 dark:bg-gray-800 dark:text-gray-200 py-1.5 pl-2 pr-6 focus:ring-purple-400 focus:border-purple-400"
                     >
-                      <option value="comfyui-local">ComfyUI (Local)</option>
+                      <option value="comfyui-local" disabled={!comfyLocalAvailable}>ComfyUI (Local){!comfyLocalAvailable ? ' - Unavailable' : ''}</option>
                       <option value="gemini-imagen">Gemini (Cloud)</option>
                     </select>
 
-                    {imageProvider === 'comfyui-local' && (
+                    {!comfyLocalAvailable && (
+                      <span className="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded px-2 py-1">
+                        Local ComfyUI is offline. Cloud mode is active.
+                      </span>
+                    )}
+
+                    {imageProvider === 'comfyui-local' && comfyLocalAvailable && (
                       <>
                         {/* Workflow picker — only selection needed; everything
                             else (checkpoint, LoRA, size, negative prompt) is
@@ -2759,7 +2953,7 @@ export default function ChatPage() {
                   </div>
 
                   {/* Patience notice for local ComfyUI generation */}
-                  {imageProvider === 'comfyui-local' && (
+                  {imageProvider === 'comfyui-local' && comfyLocalAvailable && (
                     <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-purple-50 dark:bg-purple-900/20 border border-purple-100 dark:border-purple-800/40 text-xs text-purple-700 dark:text-purple-300">
                       <span className="flex-shrink-0 mt-0.5">⏳</span>
                       <span>
