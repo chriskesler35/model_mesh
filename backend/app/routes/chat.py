@@ -156,10 +156,34 @@ def _extract_text_tool_calls(response_text: str) -> list[dict]:
             raw_args = fn_block.get("arguments", item.get("arguments", {}))
 
             if isinstance(raw_args, str):
-                try:
-                    args = json.loads(raw_args)
-                except Exception:
-                    args = {}
+                args = {}
+                candidate = raw_args.strip()
+
+                # Some providers double-escape function arguments as a JSON string
+                # inside another JSON string. Decode in a short bounded loop.
+                for _ in range(3):
+                    try:
+                        decoded = json.loads(candidate)
+                    except Exception:
+                        break
+
+                    if isinstance(decoded, dict):
+                        args = decoded
+                        break
+                    if isinstance(decoded, str):
+                        candidate = decoded.strip()
+                        continue
+                    break
+
+                # Fallback: unescape common backslash-escaped quote form.
+                if not args and isinstance(candidate, str):
+                    unescaped = candidate.replace('\\"', '"')
+                    try:
+                        decoded = json.loads(unescaped)
+                        if isinstance(decoded, dict):
+                            args = decoded
+                    except Exception:
+                        pass
             elif isinstance(raw_args, dict):
                 args = raw_args
             else:
@@ -183,6 +207,53 @@ def _normalize_tool_calls(response_text: str, tool_calls: list[dict] | None) -> 
     if parsed:
         logger.info("Recovered %d text-mode tool call(s) from assistant response", len(parsed))
     return parsed
+
+
+def _canonicalize_tool_calls(tool_calls: list[dict]) -> list[dict]:
+    """Normalize tool calls to stable id/name/arguments fields."""
+    normalized: list[dict] = []
+    for tc in tool_calls or []:
+        call_id = str((tc or {}).get("id") or f"call_{uuid.uuid4().hex[:8]}")
+        name = str((tc or {}).get("name") or "").strip()
+        args = (tc or {}).get("arguments", {}) or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except Exception:
+                args = {}
+        if not isinstance(args, dict):
+            args = {}
+        if not name:
+            continue
+        normalized.append({"id": call_id, "name": name, "arguments": args})
+    return normalized
+
+
+def _tool_message_content(result: dict) -> str:
+    """Serialize tool result as compact JSON for role=tool message content."""
+    payload: Dict[str, Any] = {
+        "success": bool((result or {}).get("success", False)),
+        "output": (result or {}).get("output", ""),
+    }
+
+    if "filepath" in (result or {}):
+        payload["filepath"] = result.get("filepath")
+    if "exit_code" in (result or {}):
+        payload["exit_code"] = result.get("exit_code")
+    if "duration_ms" in (result or {}):
+        payload["duration_ms"] = result.get("duration_ms")
+
+    if not isinstance(payload["output"], str):
+        try:
+            payload["output"] = json.dumps(payload["output"])
+        except Exception:
+            payload["output"] = str(payload["output"])
+
+    content = json.dumps(payload)
+    max_chars = 120_000
+    if len(content) > max_chars:
+        content = content[:max_chars] + "\n\n[...tool content truncated...]"
+    return content
 
 
 @router.post("/chat/completions")
@@ -486,15 +557,16 @@ async def _stream_response(
                         output_tokens += out_tok
 
                         tool_calls = _normalize_tool_calls(resp_text, tool_calls)
+                        canonical_calls = _canonicalize_tool_calls(tool_calls)
 
-                        if not tool_calls:
+                        if not canonical_calls:
                             full_content = resp_text or ""
                             tool_loop_used = True
                             break
 
                         tool_loop_used = True
                         assistant_tool_calls = []
-                        for tc in tool_calls:
+                        for tc in canonical_calls:
                             assistant_tool_calls.append(
                                 {
                                     "id": tc.get("id", ""),
@@ -514,21 +586,18 @@ async def _stream_response(
                             }
                         )
 
-                        for tc in tool_calls:
+                        for tc in canonical_calls:
                             result = await execute_tool_call(
                                 tc.get("name", ""),
                                 tc.get("arguments", {}) or {},
                                 workspace_root,
                             )
-                            tool_output = result.get("output", "")
-                            if not isinstance(tool_output, str):
-                                tool_output = json.dumps(tool_output)
                             loop_messages.append(
                                 {
                                     "role": "tool",
                                     "tool_call_id": tc.get("id", ""),
                                     "name": tc.get("name", ""),
-                                    "content": tool_output,
+                                    "content": _tool_message_content(result),
                                 }
                             )
 
@@ -721,15 +790,16 @@ async def _sync_response(
                     output_tokens += out_tok
 
                     tool_calls = _normalize_tool_calls(resp_text, tool_calls)
+                    canonical_calls = _canonicalize_tool_calls(tool_calls)
 
-                    if not tool_calls:
+                    if not canonical_calls:
                         full_content = resp_text or ""
                         tool_loop_used = True
                         break
 
                     tool_loop_used = True
                     assistant_tool_calls = []
-                    for tc in tool_calls:
+                    for tc in canonical_calls:
                         assistant_tool_calls.append(
                             {
                                 "id": tc.get("id", ""),
@@ -749,21 +819,18 @@ async def _sync_response(
                         }
                     )
 
-                    for tc in tool_calls:
+                    for tc in canonical_calls:
                         result = await execute_tool_call(
                             tc.get("name", ""),
                             tc.get("arguments", {}) or {},
                             workspace_root,
                         )
-                        tool_output = result.get("output", "")
-                        if not isinstance(tool_output, str):
-                            tool_output = json.dumps(tool_output)
                         loop_messages.append(
                             {
                                 "role": "tool",
                                 "tool_call_id": tc.get("id", ""),
                                 "name": tc.get("name", ""),
-                                "content": tool_output,
+                                "content": _tool_message_content(result),
                             }
                         )
 
@@ -829,7 +896,8 @@ async def _sync_response(
             # Last-chance interception: if fallback single-call returned tool JSON
             # as plain text, execute it and re-query before returning to frontend.
             recovered_calls = _extract_text_tool_calls(full_content)
-            if recovered_calls and primary_model:
+            canonical_calls = _canonicalize_tool_calls(recovered_calls)
+            if canonical_calls and primary_model:
                 try:
                     from app.services.tool_registry import get_tool_schemas, ALL_TOOLS
                     from app.services.command_executor import execute_tool_call
@@ -840,7 +908,7 @@ async def _sync_response(
                         workspace_root = Path(__file__).resolve().parents[3]
 
                         assistant_tool_calls = []
-                        for tc in recovered_calls:
+                        for tc in canonical_calls:
                             assistant_tool_calls.append(
                                 {
                                     "id": tc.get("id", ""),
@@ -860,21 +928,18 @@ async def _sync_response(
                             }
                         )
 
-                        for tc in recovered_calls:
+                        for tc in canonical_calls:
                             result = await execute_tool_call(
                                 tc.get("name", ""),
                                 tc.get("arguments", {}) or {},
                                 workspace_root,
                             )
-                            tool_output = result.get("output", "")
-                            if not isinstance(tool_output, str):
-                                tool_output = json.dumps(tool_output)
                             loop_messages.append(
                                 {
                                     "role": "tool",
                                     "tool_call_id": tc.get("id", ""),
                                     "name": tc.get("name", ""),
-                                    "content": tool_output,
+                                    "content": _tool_message_content(result),
                                 }
                             )
 
