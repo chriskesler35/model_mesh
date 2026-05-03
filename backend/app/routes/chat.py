@@ -346,42 +346,150 @@ async def _stream_response(
                     logger.warning(f"Failed to inject memory context: {e}")
                     # Continue without context
 
-            # Get the async generator from router
-            response_stream = await router_service.route_request(
-                persona, primary_model, fallback_model,
-                msg_dicts, conversation_id, stream=True,
-                temperature=request.temperature,
-                max_tokens=request.max_tokens
-            )
+            # Try tool-loop path first for streaming requests so function/tool
+            # calls are executed by backend instead of being emitted as raw text.
+            tool_loop_used = False
+            llm_timeout_fallback = False
+            input_tokens = 0
+            output_tokens = 0
 
-            async for chunk in response_stream:
-                # Parse LiteLLM chunk and format as OpenAI SSE
-                if hasattr(chunk, 'choices') and chunk.choices:
-                    delta = chunk.choices[0].delta
-                    content = delta.content if hasattr(delta, 'content') else None
+            try:
+                from app.services.tool_registry import get_tool_schemas
+                from app.services.command_executor import execute_tool_call
 
-                    if content:
-                        full_content += content
-                        data = json.dumps({
-                            "id": completion_id,
-                            "object": "chat.completion.chunk", "conversation_id": conversation_id,
-                            "model": primary_model.model_id if primary_model else "unknown",
-                            "choices": [{
-                                "index": 0,
-                                "delta": {"content": content},
-                                "finish_reason": None
-                            }]
-                        })
-                        yield f"data: {data}\n\n"
+                provider = await router_service._get_provider(primary_model.provider_id) if primary_model else None
+                if primary_model and provider:
+                    tool_schemas = get_tool_schemas(["read_local_file"])
+                    loop_messages = list(msg_dicts)
+                    workspace_root = Path(__file__).resolve().parents[3]
+                    max_tool_rounds = 4
+
+                    for _ in range(max_tool_rounds):
+                        resp_text, tool_calls, in_tok, out_tok = await asyncio.wait_for(
+                            model_client.call_model_with_tools(
+                                model=primary_model,
+                                provider=provider,
+                                messages=loop_messages,
+                                tools=tool_schemas,
+                                temperature=request.temperature,
+                                max_tokens=request.max_tokens,
+                            ),
+                            timeout=45,
+                        )
+                        input_tokens += in_tok
+                        output_tokens += out_tok
+
+                        if not tool_calls:
+                            full_content = resp_text or ""
+                            tool_loop_used = True
+                            break
+
+                        tool_loop_used = True
+                        assistant_tool_calls = []
+                        for tc in tool_calls:
+                            assistant_tool_calls.append(
+                                {
+                                    "id": tc.get("id", ""),
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.get("name", ""),
+                                        "arguments": json.dumps(tc.get("arguments", {})),
+                                    },
+                                }
+                            )
+
+                        loop_messages.append(
+                            {
+                                "role": "assistant",
+                                "content": resp_text or None,
+                                "tool_calls": assistant_tool_calls,
+                            }
+                        )
+
+                        for tc in tool_calls:
+                            result = await execute_tool_call(
+                                tc.get("name", ""),
+                                tc.get("arguments", {}) or {},
+                                workspace_root,
+                            )
+                            tool_output = result.get("output", "")
+                            if not isinstance(tool_output, str):
+                                tool_output = json.dumps(tool_output)
+                            loop_messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tc.get("id", ""),
+                                    "name": tc.get("name", ""),
+                                    "content": tool_output,
+                                }
+                            )
+
+                    if tool_loop_used and not full_content:
+                        full_content = (
+                            "I executed tool calls but could not finish within the current tool loop limit. "
+                            "Please ask me to continue."
+                        )
+            except asyncio.TimeoutError:
+                llm_timeout_fallback = True
+                logger.warning("Streaming chat tool-loop timed out for conversation %s", conversation_id)
+                full_content = (
+                    "I’m still processing that and hit a response timeout. "
+                    "Please try again, or break the request into smaller steps."
+                )
+            except Exception as tool_loop_error:
+                logger.warning("Streaming tool-loop path failed, falling back to stream passthrough: %s", tool_loop_error)
+
+            if tool_loop_used or llm_timeout_fallback:
+                if full_content:
+                    data = json.dumps({
+                        "id": completion_id,
+                        "object": "chat.completion.chunk", "conversation_id": conversation_id,
+                        "model": primary_model.model_id if primary_model else "unknown",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": full_content},
+                            "finish_reason": None
+                        }]
+                    })
+                    yield f"data: {data}\n\n"
+            else:
+                # Legacy passthrough streaming (no tool interception path hit)
+                response_stream = await router_service.route_request(
+                    persona, primary_model, fallback_model,
+                    msg_dicts, conversation_id, stream=True,
+                    temperature=request.temperature,
+                    max_tokens=request.max_tokens
+                )
+
+                async for chunk in response_stream:
+                    # Parse LiteLLM chunk and format as OpenAI SSE
+                    if hasattr(chunk, 'choices') and chunk.choices:
+                        delta = chunk.choices[0].delta
+                        content = delta.content if hasattr(delta, 'content') else None
+
+                        if content:
+                            full_content += content
+                            data = json.dumps({
+                                "id": completion_id,
+                                "object": "chat.completion.chunk", "conversation_id": conversation_id,
+                                "model": primary_model.model_id if primary_model else "unknown",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"content": content},
+                                    "finish_reason": None
+                                }]
+                            })
+                            yield f"data: {data}\n\n"
 
             # Send done
             yield "data: [DONE]\n\n"
 
             # Log request with estimated tokens
             latency_ms = int((time.time() - start_time) * 1000)
-            input_tokens = model_client.estimate_tokens(msg_dicts, primary_model) if primary_model else 0
-            # Estimate output tokens from content (rough: ~4 chars per token)
-            output_tokens = len(full_content) // 4 if full_content else 0
+            if input_tokens == 0 and output_tokens == 0:
+                input_tokens = model_client.estimate_tokens(msg_dicts, primary_model) if primary_model else 0
+                # Estimate output tokens from content (rough: ~4 chars per token)
+                output_tokens = len(full_content) // 4 if full_content else 0
             estimated_cost = model_client.estimate_cost(input_tokens, output_tokens, primary_model) if primary_model else 0.0
 
             await _log_request(db, conversation_id, persona.id,
