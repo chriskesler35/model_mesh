@@ -54,6 +54,13 @@ def _root_dir() -> Path:
     return Path(__file__).parent.parent.parent.parent
 
 
+def _backend_port() -> int:
+    raw = (os.environ.get("DEVFORGEAI_BACKEND_PORT", "") or "").strip()
+    if raw.isdigit():
+        return int(raw)
+    return 19001
+
+
 def _read_pids() -> dict:
     pids_file = _root_dir() / ".devforgeai.pids"
     if pids_file.exists():
@@ -100,7 +107,7 @@ async def get_processes():
     processes = []
 
     port_checks = {
-        "devforgeai-backend": 19000,
+        "devforgeai-backend": _backend_port(),
         "devforgeai-frontend": 3001,
     }
 
@@ -229,26 +236,30 @@ async def restart_server():
 
         import subprocess
 
-        python_exe = sys.executable
-        backend_dir = str(Path(__file__).parent.parent.parent)
+        backend_dir = Path(__file__).parent.parent.parent
+        venv_python = backend_dir / "venv" / "Scripts" / "python.exe"
+        python_exe = str(venv_python if venv_python.exists() else Path(sys.executable))
+        backend_port = str(_backend_port())
         restart_script = str(Path(backend_dir) / "restart.py")
 
         # Spawn the restart helper (detached) — it waits for port to free, then starts uvicorn
         if sys.platform == "win32":
             subprocess.Popen(
                 [python_exe, restart_script],
-                cwd=backend_dir,
+                cwd=str(backend_dir),
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env={**os.environ, "DEVFORGEAI_BACKEND_PORT": backend_port},
             )
         else:
             subprocess.Popen(
                 [python_exe, restart_script],
-                cwd=backend_dir,
+                cwd=str(backend_dir),
                 start_new_session=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env={**os.environ, "DEVFORGEAI_BACKEND_PORT": backend_port},
             )
 
         logger.info("Restart helper spawned — exiting current process")
