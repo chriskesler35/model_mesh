@@ -4,6 +4,8 @@ import uuid
 import json
 import time
 import asyncio
+import os
+import re
 from pathlib import Path
 from typing import Any, Dict
 from datetime import datetime, timezone
@@ -28,6 +30,26 @@ router = APIRouter(prefix="/v1", tags=["chat"], dependencies=[Depends(verify_api
 # Ephemeral per-conversation workflow gating state.
 # Keyed by conversation_id string.
 _workflow_session_state: Dict[str, Dict[str, Any]] = {}
+
+
+def _tool_loop_max_rounds() -> int:
+    """Configurable upper bound for model->tool->model rounds per request."""
+    raw = (os.getenv("DEVFORGEAI_TOOL_LOOP_MAX_ROUNDS", "12") or "12").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 12
+    return max(1, min(value, 40))
+
+
+def _tool_loop_timeout_seconds() -> int:
+    """Configurable timeout for each model call in the tool loop."""
+    raw = (os.getenv("DEVFORGEAI_TOOL_LOOP_TIMEOUT_SECONDS", "60") or "60").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 60
+    return max(15, min(value, 300))
 
 
 def _get_workflow_state(conversation_id: str) -> Dict[str, Any]:
@@ -445,7 +467,8 @@ async def _stream_response(
                     tool_schemas = get_tool_schemas(list(ALL_TOOLS))
                     loop_messages = list(msg_dicts)
                     workspace_root = Path(__file__).resolve().parents[3]
-                    max_tool_rounds = 4
+                    max_tool_rounds = _tool_loop_max_rounds()
+                    call_timeout = _tool_loop_timeout_seconds()
 
                     for _ in range(max_tool_rounds):
                         resp_text, tool_calls, in_tok, out_tok = await asyncio.wait_for(
@@ -457,7 +480,7 @@ async def _stream_response(
                                 temperature=request.temperature,
                                 max_tokens=request.max_tokens,
                             ),
-                            timeout=45,
+                            timeout=call_timeout,
                         )
                         input_tokens += in_tok
                         output_tokens += out_tok
@@ -511,8 +534,8 @@ async def _stream_response(
 
                     if tool_loop_used and not full_content:
                         full_content = (
-                            "I executed tool calls but could not finish within the current tool loop limit. "
-                            "Please ask me to continue."
+                            "I executed tool calls but reached this request's tool-loop safety limit before producing "
+                            "a final response. I can continue automatically on your next message."
                         )
             except asyncio.TimeoutError:
                 llm_timeout_fallback = True
@@ -679,7 +702,8 @@ async def _sync_response(
                 tool_schemas = get_tool_schemas(list(ALL_TOOLS))
                 loop_messages = list(msg_dicts)
                 workspace_root = Path(__file__).resolve().parents[3]
-                max_tool_rounds = 4
+                max_tool_rounds = _tool_loop_max_rounds()
+                call_timeout = _tool_loop_timeout_seconds()
 
                 for _ in range(max_tool_rounds):
                     resp_text, tool_calls, in_tok, out_tok = await asyncio.wait_for(
@@ -691,7 +715,7 @@ async def _sync_response(
                             temperature=request.temperature,
                             max_tokens=request.max_tokens,
                         ),
-                        timeout=45,
+                        timeout=call_timeout,
                     )
                     input_tokens += in_tok
                     output_tokens += out_tok
@@ -745,8 +769,8 @@ async def _sync_response(
 
                 if tool_loop_used and not full_content:
                     full_content = (
-                        "I executed tool calls but could not finish within the current tool loop limit. "
-                        "Please ask me to continue."
+                        "I executed tool calls but reached this request's tool-loop safety limit before producing "
+                        "a final response. I can continue automatically on your next message."
                     )
         except asyncio.TimeoutError:
             llm_timeout_fallback = True
