@@ -1,6 +1,6 @@
 'use client'
 
-import { API_BASE, API_KEY, AUTH_HEADERS } from '@/lib/config'
+import { API_BASE, API_KEY, AUTH_HEADERS, getApiBase } from '@/lib/config'
 import VoiceMode, { VoiceModeToggle } from '@/components/VoiceMode'
 
 import { useState, useEffect, useRef, useCallback, Suspense } from 'react'
@@ -2370,7 +2370,7 @@ export default function ChatPage() {
       }
       if (activeConvId) body.conversation_id = activeConvId
 
-      const res = await fetch(`${API_BASE}/v1/chat/completions`, {
+      const res = await fetch(`${getApiBase()}/v1/chat/completions`, {
         method: 'POST',
         headers: AUTH_HEADERS,
         body: JSON.stringify(body),
