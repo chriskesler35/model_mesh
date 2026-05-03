@@ -5,7 +5,17 @@ import ChunkErrorRecovery from './ChunkErrorRecovery'
 import BackendProbe from './BackendProbe'
 import { AuthProvider } from '@/contexts/AuthContext'
 
+const metadataBaseUrl = (() => {
+  const candidate = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3001'
+  try {
+    return new URL(candidate)
+  } catch {
+    return new URL('http://localhost:3001')
+  }
+})()
+
 export const metadata: Metadata = {
+  metadataBase: metadataBaseUrl,
   title: 'DevForgeAI | Intelligent Development Platform',
   description: 'Forge intelligent solutions with multi-agent orchestration, image generation, and AI-powered development.',
   icons: {
