@@ -8,7 +8,7 @@ import os
 import re
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, Any, AsyncGenerator
+from typing import Optional, Dict, Any, AsyncGenerator, Literal
 from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1426,6 +1426,47 @@ async def send_message(session_id: str, body: WorkbenchMessage):
 
     _push(session_id, "user_message", message=body.message, handled=True)
 
+    msg = (body.message or "").strip().lower()
+    enable_autopilot = msg in {
+        "go autopilot",
+        "enable autopilot",
+        "autopilot on",
+        "bypass approvals",
+        "bypass on",
+        "yolo mode on",
+    }
+    disable_autopilot = msg in {
+        "disable autopilot",
+        "autopilot off",
+        "bypass off",
+        "require approval",
+        "ask before run",
+        "acceptance mode",
+        "approval mode",
+    }
+
+    if enable_autopilot or disable_autopilot:
+        bypass = await _set_session_bypass(session_id, enable_autopilot)
+        executed = 0
+        if enable_autopilot:
+            executed = await _execute_pending_approvals(session_id)
+            _push(
+                session_id,
+                "info",
+                message=(
+                    "Autopilot enabled: approval gates bypassed for this session. "
+                    f"Executed {executed} pending command(s)."
+                ),
+            )
+        else:
+            _push(session_id, "info", message="Approval mode enabled: commands require acceptance.")
+        return {
+            "ok": True,
+            "mode": "autopilot" if bypass else "ask",
+            "bypass_approvals": bypass,
+            "pending_executed": executed,
+        }
+
     # Kick off a new turn with full conversation history
     history = session.messages or []
     project_path = Path(session.project_path) if session.project_path else None
@@ -1575,22 +1616,111 @@ async def reject_command(session_id: str, command_id: str, body: Optional[Reject
     return {"ok": True}
 
 
+async def _set_session_bypass(session_id: str, enabled: bool) -> bool:
+    """Persist and broadcast approval bypass mode for a session."""
+    from app.models.workbench import WorkbenchSession
+
+    async with AsyncSessionLocal() as db:
+        sess = (await db.execute(select(WorkbenchSession).where(WorkbenchSession.id == session_id))).scalar_one_or_none()
+        if not sess:
+            raise HTTPException(status_code=404, detail="Session not found")
+        sess.bypass_approvals = bool(enabled)
+        await db.commit()
+
+    _push(session_id, "bypass_mode_changed", bypass_approvals=bool(enabled))
+    return bool(enabled)
+
+
+async def _execute_pending_approvals(session_id: str) -> int:
+    """Execute pending approval-gated commands for this session."""
+    from app.models.command_execution import CommandExecution
+    from app.models.workbench import WorkbenchSession
+    from app.services.command_executor import execute_and_record, get_first_github_token
+    from sqlalchemy import asc as _asc
+
+    async with AsyncSessionLocal() as db:
+        sess = (await db.execute(select(WorkbenchSession).where(WorkbenchSession.id == session_id))).scalar_one_or_none()
+        if not sess or not sess.project_path:
+            return 0
+        pending = (await db.execute(
+            select(CommandExecution)
+            .where(CommandExecution.session_id == session_id)
+            .where(CommandExecution.status == "pending")
+            .order_by(_asc(CommandExecution.created_at))
+        )).scalars().all()
+
+    if not pending:
+        return 0
+
+    gh_token = get_first_github_token()
+    project_path = Path(sess.project_path)
+    executed = 0
+    for rec in pending:
+        _push(session_id, "command_approved", command_id=rec.id, command=rec.command, source="autopilot")
+        _push(
+            session_id,
+            "command_running",
+            command_id=rec.id,
+            command=rec.command,
+            tier=rec.tier or "approval",
+            bypass=True,
+        )
+        result = await execute_and_record(rec.id, rec.command, project_path, bypass_used=True, github_token=gh_token)
+        _push(session_id, "command_completed", **result)
+        executed += 1
+
+    await _db_update(session_id, events_log=_event_logs.get(session_id, []))
+    return executed
+
+
 class BypassToggleBody(BaseModel):
     bypass_approvals: bool
+
+
+class ApprovalModeBody(BaseModel):
+    mode: Literal["ask", "bypass", "autopilot"]
 
 
 @router.post("/sessions/{session_id}/bypass", dependencies=[Depends(verify_api_key)])
 async def set_bypass_mode(session_id: str, body: BypassToggleBody):
     """Enable or disable approval bypass for this session."""
-    from app.models.workbench import WorkbenchSession
-    async with AsyncSessionLocal() as db:
-        sess = (await db.execute(select(WorkbenchSession).where(WorkbenchSession.id == session_id))).scalar_one_or_none()
-        if not sess:
-            raise HTTPException(status_code=404, detail="Session not found")
-        sess.bypass_approvals = bool(body.bypass_approvals)
-        await db.commit()
-    _push(session_id, "bypass_mode_changed", bypass_approvals=body.bypass_approvals)
-    return {"ok": True, "bypass_approvals": body.bypass_approvals}
+    bypass = await _set_session_bypass(session_id, body.bypass_approvals)
+    return {"ok": True, "bypass_approvals": bypass}
+
+
+@router.post("/sessions/{session_id}/approval-mode", dependencies=[Depends(verify_api_key)])
+async def set_approval_mode(session_id: str, body: ApprovalModeBody):
+    """Set command acceptance mode for a session.
+
+    Modes:
+    - ask: require manual approval for approval-tier commands
+    - bypass: skip approval gates for future commands
+    - autopilot: bypass + auto-execute currently pending approval commands
+    """
+    requested = (body.mode or "ask").lower()
+    enable_bypass = requested in {"bypass", "autopilot"}
+    bypass = await _set_session_bypass(session_id, enable_bypass)
+    executed = 0
+
+    if requested == "autopilot":
+        executed = await _execute_pending_approvals(session_id)
+        _push(
+            session_id,
+            "info",
+            message=(
+                "Autopilot enabled: approval gates bypassed for this session. "
+                f"Executed {executed} pending command(s)."
+            ),
+        )
+    elif requested == "ask":
+        _push(session_id, "info", message="Approval mode enabled: commands require acceptance.")
+
+    return {
+        "ok": True,
+        "mode": "autopilot" if requested == "autopilot" else ("bypass" if bypass else "ask"),
+        "bypass_approvals": bypass,
+        "pending_executed": executed,
+    }
 
 
 @router.delete("/sessions/{session_id}", dependencies=[Depends(verify_api_key)])
