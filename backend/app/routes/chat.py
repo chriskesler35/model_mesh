@@ -4,6 +4,7 @@ import uuid
 import json
 import time
 import asyncio
+from pathlib import Path
 from typing import Any, Dict
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -465,31 +466,122 @@ async def _sync_response(
                 logger.warning(f"Failed to inject memory context: {e}")
                 # Continue without context
 
-        # Get response from router (non-streaming returns a dict/object).
-        # Bound request time to keep chat responsive when upstream model calls stall.
+        # Get response from model.
+        # Prefer native tool-calling loop so tool requests are executed server-side.
+        # If anything fails in tool mode, fall back to the prior single-call path.
         response = None
         full_content = ""
         input_tokens = 0
         output_tokens = 0
         llm_timeout_fallback = False
+        tool_loop_used = False
 
+        # Tool-execution loop: model -> tool_calls -> execute -> feed results -> model
         try:
-            response = await asyncio.wait_for(
-                router_service.route_request(
-                    persona, primary_model, fallback_model,
-                    msg_dicts, conversation_id, stream=False,
-                    temperature=request.temperature,
-                    max_tokens=request.max_tokens
-                ),
-                timeout=45,
-            )
+            from app.services.tool_registry import get_tool_schemas
+            from app.services.command_executor import execute_tool_call
+
+            provider = await router_service._get_provider(primary_model.provider_id) if primary_model else None
+            if primary_model and provider:
+                tool_schemas = get_tool_schemas(["read_local_file"])
+                loop_messages = list(msg_dicts)
+                workspace_root = Path(__file__).resolve().parents[3]
+                max_tool_rounds = 4
+
+                for _ in range(max_tool_rounds):
+                    resp_text, tool_calls, in_tok, out_tok = await asyncio.wait_for(
+                        model_client.call_model_with_tools(
+                            model=primary_model,
+                            provider=provider,
+                            messages=loop_messages,
+                            tools=tool_schemas,
+                            temperature=request.temperature,
+                            max_tokens=request.max_tokens,
+                        ),
+                        timeout=45,
+                    )
+                    input_tokens += in_tok
+                    output_tokens += out_tok
+
+                    if not tool_calls:
+                        full_content = resp_text or ""
+                        tool_loop_used = True
+                        break
+
+                    tool_loop_used = True
+                    assistant_tool_calls = []
+                    for tc in tool_calls:
+                        assistant_tool_calls.append(
+                            {
+                                "id": tc.get("id", ""),
+                                "type": "function",
+                                "function": {
+                                    "name": tc.get("name", ""),
+                                    "arguments": json.dumps(tc.get("arguments", {})),
+                                },
+                            }
+                        )
+
+                    loop_messages.append(
+                        {
+                            "role": "assistant",
+                            "content": resp_text or None,
+                            "tool_calls": assistant_tool_calls,
+                        }
+                    )
+
+                    for tc in tool_calls:
+                        result = await execute_tool_call(
+                            tc.get("name", ""),
+                            tc.get("arguments", {}) or {},
+                            workspace_root,
+                        )
+                        tool_output = result.get("output", "")
+                        if not isinstance(tool_output, str):
+                            tool_output = json.dumps(tool_output)
+                        loop_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc.get("id", ""),
+                                "name": tc.get("name", ""),
+                                "content": tool_output,
+                            }
+                        )
+
+                if tool_loop_used and not full_content:
+                    full_content = (
+                        "I executed tool calls but could not finish within the current tool loop limit. "
+                        "Please ask me to continue."
+                    )
         except asyncio.TimeoutError:
             llm_timeout_fallback = True
-            logger.warning("Sync chat completion timed out for conversation %s", conversation_id)
+            logger.warning("Sync chat tool-loop timed out for conversation %s", conversation_id)
             full_content = (
                 "I’m still processing that and hit a response timeout. "
                 "Please try again, or break the request into smaller steps."
             )
+        except Exception as tool_loop_error:
+            logger.warning("Tool-loop path failed, falling back to single-call chat: %s", tool_loop_error)
+
+        # Fallback: previous single-call behavior
+        if not tool_loop_used and not llm_timeout_fallback:
+            try:
+                response = await asyncio.wait_for(
+                    router_service.route_request(
+                        persona, primary_model, fallback_model,
+                        msg_dicts, conversation_id, stream=False,
+                        temperature=request.temperature,
+                        max_tokens=request.max_tokens
+                    ),
+                    timeout=45,
+                )
+            except asyncio.TimeoutError:
+                llm_timeout_fallback = True
+                logger.warning("Sync chat completion timed out for conversation %s", conversation_id)
+                full_content = (
+                    "I’m still processing that and hit a response timeout. "
+                    "Please try again, or break the request into smaller steps."
+                )
 
         # Extract content and usage from LiteLLM response when available.
         if not llm_timeout_fallback and response is not None:
