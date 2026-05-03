@@ -55,6 +55,81 @@ def _system_completion(
         "estimated_cost": 0.0,
         "provider": "system",
     }
+
+
+def _extract_text_tool_calls(response_text: str) -> list[dict]:
+    """Best-effort parse for providers that emit tool JSON as plain text.
+
+    Some wrappers/models return tool directives in assistant text instead of
+    native ``message.tool_calls`` objects. This parser recovers calls from
+    common JSON forms so backend can still execute the loop.
+    """
+    text = (response_text or "").strip()
+    if not text:
+        return []
+
+    candidates: list[str] = [text]
+
+    # Extract fenced code blocks (```json ... ```) as parse candidates.
+    for m in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE):
+        block = (m.group(1) or "").strip()
+        if block:
+            candidates.append(block)
+
+    # Extract inline object containing "tool_calls".
+    for m in re.finditer(r"(\{[\s\S]*?\"tool_calls\"[\s\S]*?\})", text, flags=re.IGNORECASE):
+        obj_txt = (m.group(1) or "").strip()
+        if obj_txt:
+            candidates.append(obj_txt)
+
+    for cand in candidates:
+        try:
+            payload = json.loads(cand)
+        except Exception:
+            continue
+
+        raw_calls = payload.get("tool_calls") if isinstance(payload, dict) else None
+        if not isinstance(raw_calls, list):
+            continue
+
+        parsed: list[dict] = []
+        for item in raw_calls:
+            if not isinstance(item, dict):
+                continue
+
+            call_id = str(item.get("id") or f"call_{uuid.uuid4().hex[:8]}")
+            fn_block = item.get("function") if isinstance(item.get("function"), dict) else {}
+            name = str(fn_block.get("name") or item.get("name") or "")
+            raw_args = fn_block.get("arguments", item.get("arguments", {}))
+
+            if isinstance(raw_args, str):
+                try:
+                    args = json.loads(raw_args)
+                except Exception:
+                    args = {}
+            elif isinstance(raw_args, dict):
+                args = raw_args
+            else:
+                args = {}
+
+            if not name:
+                continue
+            parsed.append({"id": call_id, "name": name, "arguments": args})
+
+        if parsed:
+            return parsed
+
+    return []
+
+
+def _normalize_tool_calls(response_text: str, tool_calls: list[dict] | None) -> list[dict]:
+    """Return native tool_calls, or fallback parsed calls from assistant text."""
+    if tool_calls:
+        return tool_calls
+    parsed = _extract_text_tool_calls(response_text)
+    if parsed:
+        logger.info("Recovered %d text-mode tool call(s) from assistant response", len(parsed))
+    return parsed
     if workflow_trigger is not None:
         modelmesh["workflow_trigger"] = workflow_trigger
 
@@ -379,6 +454,8 @@ async def _stream_response(
                         input_tokens += in_tok
                         output_tokens += out_tok
 
+                        tool_calls = _normalize_tool_calls(resp_text, tool_calls)
+
                         if not tool_calls:
                             full_content = resp_text or ""
                             tool_loop_used = True
@@ -610,6 +687,8 @@ async def _sync_response(
                     )
                     input_tokens += in_tok
                     output_tokens += out_tok
+
+                    tool_calls = _normalize_tool_calls(resp_text, tool_calls)
 
                     if not tool_calls:
                         full_content = resp_text or ""
