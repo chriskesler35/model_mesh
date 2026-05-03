@@ -1,6 +1,6 @@
 'use client'
 
-import { API_BASE, AUTH_HEADERS } from '@/lib/config'
+import { API_BASE, AUTH_HEADERS, probeAndCacheApiBase } from '@/lib/config'
 import PreferencesTab from '@/components/PreferencesTab'
 import ImageSettingsTab from '@/components/ImageSettingsTab'
 import VoiceAudioTab from '@/components/VoiceAudioTab'
@@ -1206,14 +1206,16 @@ export default function SettingsPage() {
   useEffect(() => {
     async function fetchData() {
       try {
+        // Probe to find the healthy backend port (handles stale process on primary port)
+        const base = await probeAndCacheApiBase()
         const [profileRes, memoryRes, runtimeCaps] = await Promise.all([
-          fetch(`${API_BASE}/v1/user`, {
+          fetch(`${base}/v1/user`, {
             headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
           }).then(r => r.json()),
-          fetch(`${API_BASE}/v1/memory`, {
+          fetch(`${base}/v1/memory`, {
             headers: { 'Authorization': 'Bearer modelmesh_local_dev_key' }
           }).then(r => r.json()),
-          fetch(`${API_BASE}/v1/runtime/capabilities`, { headers: AUTH_HEADERS })
+          fetch(`${base}/v1/runtime/capabilities`, { headers: AUTH_HEADERS })
             .then(r => r.json())
             .catch(() => ({} as RuntimeCapabilitiesSummary)),
         ])

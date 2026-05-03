@@ -6,12 +6,24 @@
  * calls, because some runtime modes do not preserve Authorization headers.
  *
  * Override: set NEXT_PUBLIC_API_URL in .env.local
+ *
+ * Port detection: tries BACKEND_PORTS in order; uses the first that responds
+ * with a 200 from /v1/health. Result is cached in sessionStorage so only one
+ * probe per page session. This gracefully handles stale processes occupying
+ * the primary port without the capabilities or other routes.
  */
 
-const BACKEND_PORT = '19001'
+const BACKEND_PORTS = ['19001', '19000']
+const SESSION_KEY_DETECTED_BASE = 'devforge_detected_api_base'
 
 function trimTrailingSlash(url: string): string {
   return url.replace(/\/+$/, '')
+}
+
+function buildBaseForPort(port: string): string {
+  if (typeof window === 'undefined') return `http://localhost:${port}`
+  const { protocol, hostname } = window.location
+  return `${protocol}//${hostname}:${port}`
 }
 
 /**
@@ -23,15 +35,79 @@ export function getApiBase(): string {
   if (envApiUrl) return trimTrailingSlash(envApiUrl)
 
   if (typeof window !== 'undefined') {
-    const { protocol, hostname, port } = window.location
+    // Use a probed URL if we've already detected a working port this session
+    const cached = window.sessionStorage.getItem(SESSION_KEY_DETECTED_BASE)
+    if (cached) return cached
 
-    if (port === BACKEND_PORT) {
-      return window.location.origin
-    }
-
-    return `${protocol}//${hostname}:${BACKEND_PORT}`
+    const { port } = window.location
+    if (BACKEND_PORTS.includes(port)) return window.location.origin
+    // Return primary port synchronously; async probe will update for next call
+    return buildBaseForPort(BACKEND_PORTS[0])
   }
-  return `http://localhost:${BACKEND_PORT}`
+  return `http://localhost:${BACKEND_PORTS[0]}`
+}
+
+/**
+ * Probes each backend port in order and caches the first healthy one in
+ * sessionStorage. Subsequent getApiBase() calls return the cached URL.
+ *
+ * Call once near app startup (e.g. in a layout or root component useEffect).
+ * Safe to call multiple times — exits early if a cached result exists.
+ */
+export async function probeAndCacheApiBase(): Promise<string> {
+  const envApiUrl = process.env.NEXT_PUBLIC_API_URL?.trim()
+  if (envApiUrl) return trimTrailingSlash(envApiUrl)
+
+  if (typeof window === 'undefined') return `http://localhost:${BACKEND_PORTS[0]}`
+
+  // Don't probe if the page is already served from a backend port
+  const { port } = window.location
+  if (BACKEND_PORTS.includes(port)) {
+    window.sessionStorage.setItem(SESSION_KEY_DETECTED_BASE, window.location.origin)
+    return window.location.origin
+  }
+
+  // Use cached result only if the capabilities route still responds on that port
+  // (a stale process may answer /v1/health but lack newer routes).
+  const cached = window.sessionStorage.getItem(SESSION_KEY_DETECTED_BASE)
+  if (cached) {
+    try {
+      const capRes = await fetch(`${cached}/v1/runtime/capabilities`, {
+        signal: AbortSignal.timeout(2000),
+        headers: { Authorization: `Bearer ${OWNER_API_KEY}` },
+      })
+      if (capRes.ok) return cached
+      // Cached port is stale — clear it and fall through to full probe below
+      window.sessionStorage.removeItem(SESSION_KEY_DETECTED_BASE)
+    } catch {
+      window.sessionStorage.removeItem(SESSION_KEY_DETECTED_BASE)
+    }
+  }
+
+  for (const p of BACKEND_PORTS) {
+    const base = buildBaseForPort(p)
+    try {
+      const healthRes = await fetch(`${base}/v1/health`, { signal: AbortSignal.timeout(3000) })
+      if (!healthRes.ok) continue
+      // Also verify this process has the capabilities route (stale processes may
+      // respond to /v1/health but are missing newer routes like /v1/runtime/capabilities).
+      const capRes = await fetch(`${base}/v1/runtime/capabilities`, {
+        signal: AbortSignal.timeout(3000),
+        headers: { Authorization: `Bearer ${OWNER_API_KEY}` },
+      })
+      if (capRes.ok) {
+        window.sessionStorage.setItem(SESSION_KEY_DETECTED_BASE, base)
+        return base
+      }
+    } catch {
+      // try next port
+    }
+  }
+
+  // All probes failed — fall back to primary port
+  const fallback = buildBaseForPort(BACKEND_PORTS[0])
+  window.sessionStorage.setItem(SESSION_KEY_DETECTED_BASE, fallback)
+  return fallback
 }
 
 /** Master owner key — used as fallback when no user JWT is stored. */
@@ -64,7 +140,7 @@ export function getAuthHeaders(): Record<string, string> {
 // window exists so they work. In SSR, they fall back to localhost.
 export const API_BASE = typeof window !== 'undefined'
   ? getApiBase()
-  : trimTrailingSlash(process.env.NEXT_PUBLIC_API_URL?.trim() || `http://localhost:${BACKEND_PORT}`)
+  : trimTrailingSlash(process.env.NEXT_PUBLIC_API_URL?.trim() || `http://localhost:${BACKEND_PORTS[0]}`)
 
 /**
  * AUTH_HEADERS — computed dynamically via a Proxy so the Authorization
