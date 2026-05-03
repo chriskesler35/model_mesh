@@ -559,6 +559,19 @@ async def _stream_response(
                         tool_calls = _normalize_tool_calls(resp_text, tool_calls)
                         canonical_calls = _canonicalize_tool_calls(tool_calls)
 
+                        if canonical_calls:
+                            logger.info(
+                                "Streaming tool-loop detected %d call(s): %s (conv=%s)",
+                                len(canonical_calls),
+                                [c.get("name", "") for c in canonical_calls],
+                                conversation_id,
+                            )
+                        elif isinstance(resp_text, str) and "tool_calls" in resp_text:
+                            logger.warning(
+                                "Streaming parser miss: response contained tool_calls text but no canonical calls (conv=%s)",
+                                conversation_id,
+                            )
+
                         if not canonical_calls:
                             full_content = resp_text or ""
                             tool_loop_used = True
@@ -592,6 +605,14 @@ async def _stream_response(
                                 tc.get("arguments", {}) or {},
                                 workspace_root,
                             )
+                            logger.info(
+                                "Streaming tool executed id=%s name=%s success=%s out_len=%d conv=%s",
+                                tc.get("id", ""),
+                                tc.get("name", ""),
+                                bool(result.get("success", False)),
+                                len(str(result.get("output", ""))),
+                                conversation_id,
+                            )
                             loop_messages.append(
                                 {
                                     "role": "tool",
@@ -614,7 +635,17 @@ async def _stream_response(
                     "Please try again, or break the request into smaller steps."
                 )
             except Exception as tool_loop_error:
-                logger.warning("Streaming tool-loop path failed, falling back to stream passthrough: %s", tool_loop_error)
+                tool_loop_used = True
+                logger.error(
+                    "Streaming tool-loop failed (raw passthrough blocked) conv=%s err=%s",
+                    conversation_id,
+                    tool_loop_error,
+                    exc_info=True,
+                )
+                full_content = (
+                    "Tool interception failed on the server before completion. "
+                    "Please retry once; backend logs now include detailed tool-loop diagnostics."
+                )
 
             if tool_loop_used or llm_timeout_fallback:
                 if full_content:
@@ -792,6 +823,19 @@ async def _sync_response(
                     tool_calls = _normalize_tool_calls(resp_text, tool_calls)
                     canonical_calls = _canonicalize_tool_calls(tool_calls)
 
+                    if canonical_calls:
+                        logger.info(
+                            "Sync tool-loop detected %d call(s): %s (conv=%s)",
+                            len(canonical_calls),
+                            [c.get("name", "") for c in canonical_calls],
+                            conversation_id,
+                        )
+                    elif isinstance(resp_text, str) and "tool_calls" in resp_text:
+                        logger.warning(
+                            "Sync parser miss: response contained tool_calls text but no canonical calls (conv=%s)",
+                            conversation_id,
+                        )
+
                     if not canonical_calls:
                         full_content = resp_text or ""
                         tool_loop_used = True
@@ -825,6 +869,14 @@ async def _sync_response(
                             tc.get("arguments", {}) or {},
                             workspace_root,
                         )
+                        logger.info(
+                            "Sync tool executed id=%s name=%s success=%s out_len=%d conv=%s",
+                            tc.get("id", ""),
+                            tc.get("name", ""),
+                            bool(result.get("success", False)),
+                            len(str(result.get("output", ""))),
+                            conversation_id,
+                        )
                         loop_messages.append(
                             {
                                 "role": "tool",
@@ -847,7 +899,17 @@ async def _sync_response(
                 "Please try again, or break the request into smaller steps."
             )
         except Exception as tool_loop_error:
-            logger.warning("Tool-loop path failed, falling back to single-call chat: %s", tool_loop_error)
+            tool_loop_used = True
+            logger.error(
+                "Sync tool-loop failed (raw passthrough blocked) conv=%s err=%s",
+                conversation_id,
+                tool_loop_error,
+                exc_info=True,
+            )
+            full_content = (
+                "Tool interception failed on the server before completion. "
+                "Please retry once; backend logs now include detailed tool-loop diagnostics."
+            )
 
         # Fallback: previous single-call behavior
         if not tool_loop_used and not llm_timeout_fallback:
@@ -933,6 +995,14 @@ async def _sync_response(
                                 tc.get("name", ""),
                                 tc.get("arguments", {}) or {},
                                 workspace_root,
+                            )
+                            logger.info(
+                                "Fallback tool executed id=%s name=%s success=%s out_len=%d conv=%s",
+                                tc.get("id", ""),
+                                tc.get("name", ""),
+                                bool(result.get("success", False)),
+                                len(str(result.get("output", ""))),
+                                conversation_id,
                             )
                             loop_messages.append(
                                 {
