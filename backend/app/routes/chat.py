@@ -55,6 +55,29 @@ def _system_completion(
         "estimated_cost": 0.0,
         "provider": "system",
     }
+    if workflow_trigger is not None:
+        modelmesh["workflow_trigger"] = workflow_trigger
+
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+        "object": "chat.completion",
+        "conversation_id": conversation_id,
+        "model": "system",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": content,
+            },
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        },
+        "modelmesh": modelmesh,
+    }
 
 
 def _extract_text_tool_calls(response_text: str) -> list[dict]:
@@ -76,11 +99,19 @@ def _extract_text_tool_calls(response_text: str) -> list[dict]:
         if block:
             candidates.append(block)
 
-    # Extract inline object containing "tool_calls".
-    for m in re.finditer(r"(\{[\s\S]*?\"tool_calls\"[\s\S]*?\})", text, flags=re.IGNORECASE):
+    # Extract inline object containing "tool_calls" (prefer wider greedy match).
+    for m in re.finditer(r"(\{[\s\S]*\"tool_calls\"[\s\S]*\})", text, flags=re.IGNORECASE):
         obj_txt = (m.group(1) or "").strip()
         if obj_txt:
             candidates.append(obj_txt)
+
+    # If prose wraps JSON, try first '{' to last '}' span as candidate.
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        span = text[first_brace:last_brace + 1].strip()
+        if span:
+            candidates.append(span)
 
     for cand in candidates:
         try:
@@ -130,29 +161,6 @@ def _normalize_tool_calls(response_text: str, tool_calls: list[dict] | None) -> 
     if parsed:
         logger.info("Recovered %d text-mode tool call(s) from assistant response", len(parsed))
     return parsed
-    if workflow_trigger is not None:
-        modelmesh["workflow_trigger"] = workflow_trigger
-
-    return {
-        "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
-        "object": "chat.completion",
-        "conversation_id": conversation_id,
-        "model": "system",
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": content,
-            },
-            "finish_reason": "stop",
-        }],
-        "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        },
-        "modelmesh": modelmesh,
-    }
 
 
 @router.post("/chat/completions")
