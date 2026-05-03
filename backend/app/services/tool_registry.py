@@ -109,6 +109,30 @@ _READ_FILE_SCHEMA: dict[str, Any] = {
     },
 }
 
+_READ_LOCAL_FILE_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "read_local_file",
+        "description": (
+            "Reads the contents of a local file on the host machine. "
+            "Use this to inspect configuration files outside the workspace."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "filepath": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the file, e.g. "
+                        "C:\\Users\\chris\\.openclaw\\config.json"
+                    ),
+                },
+            },
+            "required": ["filepath"],
+        },
+    },
+}
+
 _WRITE_FILE_SCHEMA: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -251,6 +275,7 @@ _WEB_FETCH_SCHEMA: dict[str, Any] = {
 # Ordered list of all available tools — this is the default set given to agents.
 ALL_TOOLS: list[str] = [
     "read_file",
+    "read_local_file",
     "write_file",
     "list_dir",
     "run_shell",
@@ -261,6 +286,7 @@ ALL_TOOLS: list[str] = [
 # Map of tool name → OpenAI schema
 ALL_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "read_file": _READ_FILE_SCHEMA,
+    "read_local_file": _READ_LOCAL_FILE_SCHEMA,
     "write_file": _WRITE_FILE_SCHEMA,
     "list_dir": _LIST_DIR_SCHEMA,
     "run_shell": _RUN_SHELL_SCHEMA,
@@ -271,6 +297,7 @@ ALL_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
 # How each tool is described in the system prompt for text-fallback models
 _TOOL_PROMPT_LINES: dict[str, str] = {
     "read_file": "READ_FILE: <relative_path> [start_line] [end_line]  — read file contents",
+    "read_local_file": "READ_LOCAL_FILE: <absolute_path>  — read local host file contents",
     "write_file": "WRITE_FILE: <relative_path>\n<content lines>\nEND_WRITE  — write/overwrite a file",
     "list_dir": "LIST_DIR: <relative_path> [recursive]  — list directory",
     "run_shell": "CMD: <command>  — run a shell command",
@@ -333,4 +360,8 @@ def resolve_agent_tools(agent_tools_field) -> list[str]:
         parsed = list(agent_tools_field)
 
     known = [t for t in parsed if t in ALL_TOOL_SCHEMAS]
+    # Backward compatibility: agents configured with read_file should
+    # automatically receive read_local_file as well.
+    if "read_file" in known and "read_local_file" not in known:
+        known.append("read_local_file")
     return known if known else list(ALL_TOOLS)

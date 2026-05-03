@@ -459,6 +459,7 @@ def format_command_for_context(result: dict) -> str:
 # are rejected to prevent accidental writes to system directories.
 
 _MAX_FILE_READ_BYTES = 200 * 1024  # 200 KB cap for read_file
+_MAX_LOCAL_FILE_READ_BYTES = 512 * 1024  # 512 KB cap for read_local_file
 
 
 def _resolve_workspace_path(relative_path: str, workspace_root: Path) -> Path:
@@ -519,6 +520,41 @@ async def tool_read_file(
 
     note = "\n\n[…file truncated at 200 KB…]" if truncated else ""
     return {"success": True, "output": text + note}
+
+
+async def tool_read_local_file(filepath: str) -> dict:
+    """Read a file from an absolute host path (not workspace-bounded)."""
+    raw_path = (filepath or "").strip()
+    if not raw_path:
+        return {"success": False, "output": "filepath is required."}
+
+    try:
+        target = Path(raw_path).expanduser().resolve()
+    except Exception as exc:
+        return {"success": False, "output": f"Invalid filepath: {exc}"}
+
+    if not target.exists():
+        return {"success": False, "output": f"File not found: {target}"}
+    if not target.is_file():
+        return {"success": False, "output": f"Path is not a file: {target}"}
+
+    try:
+        raw = target.read_bytes()
+        if len(raw) > _MAX_LOCAL_FILE_READ_BYTES:
+            raw = raw[:_MAX_LOCAL_FILE_READ_BYTES]
+            truncated = True
+        else:
+            truncated = False
+        text = raw.decode("utf-8", errors="replace")
+    except Exception as exc:
+        return {"success": False, "output": f"Read error: {exc}"}
+
+    note = "\n\n[…file truncated at 512 KB…]" if truncated else ""
+    return {
+        "success": True,
+        "output": text + note,
+        "filepath": str(target),
+    }
 
 
 async def tool_write_file(
@@ -662,6 +698,11 @@ async def execute_tool_call(
             workspace_root=workspace_root,
             start_line=arguments.get("start_line"),
             end_line=arguments.get("end_line"),
+        )
+
+    if name == "read_local_file":
+        return await tool_read_local_file(
+            filepath=arguments.get("filepath", ""),
         )
 
     if name == "write_file":

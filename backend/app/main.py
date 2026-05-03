@@ -105,6 +105,7 @@ from app.routes.notifications import router as notifications_router
 from app.routes.websocket import router as websocket_router
 from app.routes.runtime_capabilities import router as runtime_capabilities_router
 from app.routes.chat_attachments import router as chat_attachments_router
+from app.routes.tools import router as tools_router
 
 
 @asynccontextmanager
@@ -243,6 +244,7 @@ app.include_router(notifications_router)
 app.include_router(websocket_router)
 app.include_router(runtime_capabilities_router)
 app.include_router(chat_attachments_router)
+app.include_router(tools_router)
 app.include_router(metrics_router)
 
 
