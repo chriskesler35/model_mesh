@@ -58,10 +58,18 @@ class NoModelAvailableError(ModelMeshError):
 
 class AllModelsFailedError(ModelMeshError):
     def __init__(self, primary: str, fallback: str, errors: list):
+        error_strs = [str(e) for e in errors]
+        # Surface the real underlying error(s) rather than just a generic sentinel.
+        if error_strs:
+            non_empty = [s for s in error_strs if s]
+            detail = " | ".join(non_empty) if non_empty else repr(errors)
+            message = f"Model call failed: {detail}"
+        else:
+            message = f"All models in failover chain failed (no error detail)"
         super().__init__(
-            "All models in failover chain failed",
+            message,
             "all_models_failed",
-            {"primary": primary, "fallback": fallback, "errors": [str(e) for e in errors]}
+            {"primary": primary, "fallback": fallback, "errors": error_strs}
         )
 
 

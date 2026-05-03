@@ -19,25 +19,37 @@ from app.services.provider_credentials import get_provider_api_key
 logger = logging.getLogger(__name__)
 
 
+# Real model IDs that the Copilot/Codex API exposes directly.
+# These must NOT be remapped — they are distinct live models, not aliases.
+_REAL_VERSIONED_MODEL_IDS: frozenset[str] = frozenset({
+    "gpt-5.2",
+    "gpt-5.2-codex",
+    "gpt-5.3-codex",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.5",
+    "gpt-5.5-pro",
+})
+
+
 def _normalize_codex_model_id(model_id: str) -> str:
     """Map legacy/alias Codex model IDs to provider-canonical IDs.
 
     Some stored rows or older templates still reference aliases such as
     `gpt-5-codex`, while current OpenAI/Codex catalogs expose `gpt-5`.
+    Never remaps real versioned model IDs (e.g. gpt-5.5) that are exposed
+    directly by the GitHub Copilot or Codex APIs.
     """
     normalized = (model_id or "").strip().lower()
+    # Never remap real versioned model IDs — they are not aliases.
+    if normalized in _REAL_VERSIONED_MODEL_IDS:
+        return model_id
     alias_map = {
         "gpt-5-codex": "gpt-5",
-        "gpt-5.3": "gpt-5",
-        "gpt-5.4": "gpt-5",
-        "gpt-5.3-codex": "gpt-5",
-        "gpt-5.4-codex": "gpt-5",
     }
     mapped = alias_map.get(normalized)
     if mapped:
         return mapped
-    if normalized.startswith("gpt-5.") and (normalized[6:].isdigit() or normalized.endswith("-codex")):
-        return "gpt-5"
     return model_id
 
 # Drop params unsupported by specific providers (e.g. GPT-5 only accepts
@@ -66,9 +78,13 @@ class ModelClient:
         provider_name = provider.name.lower()
         raw_model_id = model.model_id or ""
         raw_model_id_lower = raw_model_id.lower()
-        effective_model_id = _normalize_codex_model_id(raw_model_id)
+        # GitHub Copilot exposes real versioned model IDs directly; never remap them.
+        effective_model_id = raw_model_id if provider_name == "github-copilot" else _normalize_codex_model_id(raw_model_id)
         model_id_lower = effective_model_id.lower()
-        is_codex_family_model = ("codex" in raw_model_id_lower) or ("codex" in model_id_lower)
+        # Treat all gpt-5 variants (gpt-5, gpt-5-mini, gpt-5.x, gpt-5.x-*) as
+        # Codex-family so they route through the OAuth proxy when available.
+        _is_gpt5_variant = raw_model_id_lower.startswith("gpt-5") or model_id_lower.startswith("gpt-5")
+        is_codex_family_model = ("codex" in raw_model_id_lower) or ("codex" in model_id_lower) or _is_gpt5_variant
         is_openai_provider = provider_name in ("openai", "openai-codex")
         api_key = self.get_api_key(provider.name)
         use_codex_proxy = should_use_codex_oauth_proxy(provider_name, api_key=api_key)
