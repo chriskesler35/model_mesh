@@ -243,6 +243,27 @@ interface WorkbenchSessionLite {
   status: string
 }
 
+interface PersonaLite {
+  id: string
+  name: string
+  primary_model_id?: string | null
+}
+
+interface AgentLite {
+  id: string
+  name: string
+  agent_type: string
+  model_id?: string | null
+  resolved_model_id?: string | null
+  is_active?: boolean
+}
+
+interface ModelLite {
+  id: string
+  model_id: string
+  display_name?: string
+}
+
 const WORKBENCH_SEED_TASK: Record<string, string> = {
   coder: 'Continue building this project. Focus on the next scoped improvement and summarize verification steps.',
   reviewer: 'Run a code review for this project and report the most important findings first.',
@@ -324,6 +345,16 @@ export default function ProjectDetailPage() {
     }
   }
   const [loading, setLoading] = useState(true)
+  const [personas, setPersonas] = useState<PersonaLite[]>([])
+  const [agents, setAgents] = useState<AgentLite[]>([])
+  const [models, setModels] = useState<ModelLite[]>([])
+  const [selectedPersonaId, setSelectedPersonaId] = useState('')
+  const [selectedAgentId, setSelectedAgentId] = useState('')
+  const [selectedModelId, setSelectedModelId] = useState('')
+  const [requestIntent, setRequestIntent] = useState('')
+  const [autoAgentRouting, setAutoAgentRouting] = useState(true)
+  const [showAdvancedLaunch, setShowAdvancedLaunch] = useState(false)
+  const [launchPrefsLoaded, setLaunchPrefsLoaded] = useState(false)
   const [editing, setEditing] = useState(false)
   const [editName, setEditName] = useState('')
   const [editDesc, setEditDesc] = useState('')
@@ -343,6 +374,114 @@ export default function ProjectDetailPage() {
   }, [id, router])
 
   useEffect(() => { fetchProject() }, [fetchProject])
+
+  // Restore all advanced launch prefs from localStorage on mount.
+  useEffect(() => {
+    try {
+      const k = (key: string) => localStorage.getItem(`project:${id}:${key}`)
+      const open = k('advanced-launch-open')
+      if (open === '1') setShowAdvancedLaunch(true)
+      if (open === '0') setShowAdvancedLaunch(false)
+      const persona = k('launch-persona')
+      if (persona !== null) setSelectedPersonaId(persona)
+      const agent = k('launch-agent')
+      if (agent !== null) setSelectedAgentId(agent)
+      const model = k('launch-model')
+      if (model !== null) setSelectedModelId(model)
+      const intent = k('launch-intent')
+      if (intent !== null) setRequestIntent(intent)
+      const autoRoute = k('launch-auto-route')
+      if (autoRoute !== null) setAutoAgentRouting(autoRoute !== '0')
+    } catch {
+      // Ignore storage errors in restricted environments.
+    } finally {
+      setLaunchPrefsLoaded(true)
+    }
+  }, [id])
+
+  // Persist advanced launch prefs whenever they change (skip before restored).
+  useEffect(() => {
+    if (!launchPrefsLoaded) return
+    try {
+      const s = (key: string, val: string) => localStorage.setItem(`project:${id}:${key}`, val)
+      s('advanced-launch-open', showAdvancedLaunch ? '1' : '0')
+      s('launch-persona', selectedPersonaId)
+      s('launch-agent', selectedAgentId)
+      s('launch-model', selectedModelId)
+      s('launch-intent', requestIntent)
+      s('launch-auto-route', autoAgentRouting ? '1' : '0')
+    } catch {
+      // Ignore storage errors in restricted environments.
+    }
+  }, [id, launchPrefsLoaded, showAdvancedLaunch, selectedPersonaId, selectedAgentId, selectedModelId, requestIntent, autoAgentRouting])
+
+  useEffect(() => {
+    const loadLaunchOptions = async () => {
+      try {
+        const [personaRes, agentRes, modelRes] = await Promise.all([
+          fetch(`${API_BASE}/v1/personas?limit=100`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+          fetch(`${API_BASE}/v1/agents?limit=100`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+          fetch(`${API_BASE}/v1/models?active_only=true&usable_only=true&validated_only=true&chat_only=true&limit=250`, { headers: AUTH_HEADERS })
+            .then(r => r.json()).catch(() => ({ data: [] })),
+        ])
+        setPersonas(personaRes.data || [])
+        setAgents((agentRes.data || []).filter((a: AgentLite) => a.is_active !== false))
+        setModels(modelRes.data || [])
+      } catch {
+        // Optional launcher helpers only.
+      }
+    }
+    loadLaunchOptions()
+  }, [])
+
+  const inferAgentType = (request: string): string => {
+    const text = request.toLowerCase()
+    if (/review|audit|qa|test|bug|regression/.test(text)) return 'reviewer'
+    if (/design|ux|ui|wireframe/.test(text)) return 'designer'
+    if (/plan|roadmap|strategy|break down/.test(text)) return 'planner'
+    if (/research|investigate|compare|analyze/.test(text)) return 'researcher'
+    if (/execute|run|ship|deploy/.test(text)) return 'executor'
+    if (/write|docs|documentation|copy/.test(text)) return 'writer'
+    return 'coder'
+  }
+
+  const selectedPersona = personas.find(p => p.id === selectedPersonaId) || null
+  const selectedAgent = agents.find(a => a.id === selectedAgentId) || null
+
+  const resolveLaunchAgentType = (): string => {
+    if (selectedAgent?.agent_type) return selectedAgent.agent_type
+    if (autoAgentRouting) return inferAgentType(requestIntent)
+    return 'coder'
+  }
+
+  const resolveLaunchModelRef = (): string | undefined => {
+    if (selectedModelId) {
+      const model = models.find(m => m.id === selectedModelId)
+      if (model?.model_id) return model.model_id
+    }
+
+    if (selectedAgent?.resolved_model_id) {
+      return selectedAgent.resolved_model_id
+    }
+
+    if (selectedAgent?.model_id) {
+      const model = models.find(m => m.id === selectedAgent.model_id)
+      if (model?.model_id) return model.model_id
+    }
+
+    if (selectedPersona?.primary_model_id) {
+      const model = models.find(m => m.id === selectedPersona.primary_model_id)
+      if (model?.model_id) return model.model_id
+    }
+
+    return undefined
+  }
+
+  const launchSummary = [
+    selectedPersona ? `Persona: ${selectedPersona.name}` : 'Persona: Auto',
+    selectedAgent ? `Agent: ${selectedAgent.name}` : `Agent: ${resolveLaunchAgentType()}`,
+    selectedModelId ? 'Model: Custom' : 'Model: Auto',
+  ].join(' | ')
 
   // Auto-refresh file tree when a Workbench session for this project completes
   useEffect(() => {
@@ -407,7 +546,11 @@ export default function ProjectDetailPage() {
     setSaving(false)
   }
 
-  const openProjectSession = async (preferredAgent: string = 'coder') => {
+  const openProjectSession = async () => {
+    const preferredAgent = resolveLaunchAgentType()
+    const resolvedModel = resolveLaunchModelRef()
+    const seededTask = requestIntent.trim() || WORKBENCH_SEED_TASK[preferredAgent] || WORKBENCH_SEED_TASK.coder
+
     try {
       const listRes = await fetch(`${API_BASE}/v1/workbench/sessions`, { headers: AUTH_HEADERS })
       const listData = listRes.ok ? await listRes.json() : { data: [] }
@@ -432,7 +575,8 @@ export default function ProjectDetailPage() {
         body: JSON.stringify({
           project_id: id,
           agent_type: preferredAgent,
-          task: WORKBENCH_SEED_TASK[preferredAgent] || WORKBENCH_SEED_TASK.coder,
+          model: resolvedModel,
+          task: seededTask,
         }),
       })
 
@@ -449,6 +593,9 @@ export default function ProjectDetailPage() {
       throw new Error('Session create returned no id')
     } catch {
       const query = new URLSearchParams({ project: id, agent_type: preferredAgent })
+      if (resolvedModel) query.set('model', resolvedModel)
+      if (selectedPersonaId) query.set('persona', selectedPersonaId)
+      if (selectedAgentId) query.set('agent', selectedAgentId)
       router.push(`/workbench?${query.toString()}`)
     }
   }
@@ -517,11 +664,88 @@ export default function ProjectDetailPage() {
             >🔓 Full</button>
           </div>
 
-          <button onClick={() => openProjectSession('coder')}
+          <button onClick={openProjectSession}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-orange-500 hover:bg-orange-600 text-white text-xs font-medium rounded-lg transition-colors">
             🚀 Open in Workbench
           </button>
         </div>
+      </div>
+
+      <div className="px-6 py-2.5 bg-orange-50/60 dark:bg-orange-900/10 border-b border-orange-100 dark:border-orange-900/30">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-[11px] text-gray-600 dark:text-gray-300">{launchSummary}</p>
+          <button
+            onClick={() => setShowAdvancedLaunch(v => !v)}
+            className="text-xs px-2.5 py-1 rounded-lg border border-orange-200 dark:border-orange-700 bg-white dark:bg-gray-900 text-orange-700 dark:text-orange-300 hover:bg-orange-100/50 dark:hover:bg-orange-900/20"
+          >
+            {showAdvancedLaunch ? 'Hide advanced launch' : 'Advanced launch options'}
+          </button>
+        </div>
+
+        {showAdvancedLaunch && (
+          <div className="mt-2 pt-2 border-t border-orange-200/70 dark:border-orange-800/60">
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                value={requestIntent}
+                onChange={e => setRequestIntent(e.target.value)}
+                placeholder="What do you want to fine-tune or change? (optional)"
+                className="min-w-[260px] flex-1 text-xs px-2.5 py-1.5 rounded-lg border border-orange-200 dark:border-orange-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white"
+              />
+
+              <select
+                value={selectedPersonaId}
+                onChange={e => setSelectedPersonaId(e.target.value)}
+                className="text-xs px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 dark:text-white"
+                title="Optional persona; if selected and no model is selected, its primary model is used"
+              >
+                <option value="">Persona: Auto</option>
+                {personas.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+
+              <select
+                value={selectedAgentId}
+                onChange={e => setSelectedAgentId(e.target.value)}
+                className="text-xs px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 dark:text-white"
+                title="Optional agent profile"
+              >
+                <option value="">Agent: Auto</option>
+                {agents.map(a => (
+                  <option key={a.id} value={a.id}>{a.name} ({a.agent_type})</option>
+                ))}
+              </select>
+
+              <select
+                value={selectedModelId}
+                onChange={e => setSelectedModelId(e.target.value)}
+                className="text-xs px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-900 dark:text-white"
+                title="Optional direct model override"
+              >
+                <option value="">Model: Auto</option>
+                {models.map(m => (
+                  <option key={m.id} value={m.id}>{m.display_name || m.model_id}</option>
+                ))}
+              </select>
+
+              <label className="inline-flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300 px-2 py-1 rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900">
+                <input
+                  type="checkbox"
+                  checked={autoAgentRouting}
+                  onChange={e => setAutoAgentRouting(e.target.checked)}
+                  className="rounded border-gray-300"
+                />
+                Auto-route agent by request
+              </label>
+            </div>
+            <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
+              {selectedAgent
+                ? `This will spin up the ${selectedAgent.agent_type} agent using "${selectedAgent.name}".`
+                : `This will spin up a ${resolveLaunchAgentType()} agent${autoAgentRouting ? ' based on your request' : ''}.`}
+              {selectedModelId ? ' Model override is enabled.' : ''}
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Tabs */}

@@ -200,18 +200,44 @@ async def chat_completions(
     if request.model_override and persona:
         from app.models.model import Model as ModelORM
         from app.models.provider import Provider as ProviderORM
+        from app.services.codex_oauth import should_use_codex_oauth_proxy
+        from sqlalchemy import case, or_
+        _use_codex_proxy = should_use_codex_oauth_proxy()
+        # Try exact match first, then partial/fuzzy on the tail segment of the model_id.
+        _override_ref = request.model_override
+        _last_part = _override_ref.split("/")[-1]  # e.g. "gpt-4.5" from "openai/gpt-4.5"
         override_result = await db.execute(
             select(ModelORM, ProviderORM)
             .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
-            .where(ModelORM.model_id == request.model_override)
             .where(ModelORM.is_active == True)
+            .where(
+                or_(
+                    ModelORM.model_id == _override_ref,
+                    ModelORM.model_id.contains(_last_part),
+                )
+            )
+            .order_by(
+                # Exact match first
+                (ModelORM.model_id == _override_ref).desc(),
+                # Deprioritise openai-codex when no proxy is configured
+                case(
+                    (ProviderORM.name == "openai-codex", 0 if _use_codex_proxy else -1),
+                    else_=1,
+                ).desc(),
+                ModelORM.validated_at.desc().nulls_last(),
+            )
             .limit(1)
         )
         override_row = override_result.first()
         if override_row:
             primary_model = override_row[0]
             fallback_model = None  # No fallback when explicitly overridden
-            logger.info(f"Model override: {request.model_override}")
+            logger.info(f"Model override resolved: requested='{_override_ref}' -> matched='{primary_model.model_id}' via provider='{override_row[1].name}'")
+        else:
+            logger.warning(
+                f"Model override '{_override_ref}' not found or inactive in DB; "
+                "continuing with persona's assigned model"
+            )
     
     if not persona:
         raise HTTPException(

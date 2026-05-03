@@ -59,9 +59,30 @@ interface RuntimeCapabilities {
   }
 }
 
+interface AttachmentDraft {
+  id: string
+  name: string
+  size: number
+  content: string
+  truncated: boolean
+  charCount: number
+  fileType: string
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-function timeAgo(dateStr: string | null): string {
-  if (!dateStr) return ''
+function fileTypeIcon(ext: string): string {
+  const icons: Record<string, string> = {
+    pdf: '\u{1F4C4}', docx: '\u{1F4DD}', doc: '\u{1F4DD}',
+    xlsx: '\u{1F4CA}', xls: '\u{1F4CA}', csv: '\u{1F4CA}',
+    pptx: '\u{1F4D1}', ppt: '\u{1F4D1}',
+    json: '\u{1F4CB}', yaml: '\u{1F4CB}', yml: '\u{1F4CB}',
+    py: '\u{1F40D}', js: '\u{1F7E8}', ts: '\u{1F7E6}', tsx: '\u{1F7E6}', jsx: '\u{1F7E8}',
+    md: '\u{1F4D6}', txt: '\u{1F4C3}',
+  }
+  return icons[ext] || '\u{1F4CE}'
+}
+
+function timeAgo(dateStr: string | null): string {  if (!dateStr) return ''
   const diff = Date.now() - new Date(dateStr).getTime()
   const m = Math.floor(diff / 60000)
   if (m < 1) return 'just now'
@@ -1554,6 +1575,10 @@ export default function ChatPage() {
   const [models, setModels] = useState<Model[]>([])
   const [selectedModelId, setSelectedModelId] = useState('')
   const [input, setInput] = useState('')
+  const [attachmentDrafts, setAttachmentDrafts] = useState<AttachmentDraft[]>([])
+  const [attachmentsUploading, setAttachmentsUploading] = useState(false)
+  const [chatDropActive, setChatDropActive] = useState(false)
+  const [attachmentSummaryOpen, setAttachmentSummaryOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(288)  // px; matches old w-72
@@ -1753,8 +1778,73 @@ export default function ChatPage() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const imagePromptRef = useRef<HTMLTextAreaElement>(null)
   const searchTimer = useRef<ReturnType<typeof setTimeout>>()
+
+  const uploadAttachmentFiles = useCallback(async (files: FileList | File[]) => {
+    const fileList = Array.from(files || [])
+    if (fileList.length === 0) return
+
+    // Proportional token budget: 200k total chars, min 10k per file
+    const perFileBudget = Math.max(10_000, Math.min(60_000, Math.floor(200_000 / fileList.length)))
+
+    setAttachmentsUploading(true)
+    try {
+      for (const file of fileList) {
+        const formData = new FormData()
+        formData.append('file', file)
+        formData.append('max_chars', String(perFileBudget))
+
+        const res = await fetch(`${API_BASE}/v1/chat/attachments/extract`, {
+          method: 'POST',
+          headers: { Authorization: AUTH_HEADERS['Authorization'] },
+          body: formData,
+        })
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: 'Upload failed' }))
+          addToast({
+            type: 'error',
+            title: `Failed to read ${file.name}`,
+            message: err?.detail || `Upload failed (${res.status})`,
+            autoClose: 5000,
+          })
+          continue
+        }
+
+        const data = await res.json()
+        setAttachmentDrafts(prev => [
+          ...prev,
+          {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            name: data.file_name || file.name,
+            size: file.size,
+            content: data.extracted_text || '',
+            truncated: Boolean(data.truncated),
+            charCount: data.extracted_chars || 0,
+            fileType: data.extension || 'txt',
+          },
+        ])
+      }
+    } finally {
+      setAttachmentsUploading(false)
+    }
+  }, [addToast])
+
+  const onChatDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setChatDropActive(false)
+    if (showImageGen || loading) return
+    if (e.dataTransfer?.files?.length) {
+      await uploadAttachmentFiles(e.dataTransfer.files)
+    }
+  }, [showImageGen, loading, uploadAttachmentFiles])
+
+  const removeAttachmentDraft = useCallback((id: string) => {
+    setAttachmentDrafts(prev => prev.filter(a => a.id !== id))
+  }, [])
 
   // ── Fetch available workflows when image gen opens ──────────────────────
   useEffect(() => {
@@ -2218,22 +2308,35 @@ export default function ChatPage() {
   }
 
   const sendMessage = async (directText?: string) => {
-    const text = directText?.trim() || input.trim()
-    if (!text || loading) return
+    const rawText = directText?.trim() || input.trim()
+    const hasAttachments = attachmentDrafts.length > 0
+    if ((!rawText && !hasAttachments) || loading || attachmentsUploading) return
     if (!directText) setInput('')
 
     // Intercept slash commands before sending to AI
-    if (text.startsWith('/')) {
-      await executeSlashCommand(text)
+    if (rawText.startsWith('/')) {
+      await executeSlashCommand(rawText)
       return
     }
 
     // Route to image generation if intent detected
-    const imagePromptDetected = detectImageIntent(text)
+    const imagePromptDetected = detectImageIntent(rawText)
     if (imagePromptDetected) {
       generateImage(imagePromptDetected)
       return
     }
+
+    const attachmentBlock = hasAttachments
+      ? attachmentDrafts.map(a => {
+          const kb = Math.max(1, Math.round(a.size / 1024))
+          const truncation = a.truncated ? '\n[Note: extracted text was truncated for size limits.]' : ''
+          return `### Attachment: ${a.name} (${kb} KB)\n${a.content}${truncation}`
+        }).join('\n\n')
+      : ''
+
+    const text = hasAttachments
+      ? `${rawText || 'Please analyze the attached files.'}\n\n---\nAttached file content:\n\n${attachmentBlock}`
+      : rawText
 
     const userMsg: Message = {
       id: `tmp-${Date.now()}`,
@@ -2256,6 +2359,7 @@ export default function ChatPage() {
     setMessages(prev => [...prev, assistantMsg])
 
     const historyMsgs = [...messages, userMsg].map(m => ({ role: m.role, content: m.content }))
+    let sentSuccessfully = false
 
     try {
       const body: any = {
@@ -2298,6 +2402,7 @@ export default function ChatPage() {
           : m
       ))
       setActiveModelName(modelName)
+      sentSuccessfully = true
 
       // Update conversation state
       if (convId && convId !== activeConvId) {
@@ -2352,6 +2457,10 @@ export default function ChatPage() {
       ))
     } finally {
       setLoading(false)
+      if (sentSuccessfully) {
+        setAttachmentDrafts([])
+        setAttachmentSummaryOpen(false)
+      }
       textareaRef.current?.focus()
     }
   }
@@ -2864,7 +2973,136 @@ export default function ChatPage() {
 
         {/* Input bar */}
         <div className="flex-shrink-0 bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700 px-4 pt-3 pb-4 rounded-b-xl">
-          <div className="max-w-4xl mx-auto">
+          <div
+            className={`max-w-4xl mx-auto rounded-xl transition-colors ${chatDropActive ? 'bg-orange-50/80 dark:bg-orange-900/20' : ''}`}
+            onDragEnter={e => {
+              if (showImageGen) return
+              e.preventDefault()
+              e.stopPropagation()
+              setChatDropActive(true)
+            }}
+            onDragOver={e => {
+              if (showImageGen) return
+              e.preventDefault()
+              e.stopPropagation()
+              setChatDropActive(true)
+            }}
+            onDragLeave={e => {
+              if (showImageGen) return
+              e.preventDefault()
+              e.stopPropagation()
+              const nextTarget = e.relatedTarget as Node | null
+              if (!nextTarget || !e.currentTarget.contains(nextTarget)) {
+                setChatDropActive(false)
+              }
+            }}
+            onDrop={onChatDrop}
+          >
+            {!showImageGen && chatDropActive && (
+              <div className="mb-2 rounded-lg border-2 border-dashed border-orange-300 dark:border-orange-700 px-3 py-2 text-xs text-orange-700 dark:text-orange-300">
+                Drop files to attach them for analysis.
+              </div>
+            )}
+
+            {/* Multi-file summary panel — shown when ≥2 attachments */}
+            {!showImageGen && attachmentDrafts.length >= 2 && (() => {
+              const totalChars = attachmentDrafts.reduce((s, a) => s + a.charCount, 0)
+              const totalTokens = Math.round(totalChars / 4)
+              const isLarge = totalTokens > 80_000
+              return (
+                <div className="mb-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 text-xs overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setAttachmentSummaryOpen(p => !p)}
+                    className="w-full flex items-center justify-between px-3 py-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700/50"
+                  >
+                    <span className="font-medium flex items-center gap-2">
+                      <span>📎 {attachmentDrafts.length} files</span>
+                      <span className="text-gray-400">&middot;</span>
+                      <span>{(totalChars / 1000).toFixed(0)}K chars</span>
+                      <span className="text-gray-400">&middot;</span>
+                      <span className={isLarge ? 'text-amber-600 dark:text-amber-400' : ''}>
+                        ~{totalTokens >= 1000 ? `${(totalTokens / 1000).toFixed(0)}K` : totalTokens} tokens
+                        {isLarge && ' ⚠'}
+                      </span>
+                    </span>
+                    <span className="text-gray-400 ml-2">{attachmentSummaryOpen ? '▲' : '▼'}</span>
+                  </button>
+                  {attachmentSummaryOpen && (
+                    <div className="border-t border-gray-200 dark:border-gray-700 px-3 py-2 space-y-1.5">
+                      {attachmentDrafts.map(att => {
+                        const tokK = att.charCount / 4
+                        return (
+                          <div key={att.id} className="flex items-center justify-between gap-2 min-w-0">
+                            <span className="flex items-center gap-1.5 min-w-0">
+                              <span>{fileTypeIcon(att.fileType)}</span>
+                              <span className="truncate text-gray-700 dark:text-gray-200 max-w-[200px]">{att.name}</span>
+                              <span className="flex-shrink-0 px-1 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400 uppercase text-[10px] tracking-wide">{att.fileType}</span>
+                            </span>
+                            <span className="flex-shrink-0 flex items-center gap-1.5 text-gray-400">
+                              <span>{tokK >= 1000 ? `${(tokK / 1000).toFixed(1)}K` : Math.round(tokK)} tok</span>
+                              {att.truncated && <span className="text-amber-600 dark:text-amber-400">truncated</span>}
+                            </span>
+                          </div>
+                        )
+                      })}
+                      {isLarge && (
+                        <p className="mt-1.5 text-amber-600 dark:text-amber-400 leading-snug">
+                          ⚠ Large context — use a model with a big context window or remove some files.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
+
+            {/* Attachment chips */}
+            {!showImageGen && attachmentDrafts.length > 0 && (
+              <div className="mb-2 flex flex-wrap gap-2">
+                {attachmentDrafts.map(att => (
+                  <span key={att.id} className="inline-flex items-center gap-1 rounded-full border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-2.5 py-1 text-xs text-gray-700 dark:text-gray-200">
+                    <span>{fileTypeIcon(att.fileType)}</span>
+                    <span className="max-w-[200px] truncate">{att.name}</span>
+                    {att.truncated && <span className="text-amber-600 dark:text-amber-400 ml-0.5">truncated</span>}
+                    <button
+                      type="button"
+                      onClick={() => removeAttachmentDraft(att.id)}
+                      className="text-gray-400 hover:text-red-500 ml-0.5"
+                      title="Remove attachment"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Analyze quick-action — shown when files attached but no text typed */}
+            {!showImageGen && attachmentDrafts.length > 0 && !input.trim() && (
+              <button
+                type="button"
+                onClick={() => sendMessage('Please analyze the attached file(s) and provide a comprehensive summary, key insights, and any notable findings.')}
+                disabled={loading || attachmentsUploading}
+                className="mb-2 w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl border-2 border-dashed border-orange-300 dark:border-orange-700 text-orange-600 dark:text-orange-400 text-sm font-medium hover:bg-orange-50 dark:hover:bg-orange-900/20 disabled:opacity-50 transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+                Analyze attached {attachmentDrafts.length === 1 ? 'file' : `${attachmentDrafts.length} files`}
+              </button>
+            )}
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={async e => {
+                if (e.target.files?.length) await uploadAttachmentFiles(e.target.files)
+                e.currentTarget.value = ''
+              }}
+            />
             <div className="flex gap-2 items-end relative">
               {/* Toggle: chat <-> image mode */}
               <button
@@ -2994,6 +3232,24 @@ export default function ChatPage() {
               ) : (
                 /* Chat mode input */
                 <>
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={loading || attachmentsUploading}
+                    title="Attach files for analysis"
+                    className="flex-shrink-0 p-2.5 rounded-xl border border-gray-200 dark:border-gray-700 text-gray-400 hover:text-orange-500 hover:border-orange-300 disabled:opacity-50 transition-colors"
+                  >
+                    {attachmentsUploading ? (
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828L18 9.828a4 4 0 10-5.656-5.656L5.757 10.757a6 6 0 108.486 8.486L20.5 13" />
+                      </svg>
+                    )}
+                  </button>
                   <textarea
                     ref={textareaRef}
                     value={input}
@@ -3011,7 +3267,7 @@ export default function ChatPage() {
                   />
                   <button
                     onClick={() => sendMessage()}
-                    disabled={loading || !input.trim()}
+                    disabled={loading || attachmentsUploading || (!input.trim() && attachmentDrafts.length === 0)}
                     className="flex-shrink-0 px-4 py-2.5 bg-orange-500 hover:bg-orange-600 disabled:bg-gray-200 dark:disabled:bg-gray-700 text-white disabled:text-gray-400 rounded-xl font-medium text-sm transition-colors"
                   >
                     {loading ? (
@@ -3031,7 +3287,11 @@ export default function ChatPage() {
             </div>
             <div className="flex justify-between items-center mt-2 px-1">
               <span className="text-xs text-gray-400">
-                {showImageGen ? 'Image mode' : (input.length > 0 ? `${input.length} chars` : '')}
+                {showImageGen
+                  ? 'Image mode'
+                  : attachmentsUploading
+                    ? 'Processing attachments...'
+                    : (input.length > 0 ? `${input.length} chars` : `${attachmentDrafts.length} attachment(s)`)}
               </span>
               <span className="text-xs text-gray-400">
                 {showImageGen ? 'Enter to generate' : 'Ctrl+Enter to send'}
