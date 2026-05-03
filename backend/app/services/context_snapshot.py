@@ -16,6 +16,7 @@ Snapshot layout:
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +28,23 @@ _MEMORY_FILE = _CONTEXT_DIR / "MEMORY.md"
 
 # How many messages before we do a memory distillation pass
 DISTILL_EVERY_N_MESSAGES = 10
+
+
+def _resolve_distill_model(active_model_name: str | None) -> str:
+    """Choose a robust model for memory distillation.
+
+    Default to a local Ollama model to avoid cloud credential coupling in
+    background distillation tasks. Allow explicit override via env.
+    """
+    explicit = (os.getenv("DEVFORGEAI_MEMORY_DISTILL_MODEL", "") or "").strip()
+    if explicit:
+        return explicit
+
+    active = (active_model_name or "").strip()
+    if active.startswith("ollama/"):
+        return active
+
+    return "ollama/llama3.1:8b"
 
 
 def _today_dir() -> Path:
@@ -237,11 +255,14 @@ async def maybe_distill_memory(
 
         # Use litellm directly to avoid circular imports
         import litellm
+        distill_model = _resolve_distill_model(model_name)
+        distill_temperature = 1.0 if "gemini-3" in distill_model.lower() else 0.3
+
         resp = await litellm.acompletion(
-            model=model_name or "ollama/llama3.1:8b",
+            model=distill_model,
             messages=[{"role": "user", "content": distill_prompt}],
             max_tokens=400,
-            temperature=0.3,
+            temperature=distill_temperature,
         )
         facts = resp.choices[0].message.content.strip()
         if facts:
