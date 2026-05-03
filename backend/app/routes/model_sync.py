@@ -10,6 +10,7 @@ On startup (and on demand):
 import uuid
 import httpx
 import logging
+import re
 from typing import Any, Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends
@@ -119,6 +120,11 @@ NON_VIABLE_CATALOG_TOKENS = (
     "unsupported",
     "disabled",
     "unavailable",
+)
+
+_DATE_SUFFIX_PATTERNS = (
+    re.compile(r"[-_](20\d{2})[-_](\d{2})[-_](\d{2})$"),
+    re.compile(r"[-_](20\d{2})(\d{2})(\d{2})$"),
 )
 
 
@@ -241,6 +247,84 @@ def get_catalog_model_viability(model_entry: dict[str, Any]) -> tuple[bool, Opti
     return True, None, None
 
 
+def _extract_snapshot_date(model_id: str | None):
+    if not model_id:
+        return None
+    tail = str(model_id).split("/")[-1]
+    for pattern in _DATE_SUFFIX_PATTERNS:
+        match = pattern.search(tail)
+        if not match:
+            continue
+        try:
+            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3))).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _model_family_key(model_id: str | None) -> str:
+    if not model_id:
+        return ""
+    parts = str(model_id).split("/")
+    tail = parts[-1].lower().strip()
+    tail = re.sub(r"[:\-_]?latest$", "", tail)
+    for pattern in _DATE_SUFFIX_PATTERNS:
+        tail = pattern.sub("", tail)
+    tail = tail.rstrip("-_")
+    if len(parts) > 1:
+        return "/".join(parts[:-1]).lower() + "/" + tail
+    return tail
+
+
+def _filter_outdated_snapshots(
+    models_list: list[dict[str, Any]],
+    provider_label: str,
+) -> tuple[list[dict[str, Any]], dict[str, tuple[str, str]]]:
+    """Keep undated aliases plus latest dated snapshot per family.
+
+    Returns filtered models and explicit deactivation reasons for stale snapshots.
+    """
+    families: dict[str, list[tuple[dict[str, Any], object]]] = {}
+    for entry in models_list:
+        model_id = (entry.get("model_id") or "").strip()
+        if not model_id:
+            continue
+        family = _model_family_key(model_id)
+        snapshot_date = _extract_snapshot_date(model_id)
+        families.setdefault(family, []).append((entry, snapshot_date))
+
+    kept_entries: list[dict[str, Any]] = []
+    explicit_reasons: dict[str, tuple[str, str]] = {}
+
+    for members in families.values():
+        undated = [(m, d) for m, d in members if d is None]
+        dated = [(m, d) for m, d in members if d is not None]
+
+        for model, _ in undated:
+            kept_entries.append(model)
+
+        if not dated:
+            continue
+
+        dated_sorted = sorted(dated, key=lambda item: item[1], reverse=True)
+        latest_model, latest_date = dated_sorted[0]
+        kept_entries.append(latest_model)
+
+        latest_id = latest_model.get("model_id") or "latest snapshot"
+        latest_date_text = latest_date.isoformat() if latest_date else "unknown date"
+        for stale_model, stale_date in dated_sorted[1:]:
+            stale_id = stale_model.get("model_id")
+            if not stale_id:
+                continue
+            stale_date_text = stale_date.isoformat() if stale_date else "unknown date"
+            explicit_reasons[stale_id] = (
+                f"Filtered outdated snapshot from live {provider_label} catalog.",
+                f"outdated_snapshot: {stale_id} ({stale_date_text}) superseded by {latest_id} ({latest_date_text})",
+            )
+
+    return kept_entries, explicit_reasons
+
+
 def _infer_model_capabilities(model_id: str, supported_methods: Optional[list[str]] = None, modalities: Any = None) -> dict:
     normalized = (model_id or "").lower()
     methods = {m.lower() for m in (supported_methods or []) if isinstance(m, str)}
@@ -353,17 +437,32 @@ async def _fetch_openai_compatible_models(base_url: str, api_key: str, provider_
         response.raise_for_status()
         payload = response.json()
 
+    # For Copilot, derive a provider suffix to keep models distinguishable in the UI.
+    _provider_suffix = " (GitHub Copilot)" if provider_name == "github-copilot" else ""
+
     discovered: list[dict[str, Any]] = []
     for item in payload.get("data", []):
         model_id = (item.get("id") or "").strip()
         if not model_id:
             continue
+
+        # Use the API's own name/display_name field when present; fall back to humanised model_id.
+        raw_name = (item.get("name") or item.get("display_name") or "").strip()
+        display_name = (raw_name + _provider_suffix) if raw_name else (_humanize_model_id(model_id) + _provider_suffix)
+
+        # For Copilot models, also pull context/output limits from the capabilities block.
+        _caps_block = item.get("capabilities") or {}
+        _limits = _caps_block.get("limits") or {}
+        ctx_from_api = _limits.get("max_context_window_tokens") or _limits.get("max_prompt_tokens")
+        max_output_from_api = _limits.get("max_output_tokens") or _limits.get("max_non_streaming_output_tokens")
+
         entry = {
             "model_id": model_id,
-            "display_name": _humanize_model_id(model_id),
+            "display_name": display_name,
             "input": None,
             "output": None,
-            "ctx": None,
+            "ctx": ctx_from_api,
+            "max_output_tokens": max_output_from_api,
             "caps": _infer_model_capabilities(model_id),
         }
         enriched = _mark_catalog_entry_viability(
@@ -538,6 +637,11 @@ def nice_display_name(model_id: str) -> str:
     return name
 
 
+def _qualified_model_ref(provider_name: str, model_id: str) -> str:
+    """Return provider-qualified model reference for logging and diagnostics."""
+    return f"{(provider_name or 'unknown').strip()}/{(model_id or '').strip()}"
+
+
 # ---------------------------------------------------------------------------
 # Core sync logic (shared by endpoint + startup)
 # ---------------------------------------------------------------------------
@@ -707,9 +811,17 @@ async def run_model_sync(db: AsyncSession, *, deduplicate_existing: bool = True)
     ) -> bool:
         """Upsert a model. Returns True if it was new."""
         key = (str(provider.id), model_id)
+        qualified_ref = _qualified_model_ref(provider.name, model_id)
         if key in existing:
             current = existing[key]
-            current.display_name = current.display_name or display_name
+            # Re-activate models that are back in the live catalog (may have been
+            # deactivated by a previous sync that saw fewer models from the API).
+            current.is_active = True
+            current.validation_error = None
+            # Always update the display name so freshly generated names (e.g.
+            # "Gpt 5 5") get replaced by a proper name on the next sync.
+            if display_name:
+                current.display_name = display_name
             current.cost_per_1m_input = current.cost_per_1m_input if current.cost_per_1m_input is not None else cost_in
             current.cost_per_1m_output = current.cost_per_1m_output if current.cost_per_1m_output is not None else cost_out
             current.context_window = current.context_window or ctx
@@ -719,11 +831,11 @@ async def run_model_sync(db: AsyncSession, *, deduplicate_existing: bool = True)
                 current.validated_at = datetime.utcnow()
                 current.validation_source = validation_source
                 current.validation_warning = validation_warning
-                current.validation_error = None
             elif (current.validation_status or "unverified") != "validated":
                 current.validation_status = validation_status
                 current.validation_source = validation_source
                 current.validation_warning = validation_warning
+            logger.debug("Model sync upsert existing: %s", qualified_ref)
             return False  # already there
         m = Model(
             id=uuid.uuid4(),
@@ -743,6 +855,7 @@ async def run_model_sync(db: AsyncSession, *, deduplicate_existing: bool = True)
         )
         db.add(m)
         existing[key] = m
+        logger.info("Model sync upsert new: %s", qualified_ref)
         return True
 
     # ── 1. Ollama ─────────────────────────────────────────────────────────────
@@ -805,12 +918,22 @@ async def run_model_sync(db: AsyncSession, *, deduplicate_existing: bool = True)
         provider_skipped = 0
         models_list: list[dict[str, Any]] = []
         source = "static_catalog"
+        outdated_skipped = 0
         try:
             models_list, source = await discover_provider_models(provider_name)
         except Exception as exc:
-            logger.warning("Live model discovery failed for %s: %s", provider_name, exc)
+            logger.warning("Live model discovery failed for provider %s: %s", provider_name, exc)
             errors.append(f"{provider_name}: {type(exc).__name__}: {exc}")
             models_list = [_enrich_with_litellm_metadata(provider_name, dict(model)) for model in PROVIDER_DEFAULT_MODELS[provider_name]]
+
+        if source in {"provider_api", "codex_proxy"}:
+            provider_label = provider.display_name or provider_name
+            original_count = len(models_list)
+            models_list, outdated_reasons = _filter_outdated_snapshots(models_list, provider_label)
+            explicit_deactivation_reasons = dict(outdated_reasons)
+            outdated_skipped = max(0, original_count - len(models_list))
+        else:
+            explicit_deactivation_reasons = {}
 
         provider.config = {
             **(provider.config or {}),
@@ -820,15 +943,30 @@ async def run_model_sync(db: AsyncSession, *, deduplicate_existing: bool = True)
         }
         provider.is_active = True
 
+        discovered_refs = [
+            _qualified_model_ref(provider_name, m.get("model_id", ""))
+            for m in models_list
+            if m.get("model_id")
+        ]
+        logger.info(
+            "Discovered %d model(s) for provider %s via %s (examples: %s)",
+            len(discovered_refs),
+            provider_name,
+            source,
+            ", ".join(discovered_refs[:10]) if discovered_refs else "none",
+        )
+
         viable_discovered_ids: set[str] = set()
-        explicit_deactivation_reasons: dict[str, tuple[str, Optional[str]]] = {}
         deprecated_skipped = 0
 
         for m in models_list:
             is_viable, viability_warning, viability_error = get_catalog_model_viability(m)
             if not is_viable:
                 if m.get("model_id"):
-                    explicit_deactivation_reasons[m["model_id"]] = (viability_warning or "Model is no longer viable.", viability_error)
+                    explicit_deactivation_reasons[m["model_id"]] = (
+                        viability_warning or "Model is no longer viable.",
+                        viability_error,
+                    )
                 deprecated_skipped += 1
                 continue
 
@@ -851,6 +989,7 @@ async def run_model_sync(db: AsyncSession, *, deduplicate_existing: bool = True)
                 provider_skipped += 1
 
         deactivated_missing = 0
+        deleted_stale = 0
         if source in {"provider_api", "codex_proxy"}:
             provider_label = provider.display_name or provider_name
             validation_error = "model_not_supported" if provider_name == "github-copilot" else "model_not_in_live_catalog"
@@ -863,6 +1002,46 @@ async def run_model_sync(db: AsyncSession, *, deduplicate_existing: bool = True)
                 explicit_reasons=explicit_deactivation_reasons,
             )
 
+            # Purge stale models: hard-delete inactive models no longer
+            # in the live catalog that are not referenced by any Persona or Agent.
+            inactive_ids = [
+                m.id for (prov_id, _mid), m in existing.items()
+                if prov_id == str(provider.id) and not m.is_active
+            ]
+            if inactive_ids:
+                persona_res = await db.execute(
+                    select(Persona.primary_model_id, Persona.fallback_model_id).where(
+                        (Persona.primary_model_id.in_(inactive_ids)) |
+                        (Persona.fallback_model_id.in_(inactive_ids))
+                    )
+                )
+                referenced: set[str] = set()
+                for row in persona_res:
+                    if row[0] is not None:
+                        referenced.add(str(row[0]))
+                    if row[1] is not None:
+                        referenced.add(str(row[1]))
+
+                agent_res = await db.execute(
+                    select(Agent.model_id).where(Agent.model_id.in_(inactive_ids))
+                )
+                for row in agent_res:
+                    if row[0] is not None:
+                        referenced.add(str(row[0]))
+
+                deletable_ids = [mid for mid in inactive_ids if str(mid) not in referenced]
+                if deletable_ids:
+                    await db.execute(delete(Model).where(Model.id.in_(deletable_ids)))
+                    del_id_strs = {str(d) for d in deletable_ids}
+                    stale_keys = [k for k, m in existing.items() if str(m.id) in del_id_strs]
+                    for k in stale_keys:
+                        del existing[k]
+                    deleted_stale = len(deletable_ids)
+                    logger.info(
+                        "Purged %d stale model(s) for provider %s (not in live catalog, unreferenced)",
+                        deleted_stale, provider_name,
+                    )
+
         provider_details[provider_name] = {
             "configured": True,
             "source": source,
@@ -870,7 +1049,9 @@ async def run_model_sync(db: AsyncSession, *, deduplicate_existing: bool = True)
             "added": provider_added,
             "skipped": provider_skipped,
             "deprecated_skipped": deprecated_skipped,
+            "outdated_skipped": outdated_skipped,
             "deactivated": deactivated_missing,
+            "deleted_stale": deleted_stale,
         }
 
     await db.commit()
@@ -884,8 +1065,14 @@ async def run_model_sync(db: AsyncSession, *, deduplicate_existing: bool = True)
         "paid_models": len([a for a in added if not a.startswith("ollama/")]),
         "provider_details": provider_details,
         "duplicates_removed": duplicates_removed,
+        "stale_deleted": sum(d.get("deleted_stale", 0) for d in provider_details.values()),
     }
-    logger.info(f"Model sync complete: {len(added)} added, {len(skipped)} already existed")
+    logger.info(
+        "Model sync complete: %d added, %d already existed (added examples: %s)",
+        len(added),
+        len(skipped),
+        ", ".join(added[:10]) if added else "none",
+    )
     return summary
 
 

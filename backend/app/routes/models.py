@@ -192,7 +192,7 @@ async def list_models(
             continue
         if usable_only and not _provider_is_usable(provider_name, provider_api_base_url):
             continue
-        if validated_only and (model.validation_status or "unverified") != "validated":
+        if validated_only and (model.validation_status or "unverified") == "failed":
             continue
         if chat_only and (capabilities.get("chat") is False or capabilities.get("image_generation")):
             continue
