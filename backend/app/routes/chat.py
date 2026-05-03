@@ -437,12 +437,12 @@ async def _stream_response(
             output_tokens = 0
 
             try:
-                from app.services.tool_registry import get_tool_schemas
+                from app.services.tool_registry import get_tool_schemas, ALL_TOOLS
                 from app.services.command_executor import execute_tool_call
 
                 provider = await router_service._get_provider(primary_model.provider_id) if primary_model else None
                 if primary_model and provider:
-                    tool_schemas = get_tool_schemas(["read_local_file"])
+                    tool_schemas = get_tool_schemas(list(ALL_TOOLS))
                     loop_messages = list(msg_dicts)
                     workspace_root = Path(__file__).resolve().parents[3]
                     max_tool_rounds = 4
@@ -671,12 +671,12 @@ async def _sync_response(
 
         # Tool-execution loop: model -> tool_calls -> execute -> feed results -> model
         try:
-            from app.services.tool_registry import get_tool_schemas
+            from app.services.tool_registry import get_tool_schemas, ALL_TOOLS
             from app.services.command_executor import execute_tool_call
 
             provider = await router_service._get_provider(primary_model.provider_id) if primary_model else None
             if primary_model and provider:
-                tool_schemas = get_tool_schemas(["read_local_file"])
+                tool_schemas = get_tool_schemas(list(ALL_TOOLS))
                 loop_messages = list(msg_dicts)
                 workspace_root = Path(__file__).resolve().parents[3]
                 max_tool_rounds = 4
@@ -801,6 +801,77 @@ async def _sync_response(
             if hasattr(response, 'usage') and response.usage:
                 input_tokens = response.usage.prompt_tokens or 0
                 output_tokens = response.usage.completion_tokens or 0
+
+            # Last-chance interception: if fallback single-call returned tool JSON
+            # as plain text, execute it and re-query before returning to frontend.
+            recovered_calls = _extract_text_tool_calls(full_content)
+            if recovered_calls and primary_model:
+                try:
+                    from app.services.tool_registry import get_tool_schemas, ALL_TOOLS
+                    from app.services.command_executor import execute_tool_call
+
+                    provider = await router_service._get_provider(primary_model.provider_id)
+                    if provider:
+                        loop_messages = list(msg_dicts)
+                        workspace_root = Path(__file__).resolve().parents[3]
+
+                        assistant_tool_calls = []
+                        for tc in recovered_calls:
+                            assistant_tool_calls.append(
+                                {
+                                    "id": tc.get("id", ""),
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.get("name", ""),
+                                        "arguments": json.dumps(tc.get("arguments", {})),
+                                    },
+                                }
+                            )
+
+                        loop_messages.append(
+                            {
+                                "role": "assistant",
+                                "content": full_content or None,
+                                "tool_calls": assistant_tool_calls,
+                            }
+                        )
+
+                        for tc in recovered_calls:
+                            result = await execute_tool_call(
+                                tc.get("name", ""),
+                                tc.get("arguments", {}) or {},
+                                workspace_root,
+                            )
+                            tool_output = result.get("output", "")
+                            if not isinstance(tool_output, str):
+                                tool_output = json.dumps(tool_output)
+                            loop_messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tc.get("id", ""),
+                                    "name": tc.get("name", ""),
+                                    "content": tool_output,
+                                }
+                            )
+
+                        final_text, _final_calls, in2, out2 = await asyncio.wait_for(
+                            model_client.call_model_with_tools(
+                                model=primary_model,
+                                provider=provider,
+                                messages=loop_messages,
+                                tools=get_tool_schemas(list(ALL_TOOLS)),
+                                temperature=request.temperature,
+                                max_tokens=request.max_tokens,
+                            ),
+                            timeout=45,
+                        )
+                        if final_text:
+                            logger.info("Recovered text-mode tool_calls in fallback path for conversation %s", conversation_id)
+                            full_content = final_text
+                            input_tokens += in2
+                            output_tokens += out2
+                except Exception as e:
+                    logger.warning("Fallback text-mode tool interception failed: %s", e)
 
         # Fallback token estimation (also used by timeout fallback path)
         if input_tokens == 0 and output_tokens == 0:
