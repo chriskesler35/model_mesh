@@ -2,6 +2,7 @@
 
 import os
 import logging
+import uuid
 from typing import Optional, AsyncGenerator
 import litellm
 from litellm import acompletion
@@ -304,13 +305,40 @@ class ModelClient:
 
             if hasattr(msg, "tool_calls") and msg.tool_calls:
                 for tc in msg.tool_calls:
-                    try:
-                        args = _json.loads(tc.function.arguments) if tc.function.arguments else {}
-                    except (ValueError, TypeError):
-                        args = {}
+                    raw_args = tc.function.arguments if hasattr(tc.function, "arguments") else {}
+                    args = {}
+
+                    if isinstance(raw_args, dict):
+                        args = raw_args
+                    elif isinstance(raw_args, str):
+                        candidate = raw_args.strip()
+                        for _ in range(3):
+                            try:
+                                decoded = _json.loads(candidate)
+                            except (ValueError, TypeError):
+                                break
+
+                            if isinstance(decoded, dict):
+                                args = decoded
+                                break
+                            if isinstance(decoded, str):
+                                candidate = decoded.strip()
+                                continue
+                            break
+
+                        if not args and isinstance(candidate, str):
+                            # Best-effort fallback for common backslash-escaped payloads.
+                            unescaped = candidate.replace('\\"', '"')
+                            try:
+                                decoded = _json.loads(unescaped)
+                                if isinstance(decoded, dict):
+                                    args = decoded
+                            except (ValueError, TypeError):
+                                pass
+
                     tool_calls.append(
                         {
-                            "id": getattr(tc, "id", ""),
+                            "id": getattr(tc, "id", "") or f"call_{uuid.uuid4().hex[:8]}",
                             "name": tc.function.name,
                             "arguments": args,
                         }
