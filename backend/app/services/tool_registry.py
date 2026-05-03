@@ -189,7 +189,7 @@ _RUN_SHELL_SCHEMA: dict[str, Any] = {
     "function": {
         "name": "run_shell",
         "description": (
-            "Execute a shell command in the workspace directory. "
+            "Execute a shell command in a target directory. "
             "Use for running tests, builds, git operations, and other system commands. "
             "Destructive commands require user approval per the safety policy."
         ),
@@ -203,6 +203,13 @@ _RUN_SHELL_SCHEMA: dict[str, Any] = {
                 "timeout": {
                     "type": "integer",
                     "description": "Maximum seconds to allow the command to run. Default 60.",
+                },
+                "working_directory": {
+                    "type": "string",
+                    "description": (
+                        "Optional working directory. Can be absolute (including other drives, "
+                        "e.g. C:\\Projects\\myapp) or relative to the workspace root."
+                    ),
                 },
             },
             "required": ["command"],
@@ -229,6 +236,13 @@ _INSTALL_PACKAGE_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "enum": ["pip", "npm", "yarn", "pnpm", "cargo", "go"],
                     "description": "Package manager to use. Default 'pip'.",
+                },
+                "working_directory": {
+                    "type": "string",
+                    "description": (
+                        "Optional directory where install command should run. Can be absolute "
+                        "(cross-drive) or relative to workspace root."
+                    ),
                 },
             },
             "required": ["packages"],
@@ -300,8 +314,8 @@ _TOOL_PROMPT_LINES: dict[str, str] = {
     "read_local_file": "READ_LOCAL_FILE: <absolute_path>  — read local host file contents",
     "write_file": "WRITE_FILE: <relative_path>\n<content lines>\nEND_WRITE  — write/overwrite a file",
     "list_dir": "LIST_DIR: <relative_path> [recursive]  — list directory",
-    "run_shell": "CMD: <command>  — run a shell command",
-    "install_package": "INSTALL: <manager> <packages>  — install packages (e.g. INSTALL: pip requests httpx)",
+    "run_shell": "CMD: <command> [working_directory]  — run a shell command",
+    "install_package": "INSTALL: <manager> <packages> [working_directory]  — install packages",
     "web_fetch": "FETCH: <url>  — fetch URL content",
 }
 

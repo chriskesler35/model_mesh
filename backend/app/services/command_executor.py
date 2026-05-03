@@ -483,6 +483,31 @@ def _resolve_workspace_path(relative_path: str, workspace_root: Path) -> Path:
     return resolved
 
 
+def _resolve_execution_cwd(
+    working_directory: Optional[str],
+    workspace_root: Path,
+) -> Path:
+    """Resolve command cwd.
+
+    - If working_directory is omitted, use workspace_root.
+    - If absolute, use it directly (supports cross-drive paths on Windows).
+    - If relative, resolve from workspace_root.
+    """
+    base = workspace_root.resolve()
+    if not working_directory:
+        return base
+
+    raw = str(working_directory).strip()
+    candidate = Path(raw).expanduser()
+    resolved = candidate.resolve() if candidate.is_absolute() else (base / candidate).resolve()
+
+    if not resolved.exists():
+        raise ValueError(f"working_directory not found: {resolved}")
+    if not resolved.is_dir():
+        raise ValueError(f"working_directory is not a directory: {resolved}")
+    return resolved
+
+
 async def tool_read_file(
     path: str,
     workspace_root: Path,
@@ -619,10 +644,16 @@ async def tool_install_package(
     workspace_root: Path,
     *,
     manager: str = "pip",
+    working_directory: Optional[str] = None,
 ) -> dict:
     """Install packages using the specified package manager."""
     manager = manager.lower().strip()
     pkg_list = packages.strip()
+
+    try:
+        exec_cwd = _resolve_execution_cwd(working_directory, workspace_root)
+    except ValueError as exc:
+        return {"success": False, "output": str(exc)}
 
     cmd_map = {
         "pip": f"pip install {pkg_list}",
@@ -635,7 +666,7 @@ async def tool_install_package(
     command = cmd_map.get(manager, f"pip install {pkg_list}")
 
     exit_code, stdout, stderr, duration_ms = await run_command(
-        command, workspace_root, timeout_sec=120
+        command, exec_cwd, timeout_sec=120
     )
     success = exit_code == 0
     output = stdout if success else (stderr or stdout)
@@ -723,12 +754,19 @@ async def execute_tool_call(
     if name == "run_shell":
         command = arguments.get("command", "")
         timeout = int(arguments.get("timeout") or 60)
+        working_directory = arguments.get("working_directory")
         from app.services.command_classifier import classify_command, CommandTier
         tier = classify_command(command)
         if tier == CommandTier.BLOCKED:
             return {"success": False, "output": "Command blocked by sandbox policy."}
+
+        try:
+            exec_cwd = _resolve_execution_cwd(working_directory, workspace_root)
+        except ValueError as exc:
+            return {"success": False, "output": str(exc)}
+
         exit_code, stdout, stderr, duration_ms = await run_command(
-            command, workspace_root, timeout_sec=timeout
+            command, exec_cwd, timeout_sec=timeout
         )
         success = exit_code == 0
         return {
@@ -743,6 +781,7 @@ async def execute_tool_call(
             packages=arguments.get("packages", ""),
             workspace_root=workspace_root,
             manager=arguments.get("manager", "pip"),
+            working_directory=arguments.get("working_directory"),
         )
 
     if name == "web_fetch":
