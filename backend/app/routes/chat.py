@@ -6,19 +6,22 @@ import time
 import asyncio
 import os
 import re
+import socket
 from pathlib import Path
 from typing import Any, Dict
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_memory
-from app.models import Conversation, Message
+from app.models import Conversation, Message, Model, Provider
 from app.schemas import ChatCompletionRequest
 from app.services import PersonaResolver, Router, model_client
 from app.services.memory_context import MemoryContext
+from app.services.provider_credentials import has_provider_api_key
 from app.middleware.auth import verify_api_key
 from app.middleware.rate_limit import check_rate_limit
 import logging
@@ -30,6 +33,7 @@ router = APIRouter(prefix="/v1", tags=["chat"], dependencies=[Depends(verify_api
 # Ephemeral per-conversation workflow gating state.
 # Keyed by conversation_id string.
 _workflow_session_state: Dict[str, Dict[str, Any]] = {}
+_LOCAL_MODEL_PROVIDERS = {"ollama", "local", "lm-studio", "lmstudio", "llamacpp"}
 
 
 def _tool_loop_max_rounds() -> int:
@@ -50,6 +54,75 @@ def _tool_loop_timeout_seconds() -> int:
     except Exception:
         value = 60
     return max(15, min(value, 300))
+
+
+def _can_connect_to_base_url(base_url: str | None, timeout: float = 0.35) -> bool:
+    if not base_url:
+        return False
+    try:
+        parsed = urlparse(base_url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if not host:
+            return False
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _provider_is_usable(provider: Provider | None) -> bool:
+    if not provider or provider.is_active is False:
+        return False
+    provider_name = (provider.name or "").lower().strip()
+    if provider_name in _LOCAL_MODEL_PROVIDERS:
+        return _can_connect_to_base_url(provider.api_base_url)
+    return has_provider_api_key(provider_name)
+
+
+def _evaluate_model_connectivity(model: Model | None, provider: Provider | None) -> tuple[bool, str]:
+    if not model:
+        return False, "No model is configured."
+    if not provider:
+        return False, f"Provider missing for model '{model.model_id}'."
+    if model.is_active is False:
+        return False, f"Model '{model.model_id}' is disabled."
+    if (model.validation_status or "unverified") != "validated":
+        return False, (
+            f"Model '{model.model_id}' is not live-validated "
+            f"(status: {model.validation_status or 'unverified'})."
+        )
+    if provider.is_active is False:
+        return False, f"Provider '{provider.name}' is disabled."
+    if not _provider_is_usable(provider):
+        provider_name = (provider.name or "").lower().strip()
+        if provider_name == "github-copilot":
+            return False, (
+                "GitHub Copilot is not connected. Reconnect GitHub in Settings and ensure "
+                "your account has an active Copilot subscription."
+            )
+        if provider_name in _LOCAL_MODEL_PROVIDERS:
+            return False, f"Local provider '{provider.name}' is unreachable at {provider.api_base_url}."
+        return False, f"Provider '{provider.name}' has no usable live credentials."
+    return True, ""
+
+
+async def _find_recovery_model(db: AsyncSession, excluded_model_ids: set[str] | None = None) -> tuple[Model | None, Provider | None]:
+    excluded = excluded_model_ids or set()
+    result = await db.execute(
+        select(Model, Provider)
+        .join(Provider, Model.provider_id == Provider.id)
+        .where(Model.is_active == True)
+        .where(Model.validation_status == "validated")
+        .order_by(Model.validated_at.desc().nulls_last(), Model.created_at.desc())
+    )
+    for model, provider in result.all():
+        if str(model.id) in excluded:
+            continue
+        ok, _reason = _evaluate_model_connectivity(model, provider)
+        if ok:
+            return model, provider
+    return None, None
 
 
 def _get_workflow_state(conversation_id: str) -> Dict[str, Any]:
@@ -372,48 +445,113 @@ async def chat_completions(
     # 1. Resolve persona
     resolver = PersonaResolver(db)
     persona, primary_model, fallback_model = await resolver.resolve(request.model)
+    recovery_notice: str | None = None
     
     # Apply model override if specified (user picked a specific model from dropdown)
     if request.model_override and persona:
         from app.models.model import Model as ModelORM
         from app.models.provider import Provider as ProviderORM
         from app.services.codex_oauth import should_use_codex_oauth_proxy
-        from sqlalchemy import case, or_
-        _use_codex_proxy = should_use_codex_oauth_proxy()
-        # Try exact match first, then partial/fuzzy on the tail segment of the model_id.
+        from sqlalchemy import case
+        _use_codex_proxy = should_use_codex_oauth_proxy("openai-codex")
+
+        # Deterministic override resolution order:
+        # 1) Model UUID (frontend dropdown now sends this)
+        # 2) Provider-qualified ref: provider/model_id (e.g. openai-codex/gpt-5.3-codex)
+        # 3) Plain model_id exact match only (ambiguous duplicates are rejected)
         _override_ref = request.model_override
-        _last_part = _override_ref.split("/")[-1]  # e.g. "gpt-4.5" from "openai/gpt-4.5"
-        override_result = await db.execute(
-            select(ModelORM, ProviderORM)
-            .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
-            .where(ModelORM.is_active == True)
-            .where(
-                or_(
-                    ModelORM.model_id == _override_ref,
-                    ModelORM.model_id.contains(_last_part),
+        override_row = None
+        override_issue: str | None = None
+
+        # 1) UUID lookup
+        try:
+            override_uuid = uuid.UUID(_override_ref)
+            override_result = await db.execute(
+                select(ModelORM, ProviderORM)
+                .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
+                .where(ModelORM.is_active == True)
+                .where(ModelORM.id == override_uuid)
+                .limit(1)
+            )
+            override_row = override_result.first()
+        except ValueError:
+            pass
+
+        # 2) provider-qualified lookup
+        if not override_row and "/" in _override_ref:
+            provider_hint, model_hint = _override_ref.split("/", 1)
+            provider_hint = provider_hint.strip()
+            model_hint = model_hint.strip()
+            if provider_hint and model_hint:
+                qualified_result = await db.execute(
+                    select(ModelORM, ProviderORM)
+                    .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
+                    .where(ModelORM.is_active == True)
+                    .where(func.lower(ProviderORM.name) == provider_hint.lower())
+                    .where(
+                        (ModelORM.model_id == model_hint)
+                        | (ModelORM.model_id == _override_ref)
+                    )
+                    .order_by(
+                        (ModelORM.model_id == model_hint).desc(),
+                        (ModelORM.model_id == _override_ref).desc(),
+                        case(
+                            (ProviderORM.name == "openai-codex", 0 if _use_codex_proxy else -1),
+                            else_=1,
+                        ).desc(),
+                        ModelORM.validated_at.desc().nulls_last(),
+                    )
+                    .limit(1)
+                )
+                override_row = qualified_result.first()
+
+        # 3) plain exact model_id lookup; reject ambiguous duplicates
+        if not override_row:
+            exact_result = await db.execute(
+                select(ModelORM, ProviderORM)
+                .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
+                .where(ModelORM.is_active == True)
+                .where(ModelORM.model_id == _override_ref)
+                .order_by(
+                    case(
+                        (ProviderORM.name == "openai-codex", 0 if _use_codex_proxy else -1),
+                        else_=1,
+                    ).desc(),
+                    ModelORM.validated_at.desc().nulls_last(),
                 )
             )
-            .order_by(
-                # Exact match first
-                (ModelORM.model_id == _override_ref).desc(),
-                # Deprioritise openai-codex when no proxy is configured
-                case(
-                    (ProviderORM.name == "openai-codex", 0 if _use_codex_proxy else -1),
-                    else_=1,
-                ).desc(),
-                ModelORM.validated_at.desc().nulls_last(),
-            )
-            .limit(1)
-        )
-        override_row = override_result.first()
+            exact_rows = exact_result.all()
+            if len(exact_rows) == 1:
+                override_row = exact_rows[0]
+            elif len(exact_rows) > 1:
+                providers = ", ".join(sorted({(r[1].name or "unknown") for r in exact_rows}))
+                override_issue = (
+                    f"Requested model '{_override_ref}' is ambiguous across providers ({providers}). "
+                    "Select a specific model entry or use provider/model format."
+                )
+
         if override_row:
             primary_model = override_row[0]
             fallback_model = None  # No fallback when explicitly overridden
-            logger.info(f"Model override resolved: requested='{_override_ref}' -> matched='{primary_model.model_id}' via provider='{override_row[1].name}'")
+            logger.info(
+                "Model override resolved: requested='%s' -> matched='%s' (model_id=%s) via provider='%s'",
+                _override_ref,
+                primary_model.model_id,
+                primary_model.id,
+                override_row[1].name,
+            )
         else:
+            recovery_notice = (
+                override_issue
+                or (
+                    f"Requested model '{_override_ref}' is unavailable or inactive. "
+                    "I switched to a verified model for this reply and can help you reconnect the requested provider."
+                )
+            )
             logger.warning(
-                f"Model override '{_override_ref}' not found or inactive in DB; "
-                "continuing with persona's assigned model"
+                "Model override '%s' unresolved (%s); falling back to a validated usable model",
+                _override_ref,
+                override_issue or "not-found",
             )
     
     if not persona:
@@ -448,6 +586,56 @@ async def chat_completions(
                     }
                 }
             )
+
+    # 1b. Enforce model eligibility: active + validated + provider connected.
+    primary_provider = None
+    fallback_provider = None
+    if primary_model:
+        primary_provider_result = await db.execute(select(Provider).where(Provider.id == primary_model.provider_id))
+        primary_provider = primary_provider_result.scalar_one_or_none()
+    if fallback_model:
+        fallback_provider_result = await db.execute(select(Provider).where(Provider.id == fallback_model.provider_id))
+        fallback_provider = fallback_provider_result.scalar_one_or_none()
+
+    primary_ok, primary_reason = _evaluate_model_connectivity(primary_model, primary_provider)
+    fallback_ok, fallback_reason = _evaluate_model_connectivity(fallback_model, fallback_provider)
+
+    if not primary_ok:
+        requested_name = primary_model.model_id if primary_model else "(none)"
+        excluded = {str(primary_model.id)} if primary_model else set()
+
+        # Prefer persona fallback only if it is also validated + usable.
+        if fallback_ok and fallback_model:
+            primary_model = fallback_model
+            primary_provider = fallback_provider
+            fallback_model = None
+            recovery_notice = (
+                f"Requested model '{requested_name}' is unavailable: {primary_reason} "
+                f"Switched to fallback model '{primary_model.model_id}'."
+            )
+        else:
+            recovery_model, recovery_provider = await _find_recovery_model(db, excluded_model_ids=excluded)
+            if recovery_model and recovery_provider:
+                primary_model = recovery_model
+                primary_provider = recovery_provider
+                fallback_model = None
+                recovery_notice = (
+                    f"Requested model '{requested_name}' is unavailable: {primary_reason} "
+                    f"Switched to verified model '{primary_model.model_id}' for this response."
+                )
+            else:
+                detail = {
+                    "error": {
+                        "type": "model_error",
+                        "message": (
+                            "No validated, connected chat model is currently usable. "
+                            f"Primary failure: {primary_reason}. "
+                            f"Fallback failure: {fallback_reason or 'no fallback configured'}."
+                        ),
+                        "code": "no_usable_validated_models",
+                    }
+                }
+                raise HTTPException(status_code=503, detail=detail)
     
     # 2. Handle conversation ID
     conversation_id = conv_id
@@ -475,29 +663,54 @@ async def chat_completions(
     if request.stream:
         return await _stream_response(
             router_service, persona, primary_model, fallback_model,
-            request, conversation_id, db
+            request, conversation_id, db, recovery_notice
         )
     else:
         return await _sync_response(
             router_service, persona, primary_model, fallback_model,
-            request, conversation_id, db
+            request, conversation_id, db, recovery_notice
         )
 
 
 async def _stream_response(
     router_service, persona, primary_model, fallback_model,
-    request, conversation_id, db
+    request, conversation_id, db, recovery_notice: str | None = None
 ):
     """Handle streaming response."""
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+    notice_prefix = f"{recovery_notice}\n\n" if recovery_notice else ""
 
     async def generate():
         try:
             start_time = time.time()
             full_content = ""
 
+            if notice_prefix:
+                full_content += notice_prefix
+                data = json.dumps({
+                    "id": completion_id,
+                    "object": "chat.completion.chunk", "conversation_id": conversation_id,
+                    "model": primary_model.model_id if primary_model else "unknown",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": notice_prefix},
+                        "finish_reason": None
+                    }]
+                })
+                yield f"data: {data}\n\n"
+
             # Convert messages to dict
             msg_dicts = [{"role": m.role, "content": m.content} for m in request.messages]
+
+            if recovery_notice:
+                msg_dicts.insert(0, {
+                    "role": "system",
+                    "content": (
+                        "The originally requested model is unavailable. Start your reply with a short notice "
+                        f"using this text: '{recovery_notice}'. Then provide 3 concise actionable steps to fix "
+                        "the connection/validation issue, then answer the user's actual request."
+                    ),
+                })
 
             # Inject unified identity/soul/user/method context (shared with workbench)
             try:
@@ -635,17 +848,15 @@ async def _stream_response(
                     "Please try again, or break the request into smaller steps."
                 )
             except Exception as tool_loop_error:
-                tool_loop_used = True
+                tool_loop_used = False
                 logger.error(
                     "Streaming tool-loop failed (raw passthrough blocked) conv=%s err=%s",
                     conversation_id,
                     tool_loop_error,
                     exc_info=True,
                 )
-                full_content = (
-                    "Tool interception failed on the server before completion. "
-                    "Please retry once; backend logs now include detailed tool-loop diagnostics."
-                )
+                # Degrade gracefully to legacy non-tool streaming path below.
+                full_content = ""
 
             if tool_loop_used or llm_timeout_fallback:
                 if full_content:
@@ -737,7 +948,7 @@ async def _stream_response(
 
 async def _sync_response(
     router_service, persona, primary_model, fallback_model,
-    request, conversation_id, db
+    request, conversation_id, db, recovery_notice: str | None = None
 ):
     """Handle synchronous response."""
     start_time = time.time()
@@ -745,6 +956,16 @@ async def _sync_response(
     try:
         # Convert messages to dict
         msg_dicts = [{"role": m.role, "content": m.content} for m in request.messages]
+
+        if recovery_notice:
+            msg_dicts.insert(0, {
+                "role": "system",
+                "content": (
+                    "The originally requested model is unavailable. Start your reply with a short notice "
+                    f"using this text: '{recovery_notice}'. Then provide 3 concise actionable steps to fix "
+                    "the connection/validation issue, then answer the user's actual request."
+                ),
+            })
 
         # Validate we have messages
         if not msg_dicts:
@@ -899,17 +1120,15 @@ async def _sync_response(
                 "Please try again, or break the request into smaller steps."
             )
         except Exception as tool_loop_error:
-            tool_loop_used = True
+            tool_loop_used = False
             logger.error(
                 "Sync tool-loop failed (raw passthrough blocked) conv=%s err=%s",
                 conversation_id,
                 tool_loop_error,
                 exc_info=True,
             )
-            full_content = (
-                "Tool interception failed on the server before completion. "
-                "Please retry once; backend logs now include detailed tool-loop diagnostics."
-            )
+            # Degrade gracefully to legacy non-tool single-call path below.
+            full_content = ""
 
         # Fallback: previous single-call behavior
         if not tool_loop_used and not llm_timeout_fallback:
@@ -1066,7 +1285,11 @@ async def _sync_response(
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": full_content
+                    "content": (
+                        f"{recovery_notice}\n\n{full_content}"
+                        if recovery_notice and not (full_content or "").startswith(recovery_notice)
+                        else full_content
+                    )
                 },
                 "finish_reason": "stop"
             }],

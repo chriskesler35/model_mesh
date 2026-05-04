@@ -42,6 +42,7 @@ interface Model {
   model_id: string
   display_name: string
   is_active: boolean
+  provider_id?: string
   provider_name?: string
 }
 
@@ -296,7 +297,7 @@ function Sidebar({
               ).map(([group, ms]) => (
                 <optgroup key={group} label={group}>
                   {(ms as Model[]).map(m => (
-                    <option key={m.id} value={m.model_id}>{m.display_name || m.model_id}</option>
+                    <option key={m.id} value={m.id}>{m.display_name || m.model_id}</option>
                   ))}
                 </optgroup>
               ))}
@@ -1604,12 +1605,19 @@ export default function ChatPage() {
   // ── Identity wizard state ─────────────────────────────────────────────────
   const [wizardMode, setWizardMode] = useState<WizardMode | null>(null)
 
+  // ── Active method state ───────────────────────────────────────────────────
+  const [activeMethodId, setActiveMethodId] = useState<string>('standard')
+  const [activeMethodName, setActiveMethodName] = useState<string>('')
+  const [activeMethodIcon, setActiveMethodIcon] = useState<string>('')
+  const [dynamicMethodCmds, setDynamicMethodCmds] = useState<Array<{cmd: string; hint: string; desc: string}>>([])
+
   // ── Slash commands ────────────────────────────────────────────────────────
   const [slashOpen, setSlashOpen] = useState(false)
   const [slashFilter, setSlashFilter] = useState('')
   const [slashIndex, setSlashIndex] = useState(0)
+  const slashListRef = useRef<HTMLDivElement>(null)
 
-  const SLASH_COMMANDS = [
+  const BASE_SLASH_COMMANDS = [
     { cmd: '/help',        hint: '',            desc: 'Show all available commands' },
     { cmd: '/reset',       hint: '',            desc: 'Clear conversation and start fresh' },
     { cmd: '/onboard',     hint: '',            desc: 'Re-run full first-time setup wizard' },
@@ -1624,8 +1632,18 @@ export default function ChatPage() {
     { cmd: '/theme',       hint: '',            desc: 'Toggle dark/light mode' },
     { cmd: '/clear',       hint: '',            desc: 'Clear chat display' },
     { cmd: '/settings',    hint: '',            desc: 'Open settings page' },
-    { cmd: '/method',      hint: '<name>',      desc: 'Switch development method (bmad/gsd/superpowers/gtrack)' },
+    // Built-in method shortcuts
+    { cmd: '/method',      hint: '<name>',      desc: 'Activate a development method by name' },
+    { cmd: '/standard',    hint: '',            desc: 'Switch to Standard assistant mode' },
+    { cmd: '/bmad',        hint: '',            desc: '🧠 Activate BMAD Method (full-stack agentic dev)' },
+    { cmd: '/gsd',         hint: '',            desc: '⚡ Activate GSD (get stuff done fast)' },
+    { cmd: '/superpowers', hint: '',            desc: '🦸 Activate SuperPowers (AI toolkit unleashed)' },
+    { cmd: '/specaudit',   hint: '',            desc: '✅ Activate SpecAudit (spec review & validation)' },
+    { cmd: '/mvp-loop',    hint: '',            desc: '🚧 Activate MVP Loop (rapid MVP builder)' },
+    { cmd: '/gtrack',      hint: '',            desc: '📊 Activate GTrack (goal & task tracking)' },
   ]
+
+  const SLASH_COMMANDS = [...BASE_SLASH_COMMANDS, ...dynamicMethodCmds]
 
   const filteredCommands = SLASH_COMMANDS.filter(c =>
     c.cmd.startsWith('/' + slashFilter) || c.desc.toLowerCase().includes(slashFilter.toLowerCase())
@@ -1721,7 +1739,7 @@ export default function ChatPage() {
             m.id === arg
           )
           if (match) {
-            setSelectedModelId(match.model_id)
+            setSelectedModelId(match.id)
             addToast({ type: 'success', title: 'Model switched', message: match.display_name || match.model_id, autoClose: 2000 })
           } else {
             addToast({ type: 'error', title: 'Not found', message: `No match for "${arg}"`, autoClose: 3000 })
@@ -1730,8 +1748,63 @@ export default function ChatPage() {
         break
       }
       case '/method': {
-        // Redirect to methods page (full implementation in progress)
-        window.location.href = '/methods'
+        const methodId = arg.trim().toLowerCase()
+        if (!methodId) {
+          addToast({ type: 'info', title: 'Usage', message: '/method <name>  e.g. /method bmad or /bmad', autoClose: 3500 })
+          break
+        }
+        try {
+          const res = await fetch(`${API_BASE}/v1/methods/activate`, {
+            method: 'POST',
+            headers: { ...AUTH_HEADERS, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ method_id: methodId }),
+          })
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'Unknown error' }))
+            addToast({ type: 'error', title: 'Method not found', message: err.detail || `"${methodId}" not found`, autoClose: 3500 })
+            break
+          }
+          const data = await res.json()
+          const name = data.name || methodId
+          const icon = data.icon || '⚡'
+          setActiveMethodId(methodId)
+          setActiveMethodName(name)
+          setActiveMethodIcon(icon)
+          addToast({ type: 'success', title: `${icon} ${name} activated`, message: 'Method applied to next messages.', autoClose: 2500 })
+        } catch {
+          addToast({ type: 'error', title: 'Activation failed', message: 'Could not activate method', autoClose: 3000 })
+        }
+        break
+      }
+      case '/standard':
+      case '/bmad':
+      case '/gsd':
+      case '/superpowers':
+      case '/specaudit':
+      case '/mvp-loop':
+      case '/gtrack': {
+        const methodId = cmd.slice(1)
+        try {
+          const res = await fetch(`${API_BASE}/v1/methods/activate`, {
+            method: 'POST',
+            headers: { ...AUTH_HEADERS, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ method_id: methodId }),
+          })
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'Unknown error' }))
+            addToast({ type: 'error', title: 'Activation failed', message: err.detail || `Could not activate ${methodId}`, autoClose: 3500 })
+            break
+          }
+          const data = await res.json()
+          const name = data.name || methodId
+          const icon = data.icon || '⚡'
+          setActiveMethodId(methodId)
+          setActiveMethodName(name)
+          setActiveMethodIcon(icon)
+          addToast({ type: 'success', title: `${icon} ${name} activated`, message: 'Method applied to next messages.', autoClose: 2500 })
+        } catch {
+          addToast({ type: 'error', title: 'Activation failed', message: `Could not activate ${methodId}`, autoClose: 3000 })
+        }
         break
       }
       case '/export': {
@@ -1746,8 +1819,41 @@ export default function ChatPage() {
         URL.revokeObjectURL(url)
         break
       }
+      default: {
+        // Handle dynamic method and skill commands registered at runtime
+        const dynamicCmd = dynamicMethodCmds.find(d => d.cmd === cmd)
+        if (dynamicCmd) {
+          // skill-* commands: strip the "skill-" prefix to get skill_id; others use the cmd minus /
+          const isSkill = cmd.startsWith('/skill-')
+          const methodId = isSkill ? cmd.slice('/skill-'.length) : cmd.slice(1)
+          try {
+            const endpoint = isSkill
+              ? `${API_BASE}/v1/methods/activate`
+              : `${API_BASE}/v1/methods/activate`
+            const res = await fetch(endpoint, {
+              method: 'POST',
+              headers: { ...AUTH_HEADERS, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ method_id: methodId }),
+            })
+            if (!res.ok) {
+              addToast({ type: 'error', title: 'Activation failed', message: `Could not activate ${methodId}`, autoClose: 3500 })
+              break
+            }
+            const data = await res.json()
+            const name = data.name || methodId
+            const icon = data.icon || '🔧'
+            setActiveMethodId(methodId)
+            setActiveMethodName(name)
+            setActiveMethodIcon(icon)
+            addToast({ type: 'success', title: `${icon} ${name} activated`, message: 'Applied to next messages.', autoClose: 2500 })
+          } catch {
+            addToast({ type: 'error', title: 'Activation failed', message: `Could not activate ${methodId}`, autoClose: 3000 })
+          }
+        }
+        break
+      }
     }
-  }, [activeConvId, messages, personas, models, addToast, setUserExists])
+  }, [activeConvId, messages, personas, models, dynamicMethodCmds, addToast, setUserExists])
 
   const [showImageGen, setShowImageGen] = useState(false)
   const [imagePrompt, setImagePrompt] = useState('')
@@ -2002,11 +2108,14 @@ export default function ChatPage() {
   useEffect(() => {
     const init = async () => {
       try {
-        const [models, personasRes, convsRes, identityRes] = await Promise.all([
+        const [models, personasRes, convsRes, identityRes, methodsRes, activeMethodRes, skillsRes] = await Promise.all([
           fetchValidatedChatModels(),
           fetch(`${API_BASE}/v1/personas`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
           fetch(`${API_BASE}/v1/conversations?limit=100&pinned_first=true`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
           fetch(`${API_BASE}/v1/identity/status`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({})),
+          fetch(`${API_BASE}/v1/methods/`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
+          fetch(`${API_BASE}/v1/methods/active`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => null),
+          fetch(`${API_BASE}/v1/skills`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ data: [] })),
         ])
 
         const ps: Persona[] = personasRes.data || []
@@ -2021,6 +2130,32 @@ export default function ChatPage() {
 
         // Set AI name from soul.md if available
         if (identityRes.ai_name) setAiName(identityRes.ai_name)
+
+        // Load active method badge
+        if (activeMethodRes?.id) {
+          setActiveMethodId(activeMethodRes.id)
+          setActiveMethodName(activeMethodRes.name || activeMethodRes.id)
+          setActiveMethodIcon(activeMethodRes.icon || '⚡')
+        }
+
+        // Build dynamic slash commands for custom methods + enabled skills
+        const extraCmds: Array<{cmd: string; hint: string; desc: string}> = []
+        const builtInMethodIds = new Set(['standard','bmad','gsd','superpowers','specaudit','mvp-loop','gtrack'])
+        const allMethods: any[] = methodsRes.data || []
+        for (const m of allMethods) {
+          if (!builtInMethodIds.has(m.id) && m.id) {
+            const safeName = m.id.replace(/[^a-z0-9-]/g, '-').toLowerCase()
+            extraCmds.push({ cmd: `/${safeName}`, hint: '', desc: `${m.icon || '🔧'} Activate ${m.name}` })
+          }
+        }
+        const allSkills: any[] = skillsRes.data || skillsRes.skills || []
+        for (const s of allSkills) {
+          if (s.enabled && s.skill_id) {
+            const safeName = s.skill_id.replace(/[^a-z0-9-]/g, '-').toLowerCase()
+            extraCmds.push({ cmd: `/skill-${safeName}`, hint: '', desc: `🔧 Activate skill: ${s.name || s.skill_id}` })
+          }
+        }
+        if (extraCmds.length > 0) setDynamicMethodCmds(extraCmds)
 
         // Show first-run wizard if setup is incomplete
         if (identityRes.first_run) {
@@ -2732,9 +2867,70 @@ export default function ChatPage() {
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────────
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (slashOpen && filteredCommands.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSlashIndex(i => Math.min(i + 1, filteredCommands.length - 1))
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSlashIndex(i => Math.max(i - 1, 0))
+        return
+      }
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault()
+        const chosen = filteredCommands[slashIndex]
+        if (chosen) {
+          setSlashOpen(false)
+          setSlashFilter('')
+          if (!chosen.hint) {
+            setInput('')
+            sendMessage(chosen.cmd)
+          } else {
+            setInput(`${chosen.cmd} `)
+            textareaRef.current?.focus()
+          }
+        }
+        return
+      }
+      if (e.key === 'Escape') {
+        setSlashOpen(false)
+        setSlashFilter('')
+        return
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault()
+        const chosen = filteredCommands[slashIndex]
+        if (chosen) {
+          const full = chosen.hint ? `${chosen.cmd} ` : chosen.cmd
+          setInput(full)
+          setSlashFilter(chosen.cmd.slice(1))
+          if (!chosen.hint) {
+            setSlashOpen(false)
+          }
+        }
+        return
+      }
+    }
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault()
       sendMessage()
+    }
+  }
+
+  // ── Input change handler with slash detection ─────────────────────────────
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value
+    setInput(val)
+    if (val.startsWith('/')) {
+      const filter = val.slice(1)
+      setSlashFilter(filter)
+      setSlashOpen(true)
+      setSlashIndex(0)
+    } else {
+      setSlashOpen(false)
+      setSlashFilter('')
     }
   }
 
@@ -2832,6 +3028,29 @@ export default function ChatPage() {
               <span className="text-xs bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 px-2 py-0.5 rounded-full">
                 {activePersona.name}
               </span>
+            )}
+            {activeMethodId && activeMethodId !== 'standard' && activeMethodName && (
+              <button
+                title={`Active method: ${activeMethodName} — click to deactivate`}
+                onClick={async () => {
+                  try {
+                    await fetch(`${API_BASE}/v1/methods/activate`, {
+                      method: 'POST',
+                      headers: { ...AUTH_HEADERS, 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ method_id: 'standard' }),
+                    })
+                    setActiveMethodId('standard')
+                    setActiveMethodName('')
+                    setActiveMethodIcon('')
+                    addToast({ type: 'info', title: 'Standard mode', message: 'Returned to standard assistant.', autoClose: 2000 })
+                  } catch { /* silent */ }
+                }}
+                className="text-xs bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 px-2 py-0.5 rounded-full hover:bg-indigo-200 dark:hover:bg-indigo-800/40 transition-colors flex items-center gap-1"
+              >
+                <span>{activeMethodIcon}</span>
+                <span>{activeMethodName}</span>
+                <span className="text-indigo-400">×</span>
+              </button>
             )}
             {activeModelName && (
               <span className="text-xs bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 px-2 py-0.5 rounded-full hidden sm:block">
@@ -3250,17 +3469,59 @@ export default function ChatPage() {
                       </svg>
                     )}
                   </button>
-                  <textarea
-                    ref={textareaRef}
-                    value={input}
-                    onChange={e => setInput(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    placeholder="Message... (Ctrl+Enter to send)"
-                    disabled={loading}
-                    rows={1}
-                    className="flex-1 resize-none rounded-xl border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-white px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent disabled:opacity-50 leading-relaxed whitespace-pre-wrap break-words overflow-y-auto"
-                    style={{ minHeight: '42px' }}
-                  />
+                  <div className="flex-1 relative">
+                    {/* Slash command dropdown */}
+                    {slashOpen && filteredCommands.length > 0 && (
+                      <div
+                        ref={slashListRef}
+                        className="absolute bottom-full left-0 mb-1 w-full max-w-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-xl overflow-hidden z-50"
+                        style={{ maxHeight: '260px', overflowY: 'auto' }}
+                      >
+                        {filteredCommands.map((c, i) => (
+                          <button
+                            key={c.cmd}
+                            type="button"
+                            onMouseDown={e => {
+                              e.preventDefault()
+                              setSlashOpen(false)
+                              setSlashFilter('')
+                              if (!c.hint) {
+                                setInput('')
+                                sendMessage(c.cmd)
+                              } else {
+                                setInput(`${c.cmd} `)
+                                textareaRef.current?.focus()
+                              }
+                            }}
+                            className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left transition-colors ${
+                              i === slashIndex
+                                ? 'bg-orange-50 dark:bg-orange-900/20 text-orange-700 dark:text-orange-300'
+                                : 'text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700/50'
+                            }`}
+                          >
+                            <span className="font-mono text-orange-600 dark:text-orange-400 font-semibold flex-shrink-0">{c.cmd}</span>
+                            {c.hint && <span className="text-gray-400 flex-shrink-0 text-xs">{c.hint}</span>}
+                            <span className="text-gray-500 dark:text-gray-400 text-xs truncate ml-auto">{c.desc}</span>
+                          </button>
+                        ))}
+                        <div className="px-3 py-1.5 border-t border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/80">
+                          <span className="text-[10px] text-gray-400">↑↓ navigate · Enter/Tab select · Esc close</span>
+                        </div>
+                      </div>
+                    )}
+                    <textarea
+                      ref={textareaRef}
+                      value={input}
+                      onChange={handleInputChange}
+                      onKeyDown={handleKeyDown}
+                      onBlur={() => setTimeout(() => setSlashOpen(false), 150)}
+                      placeholder="Message... (/ for commands, Ctrl+Enter to send)"
+                      disabled={loading}
+                      rows={1}
+                      className="w-full resize-none rounded-xl border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-white px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent disabled:opacity-50 leading-relaxed whitespace-pre-wrap break-words overflow-y-auto"
+                      style={{ minHeight: '42px' }}
+                    />
+                  </div>
                   <MicrophoneButton
                     onTranscript={(text) => setInput(prev => prev ? prev + ' ' + text : text)}
                     disabled={loading}
