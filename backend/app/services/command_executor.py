@@ -460,6 +460,7 @@ def format_command_for_context(result: dict) -> str:
 
 _MAX_FILE_READ_BYTES = 200 * 1024  # 200 KB cap for read_file
 _MAX_LOCAL_FILE_READ_BYTES = 512 * 1024  # 512 KB cap for read_local_file
+_MAX_LOCAL_FILE_WRITE_BYTES = 2 * 1024 * 1024  # 2 MB cap for write_local_file
 
 
 def _resolve_workspace_path(relative_path: str, workspace_root: Path) -> Path:
@@ -578,6 +579,40 @@ async def tool_read_local_file(filepath: str) -> dict:
     return {
         "success": True,
         "output": text + note,
+        "filepath": str(target),
+    }
+
+
+async def tool_write_local_file(filepath: str, content: str) -> dict:
+    """Write content to an absolute host path (not workspace-bounded)."""
+    raw_path = (filepath or "").strip()
+    if not raw_path:
+        return {"success": False, "output": "filepath is required."}
+
+    try:
+        target = Path(raw_path).expanduser().resolve()
+    except Exception as exc:
+        return {"success": False, "output": f"Invalid filepath: {exc}"}
+
+    payload = (content or "").encode("utf-8")
+    if len(payload) > _MAX_LOCAL_FILE_WRITE_BYTES:
+        return {
+            "success": False,
+            "output": (
+                f"Content too large for write_local_file: {len(payload)} bytes "
+                f"(max {_MAX_LOCAL_FILE_WRITE_BYTES} bytes)."
+            ),
+        }
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content or "", encoding="utf-8")
+    except Exception as exc:
+        return {"success": False, "output": f"Write error: {exc}"}
+
+    return {
+        "success": True,
+        "output": f"Wrote {len(payload)} bytes to {target}",
         "filepath": str(target),
     }
 
@@ -734,6 +769,12 @@ async def execute_tool_call(
     if name == "read_local_file":
         return await tool_read_local_file(
             filepath=arguments.get("filepath", ""),
+        )
+
+    if name == "write_local_file":
+        return await tool_write_local_file(
+            filepath=arguments.get("filepath", ""),
+            content=arguments.get("content", ""),
         )
 
     if name == "write_file":

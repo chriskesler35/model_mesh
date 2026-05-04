@@ -133,6 +133,34 @@ _READ_LOCAL_FILE_SCHEMA: dict[str, Any] = {
     },
 }
 
+_WRITE_LOCAL_FILE_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "write_local_file",
+        "description": (
+            "Writes or overwrites a local file on the host machine. "
+            "Use this to modify configuration files outside the workspace."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "filepath": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the file, e.g. "
+                        "C:\\Users\\chris\\.openclaw\\config.json"
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The complete content to write to the file.",
+                },
+            },
+            "required": ["filepath", "content"],
+        },
+    },
+}
+
 _WRITE_FILE_SCHEMA: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -290,6 +318,7 @@ _WEB_FETCH_SCHEMA: dict[str, Any] = {
 ALL_TOOLS: list[str] = [
     "read_file",
     "read_local_file",
+    "write_local_file",
     "write_file",
     "list_dir",
     "run_shell",
@@ -301,6 +330,7 @@ ALL_TOOLS: list[str] = [
 ALL_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "read_file": _READ_FILE_SCHEMA,
     "read_local_file": _READ_LOCAL_FILE_SCHEMA,
+    "write_local_file": _WRITE_LOCAL_FILE_SCHEMA,
     "write_file": _WRITE_FILE_SCHEMA,
     "list_dir": _LIST_DIR_SCHEMA,
     "run_shell": _RUN_SHELL_SCHEMA,
@@ -312,6 +342,7 @@ ALL_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
 _TOOL_PROMPT_LINES: dict[str, str] = {
     "read_file": "READ_FILE: <relative_path> [start_line] [end_line]  — read file contents",
     "read_local_file": "READ_LOCAL_FILE: <absolute_path>  — read local host file contents",
+    "write_local_file": "WRITE_LOCAL_FILE: <absolute_path>\\n<content lines>\\nEND_WRITE  — write/overwrite a local host file",
     "write_file": "WRITE_FILE: <relative_path>\n<content lines>\nEND_WRITE  — write/overwrite a file",
     "list_dir": "LIST_DIR: <relative_path> [recursive]  — list directory",
     "run_shell": "CMD: <command> [working_directory]  — run a shell command",
@@ -378,4 +409,8 @@ def resolve_agent_tools(agent_tools_field) -> list[str]:
     # automatically receive read_local_file as well.
     if "read_file" in known and "read_local_file" not in known:
         known.append("read_local_file")
+    # Backward compatibility: agents configured with write_file should
+    # automatically receive write_local_file as well.
+    if "write_file" in known and "write_local_file" not in known:
+        known.append("write_local_file")
     return known if known else list(ALL_TOOLS)

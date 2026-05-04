@@ -24,6 +24,11 @@ class FileRequest(BaseModel):
     filepath: str
 
 
+class WriteFileRequest(BaseModel):
+    filepath: str
+    content: str
+
+
 @router.post("/read_file")
 async def read_local_file(request: FileRequest) -> dict:
     """Tool endpoint for reading local configuration files by absolute path."""
@@ -47,6 +52,27 @@ async def read_local_file(request: FileRequest) -> dict:
             "filepath": target_path,
             "content": content,
             "truncated": truncated,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/write_file")
+async def write_local_file(request: WriteFileRequest) -> dict:
+    """Tool endpoint for writing local files by absolute path."""
+    target_path = os.path.abspath(os.path.expanduser(request.filepath or ""))
+    if not target_path:
+        raise HTTPException(status_code=400, detail="filepath is required")
+
+    try:
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        async with aiofiles.open(target_path, mode="w", encoding="utf-8") as f:
+            await f.write(request.content or "")
+        return {
+            "status": "success",
+            "filepath": target_path,
+            "message": "File written successfully.",
+            "bytes_written": len((request.content or "").encode("utf-8")),
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
