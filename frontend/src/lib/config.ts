@@ -13,7 +13,7 @@
  * the primary port without the capabilities or other routes.
  */
 
-const BACKEND_PORTS = ['19001', '19000']
+const BACKEND_PORTS = ['19001']
 const SESSION_KEY_DETECTED_BASE = 'devforge_detected_api_base'
 
 function trimTrailingSlash(url: string): string {
@@ -72,13 +72,18 @@ export async function probeAndCacheApiBase(): Promise<string> {
   const cached = window.sessionStorage.getItem(SESSION_KEY_DETECTED_BASE)
   if (cached) {
     try {
-      const capRes = await fetch(`${cached}/v1/runtime/capabilities`, {
-        signal: AbortSignal.timeout(2000),
-        headers: { Authorization: `Bearer ${OWNER_API_KEY}` },
-      })
-      if (capRes.ok) return cached
-      // Cached port is stale — clear it and fall through to full probe below
-      window.sessionStorage.removeItem(SESSION_KEY_DETECTED_BASE)
+      const parsed = new URL(cached)
+      if (!BACKEND_PORTS.includes(parsed.port)) {
+        window.sessionStorage.removeItem(SESSION_KEY_DETECTED_BASE)
+      } else {
+        const capRes = await fetch(`${cached}/v1/runtime/capabilities`, {
+          signal: AbortSignal.timeout(2000),
+          headers: { Authorization: `Bearer ${OWNER_API_KEY}` },
+        })
+        if (capRes.ok) return cached
+        // Cached port is stale — clear it and fall through to full probe below
+        window.sessionStorage.removeItem(SESSION_KEY_DETECTED_BASE)
+      }
     } catch {
       window.sessionStorage.removeItem(SESSION_KEY_DETECTED_BASE)
     }
