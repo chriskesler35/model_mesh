@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from fastapi.responses import RedirectResponse
 
 from app.config import settings
+from app.services.oauth_secrets import upsert_user_oauth_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/auth/github", tags=["github-oauth"])
@@ -38,7 +39,9 @@ GITHUB_EMAILS_URL = "https://api.github.com/user/emails"
 # Scopes we request:
 # - read:user, user:email → profile + verified email for account linking
 # - repo → read+write access to user's repos (needed for git push via HTTPS)
-DEFAULT_SCOPES = "read:user user:email repo"
+# - copilot → required for GitHub Copilot API session token exchange
+#   (allows /copilot_internal/v2/token which returns full model catalog)
+DEFAULT_SCOPES = "read:user user:email repo copilot"
 
 # In-memory mapping of state → redirect_uri so the callback exchange uses the
 # same redirect_uri that was sent to GitHub's authorize endpoint.
@@ -261,6 +264,12 @@ async def github_callback(body: CallbackBody):
         users[user_id] = user
 
     _save_users(users)
+
+    # Persist OAuth token in encrypted DB store (Phase A/step-3 incremental).
+    try:
+        await upsert_user_oauth_token(user_id=str(user.get("id") or ""), provider="github", token=access_token)
+    except Exception as exc:
+        logger.warning("Could not persist encrypted GitHub OAuth token: %s", exc)
 
     # 5. Issue our JWT so the frontend can use it like password-based login
     from app.routes.collaboration import _create_jwt

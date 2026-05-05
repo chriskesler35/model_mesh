@@ -19,8 +19,10 @@ interface NetworkProfile {
   connected: boolean
   frontend_url: string
   backend_url: string
+  comfyui_url: string
   configured_frontend_url: string
   configured_backend_url: string
+  configured_comfyui_url: string
 }
 
 interface NetworkProfilesResponse {
@@ -89,8 +91,10 @@ export function RemoteAccessTab() {
   const [remoteOverrides, setRemoteOverrides] = useState<Record<string, string>>({
     remote_tailscale_frontend_url: '',
     remote_tailscale_backend_url: '',
+    remote_tailscale_comfyui_url: '',
     remote_wireguard_frontend_url: '',
     remote_wireguard_backend_url: '',
+    remote_wireguard_comfyui_url: '',
   })
 
   const fb = (type: 'ok' | 'err', text: string) => {
@@ -128,8 +132,10 @@ export function RemoteAccessTab() {
             setRemoteOverrides({
               remote_tailscale_frontend_url: np.profiles?.tailscale?.configured_frontend_url || '',
               remote_tailscale_backend_url: np.profiles?.tailscale?.configured_backend_url || '',
+              remote_tailscale_comfyui_url: np.profiles?.tailscale?.configured_comfyui_url || '',
               remote_wireguard_frontend_url: np.profiles?.wireguard?.configured_frontend_url || '',
               remote_wireguard_backend_url: np.profiles?.wireguard?.configured_backend_url || '',
+              remote_wireguard_comfyui_url: np.profiles?.wireguard?.configured_comfyui_url || '',
             })
           }
         }, 1000)
@@ -151,8 +157,10 @@ export function RemoteAccessTab() {
       setRemoteOverrides({
         remote_tailscale_frontend_url: np?.profiles?.tailscale?.configured_frontend_url || '',
         remote_tailscale_backend_url: np?.profiles?.tailscale?.configured_backend_url || '',
+        remote_tailscale_comfyui_url: np?.profiles?.tailscale?.configured_comfyui_url || '',
         remote_wireguard_frontend_url: np?.profiles?.wireguard?.configured_frontend_url || '',
         remote_wireguard_backend_url: np?.profiles?.wireguard?.configured_backend_url || '',
+        remote_wireguard_comfyui_url: np?.profiles?.wireguard?.configured_comfyui_url || '',
       })
       if (tg?.authorized_chats?.length) setChatIds(tg.authorized_chats.join(', '))
       setLoading(false)
@@ -387,6 +395,26 @@ export function RemoteAccessTab() {
                           {saving === `${prefix}_backend_url` ? '...' : 'Save'}
                         </button>
                         <CopyButton text={profile.backend_url} />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">ComfyUI URL</label>
+                      <div className="flex gap-2">
+                        <input
+                          value={remoteOverrides[`${prefix}_comfyui_url`]}
+                          onChange={e => setRemoteOverrides(prev => ({ ...prev, [`${prefix}_comfyui_url`]: e.target.value }))}
+                          placeholder={profile.comfyui_url}
+                          className="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white px-3 py-2 text-sm font-mono"
+                        />
+                        <button
+                          onClick={() => saveRemoteSetting(`${prefix}_comfyui_url`)}
+                          disabled={saving === `${prefix}_comfyui_url`}
+                          className="px-3 py-2 text-xs rounded-lg bg-orange-500 hover:bg-orange-600 text-white disabled:opacity-40"
+                        >
+                          {saving === `${prefix}_comfyui_url` ? '...' : 'Save'}
+                        </button>
+                        <CopyButton text={profile.comfyui_url} />
                       </div>
                     </div>
                   </div>

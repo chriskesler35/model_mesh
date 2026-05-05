@@ -11,6 +11,7 @@ from app.services.app_settings_helper import get_setting
 from pydantic import BaseModel
 from typing import List, Optional
 import httpx
+from app.routes.remote import _detect_tailscale_ip, _detect_wireguard_ip
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +40,32 @@ def _parse_comfyui_urls(url_value: str) -> List[str]:
     return urls or ["http://localhost:8188"]
 
 
+async def _get_all_configured_comfyui_urls(db: AsyncSession) -> List[str]:
+    """Combine base and network-profile ComfyUI URLs into a deduped list."""
+    base_urls = _parse_comfyui_urls(await get_setting("comfyui_url", db))
+    tailscale_urls = _parse_comfyui_urls(await get_setting("remote_tailscale_comfyui_url", db))
+    wireguard_urls = _parse_comfyui_urls(await get_setting("remote_wireguard_comfyui_url", db))
+    auto_urls: List[str] = []
+
+    tailscale_ip = _detect_tailscale_ip()
+    wireguard_ip = _detect_wireguard_ip()
+    if tailscale_ip:
+        auto_urls.append(f"http://{tailscale_ip}:8189")
+        auto_urls.append(f"http://{tailscale_ip}:8188")
+    if wireguard_ip:
+        auto_urls.append(f"http://{wireguard_ip}:8189")
+        auto_urls.append(f"http://{wireguard_ip}:8188")
+
+    merged: List[str] = []
+    for url in [*base_urls, *tailscale_urls, *wireguard_urls, *auto_urls]:
+        if url and url not in merged:
+            merged.append(url)
+    return merged
+
+
 async def _get_running_comfyui_url(db: AsyncSession, timeout: float = 3.0) -> Optional[str]:
     """Return the first configured ComfyUI URL that responds to /system_stats."""
-    configured = await get_setting("comfyui_url", db)
-    urls = _parse_comfyui_urls(configured)
+    urls = await _get_all_configured_comfyui_urls(db)
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         for url in urls:
@@ -374,8 +397,7 @@ class ComfyUIEndpointsResponse(BaseModel):
 @router.get("/comfyui/endpoints", response_model=ComfyUIEndpointsResponse)
 async def comfyui_endpoints(db: AsyncSession = Depends(get_db)):
     """Return live health + queue depth for all configured ComfyUI URLs."""
-    configured = await get_setting("comfyui_url", db)
-    urls = _parse_comfyui_urls(configured)
+    urls = await _get_all_configured_comfyui_urls(db)
     results: List[ComfyUIEndpointStatus] = []
 
     async with httpx.AsyncClient(timeout=3.0) as client:

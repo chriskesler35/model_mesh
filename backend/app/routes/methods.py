@@ -171,6 +171,64 @@ Do not optimize for polish over functionality.
             "auto_advance_phases": False,
         },
     },
+    "discovery": {
+        "id": "discovery",
+        "name": "Discovery",
+        "tagline": "Agentic brainstorming to a concrete handoff packet",
+        "icon": "🧭",
+        "color": "indigo",
+        "description": "Interactive discovery session where multiple agents pressure-test the problem, refine the real use case, and produce a structured handoff for BMAD, GSD, SuperPowers, or GTrack.",
+        "system_prompt": """# Discovery Method Active
+
+You are running a multi-agent discovery workflow.
+
+Goals:
+1. Turn a vague idea into a concrete use case and requirements set.
+2. Surface unknowns, conflicts, assumptions, and success criteria early.
+3. Keep the end user involved at key checkpoints.
+4. Finish with a handoff packet that can feed BMAD, GSD, SuperPowers, or GTrack.
+
+Operating rules:
+- Treat discovery as interactive, not fully autonomous.
+- Force ambiguity into explicit questions or assumptions.
+- Distinguish must-have requirements from preferences.
+- End with a recommendation for the next best method and why.
+""",
+        "phases": ["DiscoveryLead", "UseCaseAnalyst", "RequirementsChallenger", "SolutionMapper", "HandoffPlanner"],
+        "settings": {
+            "require_phase_confirmation": True,
+            "auto_advance_phases": False,
+        },
+    },
+    "retrospective": {
+        "id": "retrospective",
+        "name": "Retrospective",
+        "tagline": "Interactive project retro with carry-forward memory",
+        "icon": "🪞",
+        "color": "amber",
+        "description": "Interactive retrospective method that gathers user and agent perspectives, distills lessons learned, and persists reusable guidance for future projects.",
+        "system_prompt": """# Retrospective Method Active
+
+You are running a structured retrospective workflow.
+
+Goals:
+1. Capture what worked, what failed, and why.
+2. Include both the end user's perspective and the delivery agents' perspective.
+3. Convert observations into reusable practices, guardrails, and next-project guidance.
+4. Produce a carry-forward memory pack that should persist beyond this project.
+
+Operating rules:
+- Be evidence-based, not vague.
+- Separate symptoms from root causes.
+- Prefer durable lessons over one-off complaints.
+- Finish with memory-ready output that can inform future work.
+""",
+        "phases": ["RetroFacilitator", "DeliveryAnalyst", "SystemReflector", "MemoryCurator"],
+        "settings": {
+            "require_phase_confirmation": True,
+            "auto_advance_phases": False,
+        },
+    },
     "gtrack": {
         "id": "gtrack",
         "name": "GTrack",
@@ -346,7 +404,7 @@ STACK_PRESETS: Dict[str, Dict[str, Any]] = {
 }
 
 
-PIPELINE_PRIMARY_METHODS = {"bmad", "gsd", "superpowers", "specaudit", "mvp-loop"}
+PIPELINE_PRIMARY_METHODS = {"bmad", "gsd", "superpowers", "specaudit", "mvp-loop", "discovery", "retrospective"}
 
 
 def _clean_stack(stack: List[str]) -> List[str]:

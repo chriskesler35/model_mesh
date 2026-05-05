@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getMarketplaceInstallProgress } from '@/lib/marketplaceInstallJobs'
+
+const BACKEND_BASE =
+  process.env.NEXT_PUBLIC_API_URL?.trim() || 'http://localhost:19001'
 
 export async function GET(
   _request: NextRequest,
@@ -8,11 +10,14 @@ export async function GET(
   const { skillId, jobId } = context.params
 
   try {
-    const payload = getMarketplaceInstallProgress(skillId, jobId)
-    return NextResponse.json(payload)
+    const res = await fetch(
+      `${BACKEND_BASE}/v1/marketplace/skill/${encodeURIComponent(skillId)}/install/progress/${encodeURIComponent(jobId)}`,
+      { cache: 'no-store' }
+    )
+    const payload = await res.json()
+    return NextResponse.json(payload, { status: res.ok ? 200 : res.status })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to fetch install progress'
-    const status = message.includes('not found') ? 404 : 500
-    return NextResponse.json({ detail: message }, { status })
+    return NextResponse.json({ detail: message }, { status: 500 })
   }
 }

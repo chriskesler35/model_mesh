@@ -1225,7 +1225,20 @@ async def _run_turn(
 async def create_session(body: WorkbenchCreate, db: AsyncSession = Depends(get_db)):
     from app.models.workbench import WorkbenchSession
     session_id = str(uuid.uuid4())
-    model_id   = body.model or "llama3.1:8b"
+    requested_model = (body.model or "llama3.1:8b").strip()
+    if requested_model.lower() == "auto":
+        if not settings.model_routing_auto_enabled:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Auto model routing is disabled in this deployment. "
+                    "Set MODEL_ROUTING_AUTO_ENABLED=true to enable it."
+                ),
+            )
+        # Phase A placeholder: keep execution deterministic until policy router lands.
+        model_id = "llama3.1:8b"
+    else:
+        model_id = requested_model
     project_path = _resolve_project_path(body.project_id, body.project_path)
 
     # Persist to DB

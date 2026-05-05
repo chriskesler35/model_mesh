@@ -93,6 +93,34 @@ interface BackendStatus {
   port?: number | null
 }
 
+interface DiscoveryHandoffData {
+  handoff_title?: string
+  summary?: string
+  use_case?: {
+    actor?: string
+    need?: string
+    value?: string
+  }
+  requirements_snapshot?: {
+    functional?: string[]
+    non_functional?: string[]
+    acceptance_criteria?: string[]
+  }
+  open_decisions?: string[]
+  recommended_next_method?: string
+  recommended_stack?: string[]
+  next_phase_brief?: string
+}
+
+function slugifyProjectName(value: string) {
+  return (value || 'project')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '') || 'project'
+}
+
 // ─── Role → avatar mapping ────────────────────────────────────────────────────
 const ROLE_AVATARS: Record<string, { icon: string; color: string }> = {
   'Business Analyst':       { icon: '🔍', color: 'from-blue-400 to-indigo-500' },
@@ -1123,6 +1151,14 @@ export default function PipelinePage() {
   const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null)
   const [checkingBackend, setCheckingBackend] = useState(false)
   const [restartingBackend, setRestartingBackend] = useState(false)
+  const [launchProjectName, setLaunchProjectName] = useState('')
+  const [launchProjectPath, setLaunchProjectPath] = useState('')
+  const [launchProjectTemplate, setLaunchProjectTemplate] = useState('blank')
+  const [launchingDiscoveryWork, setLaunchingDiscoveryWork] = useState(false)
+  const [downloadingDiscoveryExport, setDownloadingDiscoveryExport] = useState<'docx' | 'pdf' | null>(null)
+  const [continuationNote, setContinuationNote] = useState('')
+  const [continuingDiscovery, setContinuingDiscovery] = useState(false)
+  const [discoveryLaunchError, setDiscoveryLaunchError] = useState<string | null>(null)
   const [connectionState, setConnectionState] = useState<'connecting' | 'live' | 'reconnecting'>('connecting')
   const [tickNow, setTickNow] = useState(() => Date.now())
   const [phaseResolution, setPhaseResolution] = useState<Record<string, { resolved_model: string | null; persona_name: string | null }>>({})
@@ -1174,6 +1210,25 @@ export default function PipelinePage() {
       runsByIndex[r.phase_index] = r
     }
   }
+
+  const discoveryHandoffRun = useMemo(() => {
+    if (pipeline?.method_id !== 'discovery') return null
+    return [...phaseRuns]
+      .filter(run => run.phase_name === 'HandoffPlanner' && run.output_artifact?.type === 'json')
+      .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime())[0] || null
+  }, [pipeline?.method_id, phaseRuns])
+
+  const discoveryHandoff = useMemo(() => {
+    const data = discoveryHandoffRun?.output_artifact?.data
+    return data && typeof data === 'object' ? (data as DiscoveryHandoffData) : null
+  }, [discoveryHandoffRun])
+
+  useEffect(() => {
+    if (!discoveryHandoff) return
+    if (!launchProjectName.trim()) {
+      setLaunchProjectName(discoveryHandoff.handoff_title?.trim() || 'New Project')
+    }
+  }, [discoveryHandoff, launchProjectName])
 
   const refetch = useCallback(async () => {
     try {
@@ -1284,6 +1339,153 @@ export default function PipelinePage() {
       setRestartingBackend(false)
     }
   }, [refreshBackendStatus, refetch])
+
+  const launchDiscoveryWork = useCallback(async () => {
+    if (!discoveryHandoff || !pipeline) return
+
+    const projectName = launchProjectName.trim() || discoveryHandoff.handoff_title?.trim() || 'New Project'
+    const projectPath = launchProjectPath.trim()
+    const methodId = (discoveryHandoff.recommended_next_method || '').trim() || 'bmad'
+    const stackOverride = Array.isArray(discoveryHandoff.recommended_stack)
+      ? discoveryHandoff.recommended_stack.filter(Boolean)
+      : []
+    const taskBrief = (discoveryHandoff.next_phase_brief || discoveryHandoff.summary || pipeline.initial_task || '').trim()
+
+    if (!projectPath) {
+      setDiscoveryLaunchError('Choose a project path before launching work.')
+      return
+    }
+    if (!taskBrief) {
+      setDiscoveryLaunchError('Discovery handoff is missing the next-phase brief needed to launch work.')
+      return
+    }
+
+    setLaunchingDiscoveryWork(true)
+    setDiscoveryLaunchError(null)
+    setActionError(null)
+    try {
+      const projectRes = await fetch(`${apiBase}/v1/projects/`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          name: projectName,
+          path: projectPath,
+          template: launchProjectTemplate,
+          description: discoveryHandoff.summary || '',
+          sandbox_mode: 'full',
+        }),
+      })
+      const projectPayload = await readApiPayload(projectRes)
+      if (!projectRes.ok) throw new Error(getApiErrorMessage(projectPayload, projectRes.status))
+
+      const sessionRes = await fetch(`${apiBase}/v1/workbench/sessions`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          project_id: projectPayload.id,
+          agent_type: 'coder',
+          task: taskBrief,
+        }),
+      })
+      const sessionPayload = await readApiPayload(sessionRes)
+      if (!sessionRes.ok) throw new Error(getApiErrorMessage(sessionPayload, sessionRes.status))
+
+      const pipelineRes = await fetch(`${apiBase}/v1/workbench/pipelines`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          session_id: sessionPayload.id,
+          method_id: methodId,
+          stack_override: stackOverride,
+          task: taskBrief,
+          auto_approve: false,
+          interaction_mode: 'interactive',
+          delegate_qa_to_agent: false,
+        }),
+      })
+      const pipelinePayload = await readApiPayload(pipelineRes)
+      if (!pipelineRes.ok) throw new Error(getApiErrorMessage(pipelinePayload, pipelineRes.status))
+
+      router.push(`/workbench/pipelines/${pipelinePayload.id}`)
+    } catch (e: any) {
+      setDiscoveryLaunchError(e.message || 'Failed to launch work from discovery handoff')
+    } finally {
+      setLaunchingDiscoveryWork(false)
+    }
+  }, [apiBase, authHeaders, discoveryHandoff, launchProjectName, launchProjectPath, launchProjectTemplate, pipeline, router])
+
+  const downloadDiscoveryExport = useCallback(async (format: 'docx' | 'pdf') => {
+    if (!pipeline) return
+    setDownloadingDiscoveryExport(format)
+    setDiscoveryLaunchError(null)
+    try {
+      const res = await fetch(`${apiBase}/v1/workbench/pipelines/${pipeline.id}/discovery-export?format=${format}`, {
+        headers: { Authorization: rawAuthHeaders.Authorization },
+      })
+      if (!res.ok) {
+        const payload = await readApiPayload(res)
+        throw new Error(getApiErrorMessage(payload, res.status))
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      const safeName = slugifyProjectName(discoveryHandoff?.handoff_title || 'discovery-handoff')
+      a.href = url
+      a.download = `${safeName}.${format}`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (e: any) {
+      setDiscoveryLaunchError(e.message || `Failed to export ${format.toUpperCase()} handoff`)
+    } finally {
+      setDownloadingDiscoveryExport(null)
+    }
+  }, [apiBase, pipeline, rawAuthHeaders.Authorization, discoveryHandoff])
+
+  const continueDiscovery = useCallback(async () => {
+    if (!pipeline || !discoveryHandoff) return
+
+    const changeNote = continuationNote.trim()
+    const priorSummary = discoveryHandoff.summary?.trim() || pipeline.initial_task || ''
+    const priorBrief = discoveryHandoff.next_phase_brief?.trim() || ''
+    const openDecisions = Array.isArray(discoveryHandoff.open_decisions)
+      ? discoveryHandoff.open_decisions.filter(Boolean).join('\n- ')
+      : ''
+
+    const task = [
+      'Continue the discovery and brainstorming session based on the previous completed discovery handoff.',
+      priorSummary ? `Previous summary:\n${priorSummary}` : '',
+      priorBrief ? `Previous next-phase brief:\n${priorBrief}` : '',
+      openDecisions ? `Open decisions to revisit:\n- ${openDecisions}` : '',
+      changeNote ? `What changed or needs further exploration:\n${changeNote}` : 'The user requested that discovery continue and the requirements be revisited.',
+      'Update the use case, requirements, open decisions, and recommended next method as needed.',
+    ].filter(Boolean).join('\n\n')
+
+    setContinuingDiscovery(true)
+    setDiscoveryLaunchError(null)
+    try {
+      const res = await fetch(`${apiBase}/v1/workbench/pipelines`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          session_id: pipeline.session_id,
+          method_id: 'discovery',
+          task,
+          auto_approve: false,
+          interaction_mode: 'interactive',
+          delegate_qa_to_agent: false,
+        }),
+      })
+      const payload = await readApiPayload(res)
+      if (!res.ok) throw new Error(getApiErrorMessage(payload, res.status))
+      router.push(`/workbench/pipelines/${payload.id}`)
+    } catch (e: any) {
+      setDiscoveryLaunchError(e.message || 'Failed to continue discovery')
+    } finally {
+      setContinuingDiscovery(false)
+    }
+  }, [apiBase, authHeaders, continuationNote, discoveryHandoff, pipeline, router])
 
   useEffect(() => {
     refreshBackendStatus()
@@ -1682,6 +1884,180 @@ export default function PipelinePage() {
           {latestAlertSummary.detail && (
             <div className="text-sm text-gray-700 dark:text-gray-300 mt-1">{latestAlertSummary.detail}</div>
           )}
+        </div>
+      )}
+
+      {pipeline.method_id === 'discovery' && pipeline.status === 'completed' && discoveryHandoff && (
+        <div className="rounded-2xl border border-cyan-200 dark:border-cyan-800 bg-cyan-50 dark:bg-cyan-900/20 px-4 py-4 space-y-4">
+          <div className="flex items-start justify-between gap-4 flex-wrap">
+            <div>
+              <div className="text-sm font-semibold text-cyan-900 dark:text-cyan-100">Discovery handoff ready</div>
+              <div className="text-sm text-cyan-800 dark:text-cyan-200 mt-1">
+                Discovery is complete. Use this handoff to spin up a project and launch the recommended delivery method.
+              </div>
+            </div>
+            {discoveryHandoffRun && (
+              <button
+                onClick={() => setViewArtifactRun(discoveryHandoffRun)}
+                className="px-3 py-1.5 text-xs font-medium rounded-lg border border-cyan-300 text-cyan-900 hover:bg-cyan-100 dark:hover:bg-cyan-900/30"
+              >
+                View handoff artifact
+              </button>
+            )}
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            <div className="rounded-xl border border-cyan-200 dark:border-cyan-800 bg-white/80 dark:bg-gray-900/40 px-3 py-3">
+              <div className="text-[11px] uppercase tracking-wider font-semibold text-cyan-700 dark:text-cyan-300">Recommended next method</div>
+              <div className="mt-1 text-base font-semibold text-gray-900 dark:text-white">{discoveryHandoff.recommended_next_method || 'bmad'}</div>
+              {Array.isArray(discoveryHandoff.recommended_stack) && discoveryHandoff.recommended_stack.length > 0 && (
+                <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
+                  Stack: {discoveryHandoff.recommended_stack.join(' + ')}
+                </div>
+              )}
+            </div>
+            <div className="rounded-xl border border-cyan-200 dark:border-cyan-800 bg-white/80 dark:bg-gray-900/40 px-3 py-3">
+              <div className="text-[11px] uppercase tracking-wider font-semibold text-cyan-700 dark:text-cyan-300">Use case</div>
+              <div className="mt-1 text-sm text-gray-800 dark:text-gray-100">
+                {discoveryHandoff.use_case?.actor || 'User'} needs {discoveryHandoff.use_case?.need || 'the requested capability'} for {discoveryHandoff.use_case?.value || 'the intended outcome'}.
+              </div>
+            </div>
+          </div>
+
+          {discoveryHandoff.summary && (
+            <div className="rounded-xl border border-cyan-200 dark:border-cyan-800 bg-white/80 dark:bg-gray-900/40 px-3 py-3 text-sm text-gray-700 dark:text-gray-200 whitespace-pre-wrap">
+              {discoveryHandoff.summary}
+            </div>
+          )}
+
+          <div className="grid gap-3 lg:grid-cols-[1fr_1fr_220px]">
+            <div>
+              <label className="block text-[11px] uppercase tracking-wider font-semibold text-gray-500 mb-1.5">Project name</label>
+              <input
+                value={launchProjectName}
+                onChange={e => {
+                  const nextName = e.target.value
+                  setLaunchProjectName(nextName)
+                  if (!launchProjectPath.trim()) {
+                    setLaunchProjectPath(`C:/Users/chris/DevForgeAI/${slugifyProjectName(nextName)}`)
+                  }
+                }}
+                className="w-full rounded-lg border border-gray-300 dark:border-gray-700 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-cyan-400"
+                placeholder="Project name"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wider font-semibold text-gray-500 mb-1.5">Project path</label>
+              <input
+                value={launchProjectPath}
+                onChange={e => setLaunchProjectPath(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 dark:border-gray-700 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-cyan-400"
+                placeholder="C:/path/to/project"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wider font-semibold text-gray-500 mb-1.5">Template</label>
+              <select
+                value={launchProjectTemplate}
+                onChange={e => setLaunchProjectTemplate(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 dark:border-gray-700 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-cyan-400"
+              >
+                <option value="blank">Blank</option>
+                <option value="python-api">Python API</option>
+                <option value="next-app">Next.js App</option>
+                <option value="cli-tool">CLI Tool</option>
+              </select>
+            </div>
+          </div>
+
+          {discoveryHandoff.next_phase_brief && (
+            <details className="rounded-xl border border-cyan-200 dark:border-cyan-800 bg-white/80 dark:bg-gray-900/40 px-3 py-3">
+              <summary className="cursor-pointer text-sm font-medium text-gray-900 dark:text-white">Next-phase brief</summary>
+              <div className="mt-2 text-sm text-gray-700 dark:text-gray-200 whitespace-pre-wrap">{discoveryHandoff.next_phase_brief}</div>
+            </details>
+          )}
+
+          {discoveryLaunchError && (
+            <div className="text-sm text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg px-3 py-2">
+              {discoveryLaunchError}
+            </div>
+          )}
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            <div className="rounded-xl border border-cyan-200 dark:border-cyan-800 bg-white/80 dark:bg-gray-900/40 px-3 py-3 space-y-3">
+              <div>
+                <div className="text-[11px] uppercase tracking-wider font-semibold text-cyan-700 dark:text-cyan-300">Spin up project work</div>
+                <div className="mt-1 text-sm text-gray-700 dark:text-gray-200">
+                  Create a project and immediately launch the recommended agentic method. The completed Discovery session remains available for later reference.
+                </div>
+              </div>
+              <div className="flex gap-3 flex-wrap">
+                <button
+                  onClick={launchDiscoveryWork}
+                  disabled={launchingDiscoveryWork || !launchProjectName.trim() || !launchProjectPath.trim()}
+                  className="px-4 py-2 text-sm font-semibold rounded-lg bg-cyan-600 hover:bg-cyan-700 text-white disabled:opacity-40"
+                >
+                  {launchingDiscoveryWork ? 'Launching…' : 'Create project and launch work'}
+                </button>
+                <button
+                  onClick={() => router.push('/projects')}
+                  className="px-4 py-2 text-sm font-medium rounded-lg border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800"
+                >
+                  Open projects
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-cyan-200 dark:border-cyan-800 bg-white/80 dark:bg-gray-900/40 px-3 py-3 space-y-3">
+              <div>
+                <div className="text-[11px] uppercase tracking-wider font-semibold text-cyan-700 dark:text-cyan-300">Manual handoff or audit</div>
+                <div className="mt-1 text-sm text-gray-700 dark:text-gray-200">
+                  Export the Discovery findings to a readable document and leave this session in its current handoff state for later action.
+                </div>
+              </div>
+              <div className="flex gap-2 flex-wrap">
+                <button
+                  onClick={() => downloadDiscoveryExport('docx')}
+                  disabled={downloadingDiscoveryExport !== null}
+                  className="px-4 py-2 text-sm font-medium rounded-lg border border-cyan-300 text-cyan-900 hover:bg-cyan-100 dark:hover:bg-cyan-900/30 disabled:opacity-40"
+                >
+                  {downloadingDiscoveryExport === 'docx' ? 'Exporting DOCX…' : 'Download DOCX'}
+                </button>
+                <button
+                  onClick={() => downloadDiscoveryExport('pdf')}
+                  disabled={downloadingDiscoveryExport !== null}
+                  className="px-4 py-2 text-sm font-medium rounded-lg border border-cyan-300 text-cyan-900 hover:bg-cyan-100 dark:hover:bg-cyan-900/30 disabled:opacity-40"
+                >
+                  {downloadingDiscoveryExport === 'pdf' ? 'Exporting PDF…' : 'Download PDF'}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-cyan-200 dark:border-cyan-800 bg-white/80 dark:bg-gray-900/40 px-3 py-3 space-y-3">
+            <div>
+              <div className="text-[11px] uppercase tracking-wider font-semibold text-cyan-700 dark:text-cyan-300">Continue brainstorming later</div>
+              <div className="mt-1 text-sm text-gray-700 dark:text-gray-200">
+                If requirements change, start a new Discovery run from this same session and revisit the use case, requirements, and next-method recommendation.
+              </div>
+            </div>
+            <textarea
+              value={continuationNote}
+              onChange={e => setContinuationNote(e.target.value)}
+              rows={4}
+              placeholder="What changed? What new questions or constraints should Discovery revisit?"
+              className="w-full rounded-lg border border-gray-300 dark:border-gray-700 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-cyan-400"
+            />
+            <div className="flex gap-2 flex-wrap">
+              <button
+                onClick={continueDiscovery}
+                disabled={continuingDiscovery}
+                className="px-4 py-2 text-sm font-semibold rounded-lg bg-white border border-cyan-300 text-cyan-900 hover:bg-cyan-50 dark:bg-transparent dark:hover:bg-cyan-900/20 disabled:opacity-40"
+              >
+                {continuingDiscovery ? 'Starting…' : 'Continue Discovery'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

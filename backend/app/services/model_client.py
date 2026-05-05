@@ -162,11 +162,10 @@ class ModelClient:
             kwargs.pop("temperature", None)
         elif provider_name == "github-copilot":
             # Copilot accepts the stored GitHub OAuth token directly.
-            from app.services.command_executor import get_first_github_token
             from app.services.github_copilot import (
-                exchange_for_copilot_token, get_copilot_headers, COPILOT_API_BASE,
+                exchange_for_copilot_token, get_copilot_headers, COPILOT_API_BASE, get_copilot_auth_token,
             )
-            gh_token = get_first_github_token()
+            gh_token = get_copilot_auth_token()
             copilot_token = await exchange_for_copilot_token(gh_token) if gh_token else None
             if not copilot_token:
                 raise ValueError(

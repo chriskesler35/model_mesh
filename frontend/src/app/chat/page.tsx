@@ -1641,6 +1641,8 @@ export default function ChatPage() {
     { cmd: '/specaudit',   hint: '',            desc: '✅ Activate SpecAudit (spec review & validation)' },
     { cmd: '/mvp-loop',    hint: '',            desc: '🚧 Activate MVP Loop (rapid MVP builder)' },
     { cmd: '/gtrack',      hint: '',            desc: '📊 Activate GTrack (goal & task tracking)' },
+    { cmd: '/discovery',   hint: '',            desc: '🔎 Activate Discovery (requirements shaping & handoff)' },
+    { cmd: '/retrospective', hint: '',          desc: '🪞 Activate Retrospective (learning capture & carry-forward)' },
   ]
 
   const SLASH_COMMANDS = [...BASE_SLASH_COMMANDS, ...dynamicMethodCmds]
@@ -1782,7 +1784,9 @@ export default function ChatPage() {
       case '/superpowers':
       case '/specaudit':
       case '/mvp-loop':
-      case '/gtrack': {
+      case '/discovery':
+      case '/gtrack':
+      case '/retrospective': {
         const methodId = cmd.slice(1)
         try {
           const res = await fetch(`${API_BASE}/v1/methods/activate`, {
@@ -2140,7 +2144,7 @@ export default function ChatPage() {
 
         // Build dynamic slash commands for custom methods + enabled skills
         const extraCmds: Array<{cmd: string; hint: string; desc: string}> = []
-        const builtInMethodIds = new Set(['standard','bmad','gsd','superpowers','specaudit','mvp-loop','gtrack'])
+        const builtInMethodIds = new Set(['standard','bmad','gsd','superpowers','specaudit','mvp-loop','gtrack','discovery','retrospective'])
         const allMethods: any[] = methodsRes.data || []
         for (const m of allMethods) {
           if (!builtInMethodIds.has(m.id) && m.id) {

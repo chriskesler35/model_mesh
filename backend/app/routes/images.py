@@ -20,6 +20,7 @@ from app.middleware.auth import verify_api_key
 from app.config import settings
 from app.services.app_settings_helper import get_setting
 from app.routes.workflows import find_workflow_path, _convert_editor_to_api, _fetch_object_info_schema, _get_running_comfyui_url
+from app.routes.remote import _detect_tailscale_ip, _detect_wireguard_ip
 from pydantic import BaseModel
 from typing import Optional, List, Tuple, Any, Dict
 from datetime import datetime as _dt
@@ -186,7 +187,29 @@ async def _resolve_comfyui_endpoint(configured_url_value: str) -> Optional[str]:
         except Exception:
             return None
 
-    urls = _parse_comfyui_urls(configured_url_value)
+    from app.database import AsyncSessionLocal
+    from app.services.app_settings_helper import get_setting
+
+    url_parts: List[str] = [configured_url_value]
+    try:
+        async with AsyncSessionLocal() as db:
+            url_parts.append(await get_setting("remote_tailscale_comfyui_url", db))
+            url_parts.append(await get_setting("remote_wireguard_comfyui_url", db))
+    except Exception:
+        # Keep existing configured URL behavior if settings lookup fails.
+        pass
+
+    tailscale_ip = _detect_tailscale_ip()
+    wireguard_ip = _detect_wireguard_ip()
+    if tailscale_ip:
+        url_parts.append(f"http://{tailscale_ip}:8189")
+        url_parts.append(f"http://{tailscale_ip}:8188")
+    if wireguard_ip:
+        url_parts.append(f"http://{wireguard_ip}:8189")
+        url_parts.append(f"http://{wireguard_ip}:8188")
+
+    combined_url_value = ",".join(part for part in url_parts if part)
+    urls = _parse_comfyui_urls(combined_url_value)
     if not urls:
         return None
 

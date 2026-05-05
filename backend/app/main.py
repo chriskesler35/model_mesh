@@ -106,6 +106,7 @@ from app.routes.websocket import router as websocket_router
 from app.routes.runtime_capabilities import router as runtime_capabilities_router
 from app.routes.chat_attachments import router as chat_attachments_router
 from app.routes.tools import router as tools_router
+from app.routes.routing import router as routing_router
 
 
 @asynccontextmanager
@@ -145,6 +146,16 @@ async def lifespan(app: FastAPI):
     from app.seed import seed_database
     async with AsyncSessionLocal() as session:
         await seed_database(session)
+
+    # Migrate OAuth tokens from JSON store → encrypted DB, then prime in-memory cache
+    try:
+        from app.services.oauth_secrets import backfill_tokens_from_json
+        from app.services.github_copilot import init_db_token_cache
+        await backfill_tokens_from_json()
+        await init_db_token_cache()
+    except Exception as _oauth_exc:
+        import logging as _log
+        _log.getLogger(__name__).warning("OAuth token backfill/cache init failed (non-fatal): %s", _oauth_exc)
 
     # Auto-sync Ollama models + key-gated paid models on every startup
     try:
@@ -245,6 +256,7 @@ app.include_router(websocket_router)
 app.include_router(runtime_capabilities_router)
 app.include_router(chat_attachments_router)
 app.include_router(tools_router)
+app.include_router(routing_router)
 app.include_router(metrics_router)
 
 

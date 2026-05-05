@@ -118,7 +118,13 @@ export default function PreferencesTab() {
         method: 'POST', headers: AUTH_HEADERS,
         body: JSON.stringify({ messages }),
       })
-      const result = await res.json()
+      const result = await res.json().catch(() => ({}))
+
+      if (!res.ok) {
+        const detail = result?.detail || result?.error || `HTTP ${res.status}`
+        alert(`Detection error: ${detail}`)
+        return
+      }
 
       if (result.error) {
         alert(`Detection error: ${result.error}`)

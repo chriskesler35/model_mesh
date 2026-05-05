@@ -352,8 +352,10 @@ async def get_network_profiles():
     async with AsyncSessionLocal() as db:
         tailscale_frontend = await get_setting("remote_tailscale_frontend_url", db)
         tailscale_backend = await get_setting("remote_tailscale_backend_url", db)
+        tailscale_comfyui = await get_setting("remote_tailscale_comfyui_url", db)
         wireguard_frontend = await get_setting("remote_wireguard_frontend_url", db)
         wireguard_backend = await get_setting("remote_wireguard_backend_url", db)
+        wireguard_comfyui = await get_setting("remote_wireguard_comfyui_url", db)
 
     def _default_frontend(ip: Optional[str]) -> str:
         host = ip or hostname
@@ -362,6 +364,10 @@ async def get_network_profiles():
     def _default_backend(ip: Optional[str]) -> str:
         host = ip or hostname
         return f"http://{host}:{backend_port}"
+
+    def _default_comfyui(ip: Optional[str]) -> str:
+        host = ip or hostname
+        return f"http://{host}:8189"
 
     return {
         "hostname": hostname,
@@ -373,8 +379,10 @@ async def get_network_profiles():
                 "connected": bool(tailscale_ip),
                 "frontend_url": tailscale_frontend or _default_frontend(tailscale_ip),
                 "backend_url": tailscale_backend or _default_backend(tailscale_ip),
+                "comfyui_url": tailscale_comfyui or _default_comfyui(tailscale_ip),
                 "configured_frontend_url": tailscale_frontend,
                 "configured_backend_url": tailscale_backend,
+                "configured_comfyui_url": tailscale_comfyui,
             },
             "wireguard": {
                 "network": "wireguard",
@@ -382,8 +390,10 @@ async def get_network_profiles():
                 "connected": bool(wireguard_ip),
                 "frontend_url": wireguard_frontend or _default_frontend(wireguard_ip),
                 "backend_url": wireguard_backend or _default_backend(wireguard_ip),
+                "comfyui_url": wireguard_comfyui or _default_comfyui(wireguard_ip),
                 "configured_frontend_url": wireguard_frontend,
                 "configured_backend_url": wireguard_backend,
+                "configured_comfyui_url": wireguard_comfyui,
             },
         },
     }

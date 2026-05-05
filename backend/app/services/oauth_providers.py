@@ -154,7 +154,8 @@ class GitHubOAuthProvider(BaseOAuthProvider):
     @property
     def scopes(self) -> list[str]:
         # repo scope lets git-push work via HTTPS — matches existing github_oauth.py
-        return ["read:user", "user:email", "repo"]
+        # copilot scope allows /copilot_internal/v2/token exchange for full model catalog
+        return ["read:user", "user:email", "repo", "copilot"]
 
     async def get_user_profile(self, access_token: str) -> OAuthUserProfile:
         """Fetch GitHub user profile, including verified primary email."""

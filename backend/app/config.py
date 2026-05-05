@@ -1,9 +1,13 @@
 """Application configuration using Pydantic Settings."""
 
+import logging
 import os
 from pathlib import Path
 from pydantic_settings import BaseSettings
 from typing import Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -40,13 +44,18 @@ class Settings(BaseSettings):
     comfyui_url: str = "http://localhost:8188"
     
     # Application
+    app_env: str = "development"
     modelmesh_api_key: str = "modelmesh_local_dev_key"
     ollama_base_url: str = "http://localhost:11434"
+    model_routing_auto_enabled: bool = False
 
     # JWT auth (multi-user collaboration)
     jwt_secret: str = "change-me-in-production-this-is-not-secure"
     jwt_algorithm: str = "HS256"
     jwt_expiry_hours: int = 24 * 7  # 7-day tokens for LAN/Tailscale use
+
+    # OAuth token encryption (optional override; falls back to JWT secret)
+    oauth_token_encryption_key: Optional[str] = None
     
     # Memory
     memory_ttl_seconds: int = 86400  # 24 hours
@@ -74,6 +83,26 @@ class Settings(BaseSettings):
             db_path = Path(__file__).parent.parent.parent / "data" / "devforgeai.db"
             db_path.parent.mkdir(exist_ok=True)
             self.database_url = f"sqlite+aiosqlite:///{db_path}"
+        self._validate_security_defaults()
+
+    def _validate_security_defaults(self) -> None:
+        """Guard against insecure default credentials in non-dev environments."""
+        env = (self.app_env or os.environ.get("APP_ENV") or os.environ.get("ENV") or "development").lower()
+        non_dev = env not in {"dev", "development", "local", "test", "testing"}
+
+        default_jwt = "change-me-in-production-this-is-not-secure"
+        default_owner_key = "modelmesh_local_dev_key"
+
+        if self.jwt_secret == default_jwt:
+            if non_dev:
+                raise ValueError(
+                    "JWT_SECRET is using the insecure default value. "
+                    "Set a strong JWT_SECRET before starting in non-development environments."
+                )
+            logger.warning("JWT_SECRET is using the default development value.")
+
+        if self.modelmesh_api_key == default_owner_key:
+            logger.warning("MODELMESH_API_KEY is using the default development value.")
 
 
 settings = Settings()

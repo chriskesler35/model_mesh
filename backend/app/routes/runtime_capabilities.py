@@ -17,6 +17,7 @@ from app.middleware.auth import verify_api_key
 from app.routes.model_sync import fetch_ollama_models
 from app.routes.workflows import _get_running_comfyui_url
 from app.services.provider_credentials import has_provider_api_key
+from app.services.provider_capabilities import get_provider_capability_snapshot
 
 
 router = APIRouter(prefix="/v1/runtime", tags=["runtime"], dependencies=[Depends(verify_api_key)])
@@ -69,4 +70,13 @@ async def runtime_capabilities(db: AsyncSession = Depends(get_db)):
         "recommended": {
             "image_provider": recommended_image_provider,
         },
+        "features": {
+            "model_routing_auto_enabled": bool(settings.model_routing_auto_enabled),
+        },
     }
+
+
+@router.get("/provider-capabilities")
+async def runtime_provider_capabilities():
+    """Return provider capability metadata used for routing and UI diagnostics."""
+    return await get_provider_capability_snapshot()

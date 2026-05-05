@@ -20,8 +20,18 @@ const BACKEND_PORTS = [PRIMARY_BACKEND_PORT, LEGACY_BACKEND_PORT]
 const FRONTEND_DIR = process.cwd()
 const REPO_ROOT = path.resolve(FRONTEND_DIR, '..')
 const BACKEND_DIR = path.join(REPO_ROOT, 'backend')
-const VENV_PYTHON = path.join(BACKEND_DIR, 'venv', 'Scripts', 'python.exe')
-const PYTHON_EXE = 'C:\\Python313\\python.exe' // fallback
+const LOGS_DIR = path.join(REPO_ROOT, 'logs')
+const BACKEND_STARTUP_LOG = path.join(LOGS_DIR, 'backend-startup.log')
+// The virtual environment lives at <repo_root>/.venv, not backend/venv.
+const VENV_PYTHON = fs.existsSync(path.join(REPO_ROOT, '.venv', 'Scripts', 'python.exe'))
+  ? path.join(REPO_ROOT, '.venv', 'Scripts', 'python.exe')
+  : path.join(BACKEND_DIR, 'venv', 'Scripts', 'python.exe') // legacy fallback
+const PYTHON_EXE = 'C:\\Python313\\python.exe' // last-resort fallback
+const FALLBACK_ENV = (process.env.DEVFORGE_ALLOW_BACKEND_PYTHON_FALLBACK || '').toLowerCase()
+const FALLBACK_ENV_SET = FALLBACK_ENV.length > 0
+const ALLOW_BACKEND_PYTHON_FALLBACK = FALLBACK_ENV_SET
+  ? ['1', 'true', 'yes', 'on'].includes(FALLBACK_ENV)
+  : process.env.NODE_ENV !== 'production'
 
 console.log('[backend route] Paths:', { REPO_ROOT, BACKEND_DIR, VENV_PYTHON, exists: fs.existsSync(VENV_PYTHON) })
 
@@ -54,7 +64,7 @@ async function killBackends(): Promise<void> {
     if (pid) pids.add(pid)
   }
 
-  for (const pid of pids) {
+  for (const pid of Array.from(pids)) {
     try {
       await execAsync(`taskkill /F /PID ${pid} /T`, { shell: 'cmd.exe' })
     } catch {
@@ -66,22 +76,48 @@ async function killBackends(): Promise<void> {
   await new Promise(r => setTimeout(r, 1500))
 }
 
-function spawnBackend(): void {
+function getStartupLogTail(lines = 25): string[] {
+  try {
+    if (!fs.existsSync(BACKEND_STARTUP_LOG)) return []
+    const content = fs.readFileSync(BACKEND_STARTUP_LOG, 'utf8')
+    return content
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .slice(-lines)
+  } catch {
+    return []
+  }
+}
+
+function spawnBackend(explicitPythonExe?: string): { pythonExe: string; pid: number | null } {
   // Use venv python if it exists, fall back to system python
-  const pythonExe = fs.existsSync(VENV_PYTHON) ? VENV_PYTHON : PYTHON_EXE
+  const pythonExe = explicitPythonExe ?? (fs.existsSync(VENV_PYTHON) ? VENV_PYTHON : PYTHON_EXE)
   console.log('[spawnBackend] Using python:', pythonExe, 'cwd:', BACKEND_DIR)
 
-  // Use Windows 'start' command for reliable detached spawn
-  if (process.platform === 'win32') {
-    const cmd = `start "DevForgeAI Backend" /MIN /D "${BACKEND_DIR}" "${pythonExe}" -m uvicorn app.main:app --host 0.0.0.0 --port ${PRIMARY_BACKEND_PORT}`
-    execAsync(cmd, { shell: 'cmd.exe' }).catch(() => {})
-  } else {
-    const child = spawn(pythonExe, ['-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', String(PRIMARY_BACKEND_PORT)], {
+  fs.mkdirSync(LOGS_DIR, { recursive: true })
+  const outFd = fs.openSync(BACKEND_STARTUP_LOG, 'a')
+
+  const child = spawn(
+    pythonExe,
+    ['-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', String(PRIMARY_BACKEND_PORT)],
+    {
       cwd: BACKEND_DIR,
       detached: true,
-      stdio: 'ignore',
-    })
-    child.unref()
+      stdio: ['ignore', outFd, outFd],
+      windowsHide: true,
+    }
+  )
+  fs.closeSync(outFd)
+  child.unref()
+  return { pythonExe, pid: child.pid ?? null }
+}
+
+async function isBackendHealthy(): Promise<boolean> {
+  try {
+    const res = await fetch(`http://localhost:${PRIMARY_BACKEND_PORT}/`, { signal: AbortSignal.timeout(3000) })
+    return res.ok
+  } catch {
+    return false
   }
 }
 
@@ -89,7 +125,10 @@ async function waitForBackend(timeoutMs = 30000): Promise<boolean> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
     await new Promise(r => setTimeout(r, 800))
-    if (await isBackendUp()) return true
+    if (await isBackendUp()) {
+      // Give app a little extra time to pass import/startup and answer HTTP.
+      if (await isBackendHealthy()) return true
+    }
   }
   return false
 }
@@ -122,10 +161,41 @@ export async function POST(req: NextRequest) {
 
   if (action === 'start') {
     const already = await isBackendUp()
-    if (already) return NextResponse.json({ ok: true, message: 'Already running', action })
-    spawnBackend()
-    const up = await waitForBackend()
-    return NextResponse.json({ ok: up, message: up ? 'Backend started' : 'Start timed out', action })
+    if (already) {
+      return NextResponse.json({
+        ok: true,
+        message: 'Already running',
+        action,
+        diagnostics: { alreadyRunning: true },
+      })
+    }
+
+    const primaryAttempt = spawnBackend()
+    let up = await waitForBackend()
+    let fallbackUsed = false
+    let fallbackAttempt: { pythonExe: string; pid: number | null } | null = null
+
+    if (!up && ALLOW_BACKEND_PYTHON_FALLBACK && PYTHON_EXE !== VENV_PYTHON) {
+      // Fallback one more time in case venv path is stale.
+      fallbackUsed = true
+      fallbackAttempt = spawnBackend(PYTHON_EXE)
+      up = await waitForBackend(15000)
+    }
+
+    return NextResponse.json({
+      ok: up,
+      message: up ? 'Backend started' : 'Start timed out',
+      action,
+      diagnostics: {
+        attemptedPython: primaryAttempt.pythonExe,
+        attemptedPid: primaryAttempt.pid,
+        fallbackAllowed: ALLOW_BACKEND_PYTHON_FALLBACK,
+        fallbackUsed,
+        fallbackPython: fallbackAttempt?.pythonExe ?? null,
+        fallbackPid: fallbackAttempt?.pid ?? null,
+        startupLogTail: up ? [] : getStartupLogTail(),
+      },
+    })
   }
 
   if (action === 'stop') {
@@ -135,9 +205,31 @@ export async function POST(req: NextRequest) {
 
   if (action === 'restart') {
     await killBackends()
-    spawnBackend()
-    const up = await waitForBackend()
-    return NextResponse.json({ ok: up, message: up ? 'Backend restarted' : 'Restart timed out', action })
+    const primaryAttempt = spawnBackend()
+    let up = await waitForBackend()
+    let fallbackUsed = false
+    let fallbackAttempt: { pythonExe: string; pid: number | null } | null = null
+
+    if (!up && ALLOW_BACKEND_PYTHON_FALLBACK && PYTHON_EXE !== VENV_PYTHON) {
+      fallbackUsed = true
+      fallbackAttempt = spawnBackend(PYTHON_EXE)
+      up = await waitForBackend(15000)
+    }
+
+    return NextResponse.json({
+      ok: up,
+      message: up ? 'Backend restarted' : 'Restart timed out',
+      action,
+      diagnostics: {
+        attemptedPython: primaryAttempt.pythonExe,
+        attemptedPid: primaryAttempt.pid,
+        fallbackAllowed: ALLOW_BACKEND_PYTHON_FALLBACK,
+        fallbackUsed,
+        fallbackPython: fallbackAttempt?.pythonExe ?? null,
+        fallbackPid: fallbackAttempt?.pid ?? null,
+        startupLogTail: up ? [] : getStartupLogTail(),
+      },
+    })
   }
 
   return NextResponse.json({ ok: false, message: `Unknown action: ${action}` }, { status: 400 })

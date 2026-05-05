@@ -8,8 +8,14 @@ Usage:
 """
 
 import asyncio
+import io
 import sys
 import logging
+
+# Force UTF-8 output on Windows (avoids UnicodeEncodeError with symbols like ✓ ✗ •)
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 from typing import Optional
 from sqlalchemy import select, delete
 from app.database import AsyncSessionLocal

@@ -20,11 +20,17 @@ def _resolve_backend_port() -> int:
 TARGET_PORT = _resolve_backend_port()
 PORTS_TO_CLEAN = sorted(set([19000, 19001, TARGET_PORT]))
 
-# Always use backend venv python when available.
+# Always use the repo-root .venv python when available.
+# The virtual environment lives at <repo_root>/.venv, not backend/venv.
+_REPO_ROOT = BACKEND_DIR.parent
 if sys.platform == "win32":
-    PYTHON = BACKEND_DIR / "venv" / "Scripts" / "python.exe"
+    PYTHON = _REPO_ROOT / ".venv" / "Scripts" / "python.exe"
+    if not PYTHON.exists():
+        PYTHON = BACKEND_DIR / "venv" / "Scripts" / "python.exe"  # legacy fallback
 else:
-    PYTHON = BACKEND_DIR / "venv" / "bin" / "python"
+    PYTHON = _REPO_ROOT / ".venv" / "bin" / "python"
+    if not PYTHON.exists():
+        PYTHON = BACKEND_DIR / "venv" / "bin" / "python"  # legacy fallback
 if not PYTHON.exists():
     PYTHON = Path(sys.executable)
 

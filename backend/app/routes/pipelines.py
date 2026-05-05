@@ -19,6 +19,8 @@ import logging
 import re
 import uuid
 from datetime import datetime
+from html import escape
+from io import BytesIO
 from pathlib import Path
 from typing import Optional, Dict, Any, List, AsyncGenerator
 
@@ -535,6 +537,43 @@ def _build_artifact(phase_def: dict, raw_response: str) -> dict:
         return {"type": "code", "files": files, "raw": raw_response}
     else:  # md
         return {"type": "md", "content": raw_response.strip(), "raw": raw_response}
+
+
+async def _persist_retrospective_memory_if_applicable(pipeline_id: str) -> None:
+    """Persist the MemoryCurator output for retrospective pipelines into user memory."""
+    from app.models.pipeline import Pipeline, PhaseRun
+    from app.services.memory_context import MemoryContext
+
+    async with AsyncSessionLocal() as db:
+        pipeline = (await db.execute(
+            select(Pipeline).where(Pipeline.id == pipeline_id)
+        )).scalar_one_or_none()
+        if not pipeline or pipeline.method_id != "retrospective":
+            return
+
+        final_run = (await db.execute(
+            select(PhaseRun)
+            .where(PhaseRun.pipeline_id == pipeline_id)
+            .where(PhaseRun.phase_name == "MemoryCurator")
+            .order_by(desc(PhaseRun.created_at))
+        )).scalars().first()
+        if not final_run:
+            return
+
+        artifact = final_run.output_artifact or {}
+        if artifact.get("type") != "json":
+            return
+
+        data = artifact.get("data") or {}
+        memory_markdown = (data.get("memory_markdown") or "").strip()
+        if not memory_markdown:
+            return
+
+        memory = MemoryContext(db)
+        files = await memory.get_memory_files()
+        existing = (files.get("RETROSPECTIVES.md") or "").strip()
+        content = f"{existing}\n\n---\n\n{memory_markdown}".strip() if existing else memory_markdown
+        await memory.update_memory_file("RETROSPECTIVES.md", content)
 
 
 def _format_prior_artifact_for_context(phase_run_dict: dict) -> str:
@@ -1551,6 +1590,7 @@ async def _advance_to_next(pipeline_id: str, _current_index: int = -1):
                 current_phase_index=max_idx,
             )
             if final_status == "completed":
+                await _persist_retrospective_memory_if_applicable(pipeline_id)
                 _push(pipeline_id, "pipeline_done",
                       message="All phases complete.", status="completed")
             else:
@@ -2549,6 +2589,213 @@ async def save_pipeline_as_template(
     await db.refresh(new_method)
 
     return {"ok": True, "method": new_method.to_dict(), "source_pipeline_id": pipeline_id}
+
+
+def _string_list(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+async def _load_discovery_handoff(pipeline_id: str) -> tuple[Any, dict]:
+    from app.models.pipeline import Pipeline, PhaseRun
+
+    async with AsyncSessionLocal() as db:
+        pipeline = (await db.execute(
+            select(Pipeline).where(Pipeline.id == pipeline_id)
+        )).scalar_one_or_none()
+        if not pipeline:
+            raise HTTPException(status_code=404, detail="Pipeline not found")
+        if pipeline.method_id != "discovery":
+            raise HTTPException(status_code=400, detail="Discovery export is only available for discovery pipelines")
+
+        run = (await db.execute(
+            select(PhaseRun)
+            .where(PhaseRun.pipeline_id == pipeline_id)
+            .where(PhaseRun.phase_name == "HandoffPlanner")
+            .order_by(desc(PhaseRun.created_at))
+        )).scalars().first()
+        if not run or not isinstance((run.output_artifact or {}).get("data"), dict):
+            raise HTTPException(status_code=400, detail="Discovery handoff artifact is not available yet")
+
+        return pipeline, run.output_artifact["data"]
+
+
+def _build_discovery_export_lines(pipeline: Any, handoff: dict) -> List[str]:
+    use_case = handoff.get("use_case") if isinstance(handoff.get("use_case"), dict) else {}
+    requirements = handoff.get("requirements_snapshot") if isinstance(handoff.get("requirements_snapshot"), dict) else {}
+
+    lines: List[str] = []
+    lines.append(handoff.get("handoff_title") or "Discovery Handoff")
+    lines.append("")
+    lines.append(f"Generated: {datetime.utcnow().isoformat()} UTC")
+    lines.append(f"Pipeline ID: {pipeline.id}")
+    lines.append(f"Session ID: {pipeline.session_id}")
+    lines.append("")
+
+    summary = str(handoff.get("summary") or pipeline.initial_task or "").strip()
+    if summary:
+        lines.append("Summary")
+        lines.append(summary)
+        lines.append("")
+
+    if use_case:
+        lines.append("Use Case")
+        actor = str(use_case.get("actor") or "").strip()
+        need = str(use_case.get("need") or "").strip()
+        value = str(use_case.get("value") or "").strip()
+        if actor:
+            lines.append(f"Actor: {actor}")
+        if need:
+            lines.append(f"Need: {need}")
+        if value:
+            lines.append(f"Value: {value}")
+        lines.append("")
+
+    functional = _string_list(requirements.get("functional"))
+    non_functional = _string_list(requirements.get("non_functional"))
+    acceptance = _string_list(requirements.get("acceptance_criteria"))
+    open_decisions = _string_list(handoff.get("open_decisions"))
+    recommended_stack = _string_list(handoff.get("recommended_stack"))
+    next_phase_brief = str(handoff.get("next_phase_brief") or "").strip()
+
+    if functional:
+        lines.append("Functional Requirements")
+        lines.extend([f"- {item}" for item in functional])
+        lines.append("")
+
+    if non_functional:
+        lines.append("Non-Functional Requirements")
+        lines.extend([f"- {item}" for item in non_functional])
+        lines.append("")
+
+    if acceptance:
+        lines.append("Acceptance Criteria")
+        lines.extend([f"- {item}" for item in acceptance])
+        lines.append("")
+
+    if open_decisions:
+        lines.append("Open Decisions")
+        lines.extend([f"- {item}" for item in open_decisions])
+        lines.append("")
+
+    lines.append("Recommended Next Method")
+    lines.append(str(handoff.get("recommended_next_method") or "bmad"))
+    if recommended_stack:
+        lines.append(f"Recommended Stack: {' + '.join(recommended_stack)}")
+    lines.append("")
+
+    if next_phase_brief:
+        lines.append("Next Phase Brief")
+        lines.append(next_phase_brief)
+        lines.append("")
+
+    return lines
+
+
+def _build_discovery_docx_bytes(pipeline: Any, handoff: dict) -> bytes:
+    from docx import Document
+
+    lines = _build_discovery_export_lines(pipeline, handoff)
+    document = Document()
+    document.add_heading(lines[0], level=0)
+
+    section_titles = {
+        "Summary",
+        "Use Case",
+        "Functional Requirements",
+        "Non-Functional Requirements",
+        "Acceptance Criteria",
+        "Open Decisions",
+        "Recommended Next Method",
+        "Next Phase Brief",
+    }
+
+    for line in lines[1:]:
+        if not line:
+            document.add_paragraph("")
+        elif not line.startswith("- ") and line in section_titles:
+            document.add_heading(line, level=1)
+        elif line.startswith("- "):
+            document.add_paragraph(line[2:], style="List Bullet")
+        else:
+            document.add_paragraph(line)
+
+    buffer = BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def _build_discovery_pdf_bytes(pipeline: Any, handoff: dict) -> bytes:
+    from reportlab.lib.colors import HexColor
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+
+    lines = _build_discovery_export_lines(pipeline, handoff)
+    styles = getSampleStyleSheet()
+    title_style = styles["Title"]
+    heading_style = styles["Heading2"]
+    body_style = styles["BodyText"]
+    bullet_style = styles["BodyText"]
+    heading_style.textColor = HexColor("#0f4c5c")
+    body_style.leading = 15
+    bullet_style.leading = 15
+
+    section_titles = {
+        "Summary",
+        "Use Case",
+        "Functional Requirements",
+        "Non-Functional Requirements",
+        "Acceptance Criteria",
+        "Open Decisions",
+        "Recommended Next Method",
+        "Next Phase Brief",
+    }
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.7 * inch, bottomMargin=0.7 * inch)
+    story = [Paragraph(escape(lines[0]), title_style), Spacer(1, 0.2 * inch)]
+
+    for line in lines[1:]:
+        if not line:
+            story.append(Spacer(1, 0.12 * inch))
+        elif not line.startswith("- ") and line in section_titles:
+            story.append(Paragraph(escape(line), heading_style))
+            story.append(Spacer(1, 0.06 * inch))
+        elif line.startswith("- "):
+            story.append(Paragraph(f"&#8226; {escape(line[2:])}", bullet_style))
+        else:
+            story.append(Paragraph(escape(line).replace("\n", "<br/>"), body_style))
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
+@router.get("/{pipeline_id}/discovery-export", dependencies=[Depends(verify_api_key)])
+async def export_discovery_handoff(pipeline_id: str, format: str = "docx"):
+    pipeline, handoff = await _load_discovery_handoff(pipeline_id)
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(handoff.get("handoff_title") or "discovery-handoff").strip()).strip("-") or "discovery-handoff"
+    requested = (format or "docx").strip().lower()
+
+    if requested == "docx":
+        content = _build_discovery_docx_bytes(pipeline, handoff)
+        media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        suffix = "docx"
+    elif requested == "pdf":
+        content = _build_discovery_pdf_bytes(pipeline, handoff)
+        media_type = "application/pdf"
+        suffix = "pdf"
+    else:
+        raise HTTPException(status_code=400, detail="format must be 'docx' or 'pdf'")
+
+    filename = f"{safe_name}.{suffix}"
+    return StreamingResponse(
+        BytesIO(content),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{pipeline_id}/stream")

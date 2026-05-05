@@ -29,6 +29,16 @@ class TestListMethods:
         data = r.json()
         assert isinstance(data, (list, dict))
 
+    def test_list_methods_includes_discovery_and_retrospective(self, client):
+        """Built-in discovery and retrospective methods should be listed."""
+        r = client.get("/v1/methods/")
+        assert r.status_code == 200
+        payload = r.json()
+        methods = payload.get("data", payload if isinstance(payload, list) else [])
+        method_ids = {m.get("id") for m in methods if isinstance(m, dict)}
+        assert "discovery" in method_ids
+        assert "retrospective" in method_ids
+
 
 class TestActiveMethods:
     def test_get_active_method_returns_200_or_204(self, client):

@@ -105,6 +105,20 @@ interface SyncStatus {
   providers: Record<string, SyncProviderStatus>
 }
 
+interface RuntimeStatus {
+  openai_oauth: {
+    auth_ready: boolean
+    usable: boolean
+    has_openai_api_key: boolean
+    usability_summary: string
+  }
+  github_copilot: {
+    has_token: boolean
+    usable: boolean
+    validation_error: string | null
+  }
+}
+
 function formatSyncMode(mode?: string): string {
   if (!mode) return 'Catalog sync'
   return mode.replace(/_/g, ' ')
@@ -164,6 +178,7 @@ export default function ModelsPage() {
   const [revalidatingId, setRevalidatingId] = useState<string | null>(null)
   const validateTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null)
   const [syncing, setSyncing] = useState(false)
   const [syncResult, setSyncResult] = useState<SyncRunResult | null>(null)
   const [catalogValidating, setCatalogValidating] = useState(false)
@@ -237,6 +252,15 @@ export default function ModelsPage() {
     } catch { /* non-fatal */ }
   }
 
+  const fetchRuntimeStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/v1/api-keys/runtime-status`, { headers: AUTH_HEADERS })
+      if (res.ok) setRuntimeStatus(await res.json())
+    } catch {
+      // Non-fatal diagnostics
+    }
+  }
+
   const runSync = async () => {
     setSyncing(true)
     setSyncResult(null)
@@ -246,6 +270,7 @@ export default function ModelsPage() {
       setSyncResult(data)
       await fetchModels()
       await fetchSyncStatus()
+      await fetchRuntimeStatus()
     } catch (e: any) {
       setSyncResult({ ok: false, message: 'Sync failed — check backend logs' })
     } finally {
@@ -266,6 +291,7 @@ export default function ModelsPage() {
       setCatalogValidationResult(data)
       await fetchModels()
       await fetchSyncStatus()
+      await fetchRuntimeStatus()
       if ((data.needs_review || 0) > 0 || (data.failed || 0) > 0) {
         setShowReviewSection(true)
       }
@@ -289,6 +315,7 @@ export default function ModelsPage() {
       try {
         await fetchModels()
         await fetchSyncStatus()
+        await fetchRuntimeStatus()
       } catch (e) {
         console.error('Failed to fetch:', e)
       } finally {
@@ -706,6 +733,26 @@ export default function ModelsPage() {
 
   return (
     <div>
+      {runtimeStatus && (
+        <div className="mb-4 space-y-2">
+          {runtimeStatus.github_copilot.has_token && !runtimeStatus.github_copilot.usable && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              <strong>GitHub Copilot model visibility is degraded:</strong> live Copilot verification failed, so model discovery may be incomplete.
+              {runtimeStatus.github_copilot.validation_error && (
+                <div className="mt-1 text-xs text-amber-800">Detail: {runtimeStatus.github_copilot.validation_error}</div>
+              )}
+            </div>
+          )}
+          {runtimeStatus.openai_oauth.auth_ready && !runtimeStatus.openai_oauth.has_openai_api_key && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              <strong>OpenAI models not available:</strong> Codex CLI is authenticated (ChatGPT mode) but a separate{' '}
+              <code className="font-mono bg-amber-100 px-1 rounded">OPENAI_API_KEY</code> is needed to route OpenAI models through DevForgeAI.{' '}
+              <a href="/settings?tab=api-keys" className="underline font-medium">Add one in Settings ↗</a>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="sm:flex sm:items-center sm:justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Models</h1>

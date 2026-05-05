@@ -1,13 +1,19 @@
 'use client'
 
 import { getApiBase, TOKEN_KEY } from '@/lib/config'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 export default function GitHubCallbackPage() {
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading')
   const [message, setMessage] = useState('Finishing sign-in…')
+  // Prevent React StrictMode double-invocation from consuming the OAuth code twice.
+  // GitHub codes are single-use; the second POST would fail and flash an error.
+  const didExchange = useRef(false)
 
   useEffect(() => {
+    if (didExchange.current) return
+    didExchange.current = true
+
     const params = new URLSearchParams(window.location.search)
     const code = params.get('code')
     const state = params.get('state')

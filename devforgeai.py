@@ -14,7 +14,14 @@ Usage:
 
 import os
 import sys
+import io
 import signal
+
+# Force UTF-8 output on Windows (avoids UnicodeEncodeError with symbols like → ✓ ✗)
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 import subprocess
 import platform
 import time
@@ -107,6 +114,14 @@ def run_checked(cmd, cwd=None):
     if result.returncode != 0:
         print(c(RED, f"  ✗  Command failed: {' '.join(cmd)}"))
         sys.exit(result.returncode)
+
+
+def resolve_npm_command():
+    for candidate in ("npm.cmd", "npm.exe", "npm"):
+        npm = shutil.which(candidate)
+        if npm:
+            return npm
+    return None
 
 
 def read_pids():
@@ -232,13 +247,25 @@ def resolve_backend_port() -> int:
     return DEFAULT_BACKEND_PORT
 
 
-def wait_for_http(url: str, timeout_sec: int = 45) -> bool:
+def _read_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if raw.isdigit():
+        return int(raw)
+    return default
+
+
+def wait_for_http(url: str, timeout_sec: int = 120) -> bool:
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         try:
             with urllib.request.urlopen(url, timeout=4) as resp:
                 if 200 <= resp.status < 500:
                     return True
+        except urllib.error.HTTPError as exc:
+            # Treat 4xx as "service is reachable" so startup checks only fail
+            # when the server is unavailable or returns persistent 5xx errors.
+            if 400 <= exc.code < 500:
+                return True
         except (urllib.error.URLError, TimeoutError, ConnectionError):
             pass
         time.sleep(1)
@@ -273,23 +300,22 @@ def start_backend():
 
 
 def start_frontend(backend_port: int):
-    npm = shutil.which("npm")
+    npm = resolve_npm_command()
     if not npm:
         print(c(RED, "  ✗  npm not found. Install Node.js 18+ from https://nodejs.org/"))
         sys.exit(1)
     node_modules = FRONTEND_DIR / "node_modules"
     if not node_modules.exists():
         print(c(YELLOW, "  ⚠  node_modules missing. Running npm install..."))
-        subprocess.run("npm install", cwd=FRONTEND_DIR, shell=True, check=True)
+        subprocess.run([npm, "install"], cwd=FRONTEND_DIR, check=True)
 
     print(f"  {CYAN}→{RESET}  Starting frontend on :3001 ...")
     env = os.environ.copy()
     env["DEVFORGEAI_BACKEND_PORT"] = str(backend_port)
     env["NEXT_PUBLIC_API_URL"] = f"http://localhost:{backend_port}"
     proc = subprocess.Popen(
-        "npm run dev:clean",
+        [npm, "run", "dev:clean"],
         cwd=FRONTEND_DIR,
-        shell=True,
         env=env,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if IS_WIN else 0,
     )
@@ -325,10 +351,18 @@ def cmd_start(target=None):
 
     backend_ok = True
     frontend_ok = True
+    backend_timeout_sec = _read_int_env("DEVFORGEAI_BACKEND_START_TIMEOUT", 120)
+    frontend_timeout_sec = _read_int_env("DEVFORGEAI_FRONTEND_START_TIMEOUT", 90)
     if target in (None, "backend"):
-        backend_ok = wait_for_http(f"http://127.0.0.1:{backend_port}/health", timeout_sec=45)
+        backend_ok = wait_for_http(
+            f"http://127.0.0.1:{backend_port}/health",
+            timeout_sec=backend_timeout_sec,
+        )
     if target in (None, "frontend"):
-        frontend_ok = wait_for_http("http://127.0.0.1:3001", timeout_sec=75)
+        frontend_ok = wait_for_http(
+            "http://127.0.0.1:3001",
+            timeout_sec=frontend_timeout_sec,
+        )
 
     if not backend_ok or not frontend_ok:
         print(c(RED, "\n  ✗  Startup health check failed."))
@@ -437,7 +471,11 @@ def cmd_sync():
     run_checked([str(VENV_PYTHON), "-m", "pip", "install", "-r", "requirements.txt"], cwd=BACKEND_DIR)
 
     print(f"  {CYAN}→{RESET}  Updating frontend dependencies...")
-    run_checked(["npm", "install", "--loglevel=error"], cwd=FRONTEND_DIR)
+    npm = resolve_npm_command()
+    if not npm:
+        print(c(RED, "  ✗  npm not found. Install Node.js 18+ from https://nodejs.org/"))
+        sys.exit(1)
+    run_checked([npm, "install", "--loglevel=error"], cwd=FRONTEND_DIR)
 
     if ensure_backend_env_file():
         migrate_legacy_env_keys(BACKEND_ENV_FILE)

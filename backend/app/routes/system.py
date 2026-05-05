@@ -237,7 +237,11 @@ async def restart_server():
         import subprocess
 
         backend_dir = Path(__file__).parent.parent.parent
-        venv_python = backend_dir / "venv" / "Scripts" / "python.exe"
+        # Venv lives at repo root (.venv), with legacy backend/venv fallback.
+        repo_root = backend_dir.parent
+        venv_python = repo_root / ".venv" / "Scripts" / "python.exe"
+        if not venv_python.exists():
+            venv_python = backend_dir / "venv" / "Scripts" / "python.exe"
         python_exe = str(venv_python if venv_python.exists() else Path(sys.executable))
         backend_port = str(_backend_port())
         restart_script = str(Path(backend_dir) / "restart.py")

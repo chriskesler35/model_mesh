@@ -21,24 +21,48 @@ from app.services.codex_oauth import (
     codex_proxy_url_is_supported,
     write_codex_cli_auth,
 )
-from app.services.command_executor import get_first_github_token
-from app.services.github_copilot import verify_copilot_access
+from app.services.github_copilot import verify_copilot_access, get_copilot_auth_token_with_source, get_copilot_auth_token
+from app.services.provider_credentials import get_provider_api_key
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/api-keys", tags=["api-keys"], dependencies=[Depends(verify_api_key)])
 
-# The .env file we manage — prefer the root one, fall back to backend dir
-def _find_env_file() -> Path:
-    candidates = [
-        Path(__file__).parent.parent.parent.parent / ".env",  # G:\Model_Mesh\.env
-        Path(__file__).parent.parent.parent / ".env",         # G:\Model_Mesh\backend\.env
+def _env_candidates() -> list[Path]:
+    return [
+        Path(__file__).parent.parent.parent.parent / ".env",  # repo root
+        Path(__file__).parent.parent.parent / ".env",         # backend/.env
     ]
-    for p in candidates:
+
+
+# Canonical file for response metadata and first-write bootstrap.
+def _find_env_file() -> Path:
+    for p in _env_candidates():
         if p.exists():
             return p
-    # Default to root location even if it doesn't exist yet
-    return candidates[0]
+    return _env_candidates()[0]
+
+
+def _existing_env_files() -> list[Path]:
+    existing = [p for p in _env_candidates() if p.exists()]
+    return existing or [_find_env_file()]
+
+
+def _read_env_merged() -> dict[str, str]:
+    """Return merged env values from all known .env files.
+
+    Precedence: backend/.env overrides root .env when both define the same key,
+    which mirrors how local backend launches typically resolve settings.
+    """
+    merged: dict[str, str] = {}
+    for path in _env_candidates():
+        merged.update(_read_env_file(path))
+    return merged
+
+
+def _write_env_key_all(key: str, value: str) -> None:
+    for path in _existing_env_files():
+        _write_env_key(path, key, value)
 
 # Keys we expose (display name → env var name)
 MANAGED_KEYS = {
@@ -47,12 +71,16 @@ MANAGED_KEYS = {
     "gemini":     "GEMINI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "openai":     "OPENAI_API_KEY",
-    "github-copilot": "GITHUB_TOKEN",
+    "github-copilot": "GITHUB_COPILOT_TOKEN",
+    "codex-proxy": "CODEX_OAUTH_PROXY_BASE_URL",
     "openai-oauth": "OPENAI_OAUTH_ACCESS_TOKEN",
     # Telegram is managed in Settings → Remote, not here
 }
 
+CONFIG_ONLY_KEYS = {"codex-proxy"}
+
 MODEL_PROVIDER_ALIASES = {
+    "codex-proxy": "openai-codex",
     "openai-oauth": "openai-codex",
 }
 
@@ -154,30 +182,43 @@ def _get_runtime_credential_status() -> dict:
     configuration_issue = get_codex_proxy_configuration_issue()
     auth_ready = bool(access_token or refresh_token or codex_cli_logged_in)
     proxy_env_override = bool(os.environ.get("CODEX_OAUTH_PROXY_BASE_URL"))
+    has_openai_api_key = bool(get_provider_api_key("openai"))
 
-    if auth_ready and proxy_reachable and proxy_url_supported:
+    proxy_usable = auth_ready and proxy_reachable and proxy_url_supported
+    # OpenAI API key path is always usable independently of the OAuth proxy
+    overall_usable = proxy_usable or has_openai_api_key
+
+    if has_openai_api_key:
+        usability_summary = "OpenAI API key is configured — OpenAI and Codex models are available."
+        recommended_action = None
+    elif proxy_usable:
         usability_summary = "Authentication and an OpenAI-compatible HTTP proxy are both ready."
         recommended_action = None
     elif configuration_issue:
-        usability_summary = configuration_issue
+        usability_summary = (
+            "Codex CLI is authenticated (ChatGPT mode), but its app-server does not expose an HTTP API. "
+            "The ChatGPT OAuth token cannot be used directly as an OpenAI API key."
+        )
         recommended_action = (
-            "Set CODEX_OAUTH_PROXY_BASE_URL to an OpenAI-compatible HTTP proxy bridge, "
-            "or set OPENAI_API_KEY for the OpenAI Codex provider."
+            "Add an OPENAI_API_KEY (sk-…) from platform.openai.com/api-keys to the OpenAI provider. "
+            "Alternatively, set CODEX_OAUTH_PROXY_BASE_URL to a custom OpenAI-compatible HTTP bridge."
         )
     elif auth_ready:
         usability_summary = (
-            "Authentication is present, but no OpenAI-compatible HTTP proxy is reachable for OpenAI Codex requests."
+            "Codex CLI is authenticated, but no OpenAI API key or compatible HTTP proxy is configured. "
+            "The ChatGPT OAuth token works for the standalone codex CLI tool only."
         )
         recommended_action = (
-            "Start or configure a compatible HTTP proxy at CODEX_OAUTH_PROXY_BASE_URL, "
-            "or use OPENAI_API_KEY instead."
+            "Add an OPENAI_API_KEY (sk-…) from platform.openai.com/api-keys to enable OpenAI models in DevForgeAI."
         )
     else:
-        usability_summary = "Codex needs a CLI/OAuth login and an OpenAI-compatible HTTP proxy or direct OpenAI API key."
-        recommended_action = "Launch Codex CLI login, then configure a compatible HTTP proxy or add OPENAI_API_KEY."
+        usability_summary = (
+            "No OpenAI credentials are configured. "
+            "Add an OPENAI_API_KEY from platform.openai.com/api-keys, or install and log in to the Codex CLI."
+        )
+        recommended_action = "Set OPENAI_API_KEY in the OpenAI provider section, or install the Codex CLI and log in."
 
-    env_github_token = (os.environ.get("GITHUB_TOKEN") or "").strip()
-    github_token = env_github_token or get_first_github_token()
+    github_token, github_source = get_copilot_auth_token_with_source()
     collab_user_count = _get_collaboration_user_token_count()
 
     return {
@@ -197,7 +238,8 @@ def _get_runtime_credential_status() -> dict:
             "using_default_proxy_url": is_default_codex_proxy_base_url(),
             "configuration_issue": configuration_issue,
             "auth_ready": auth_ready,
-            "usable": auth_ready and proxy_reachable and proxy_url_supported,
+            "has_openai_api_key": has_openai_api_key,
+            "usable": overall_usable,
             "usability_summary": usability_summary,
             "recommended_action": recommended_action,
         },
@@ -205,7 +247,7 @@ def _get_runtime_credential_status() -> dict:
             "provider": "github-copilot",
             "has_token": bool(github_token),
             "masked_token": _mask(github_token),
-            "source": "env" if env_github_token else ("collaboration_user" if github_token else "none"),
+            "source": github_source,
             "usable": False,
             "collaboration_user_count": collab_user_count,
             "oauth_configured": bool(os.environ.get("GITHUB_CLIENT_ID") and os.environ.get("GITHUB_CLIENT_SECRET")),
@@ -243,7 +285,7 @@ class SetKeyRequest(BaseModel):
 async def list_api_keys():
     """List all managed API keys (masked)."""
     env_path = _find_env_file()
-    env_data = _read_env_file(env_path)
+    env_data = _read_env_merged()
 
     result = []
     for provider, env_var in MANAGED_KEYS.items():
@@ -266,12 +308,18 @@ async def list_api_keys():
 async def runtime_status():
     """Return live usability details for OAuth-backed provider credentials."""
     status = _get_runtime_credential_status()
-    github_token = (os.environ.get("GITHUB_TOKEN") or get_first_github_token() or "").strip()
+    github_token = (get_copilot_auth_token() or "").strip()
     if github_token:
         live_verified, validation_error = await verify_copilot_access(github_token)
         status["github_copilot"]["live_verified"] = live_verified
         status["github_copilot"]["validation_error"] = validation_error
         status["github_copilot"]["usable"] = live_verified
+        # Check if the token has the copilot scope by trying the session token exchange.
+        # If it returns a different (longer) token it means the exchange succeeded.
+        from app.services.github_copilot import exchange_for_copilot_token
+        session_token = await exchange_for_copilot_token(github_token)
+        has_copilot_scope = bool(session_token and session_token != github_token)
+        status["github_copilot"]["has_copilot_scope"] = has_copilot_scope
     return status
 
 
@@ -324,9 +372,11 @@ async def set_api_key(provider: str, body: SetKeyRequest):
     value = body.value.strip()
     if not value:
         raise HTTPException(status_code=400, detail="Key value cannot be empty")
+    if provider == "codex-proxy" and not re.match(r"^https?://", value, re.IGNORECASE):
+        raise HTTPException(status_code=400, detail="Codex proxy URL must start with http:// or https://")
 
     env_path = _find_env_file()
-    _write_env_key(env_path, env_var, value)
+    _write_env_key_all(env_var, value)
 
     # Hot-reload into os.environ immediately
     os.environ[env_var] = value
@@ -337,10 +387,10 @@ async def set_api_key(provider: str, body: SetKeyRequest):
     # If gemini key updated, also sync google (and vice versa) so both names work
     if provider == "gemini" and not os.environ.get("GOOGLE_API_KEY"):
         os.environ["GOOGLE_API_KEY"] = value
-        _write_env_key(env_path, "GOOGLE_API_KEY", value)
+        _write_env_key_all("GOOGLE_API_KEY", value)
     elif provider == "google":
         os.environ["GEMINI_API_KEY"] = value
-        _write_env_key(env_path, "GEMINI_API_KEY", value)
+        _write_env_key_all("GEMINI_API_KEY", value)
 
     # Hot-reload Telegram bot config immediately (no restart needed)
     if provider == "telegram_bot_token":
@@ -373,6 +423,7 @@ async def set_api_key(provider: str, body: SetKeyRequest):
         "openai": {"openai"},
         "openrouter": {"openrouter"},
         "github-copilot": {"github-copilot"},
+        "codex-proxy": {"openai-codex"},
         "openai-oauth": {"openai-codex"},
     }.get(provider, set())
 
@@ -424,6 +475,8 @@ async def get_clear_impact(provider: str):
     """
     if provider not in MANAGED_KEYS:
         raise HTTPException(status_code=404, detail=f"Unknown provider: {provider}")
+    if provider in CONFIG_ONLY_KEYS:
+        raise HTTPException(status_code=400, detail=f"{provider} is a runtime configuration key and cannot be provider-cleared")
 
     from sqlalchemy import select, or_
     from app.database import AsyncSessionLocal
@@ -525,6 +578,20 @@ async def clear_api_key(provider: str, body: Optional[ClearKeyRequest] = None):
     if provider not in MANAGED_KEYS:
         raise HTTPException(status_code=404, detail=f"Unknown provider: {provider}")
 
+    if provider in CONFIG_ONLY_KEYS:
+        env_var = MANAGED_KEYS[provider]
+        env_path = _find_env_file()
+        _write_env_key_all(env_var, "")
+        os.environ.pop(env_var, None)
+        logger.info(f"Runtime config key cleared for {provider}")
+        return {
+            "success": True,
+            "provider": provider,
+            "deactivated_models": 0,
+            "reassigned_personas": 0,
+            "reassigned_agents": 0,
+        }
+
     body = body or ClearKeyRequest()
 
     # Check impact — if there are references, require replacements OR force
@@ -615,7 +682,7 @@ async def clear_api_key(provider: str, body: Optional[ClearKeyRequest] = None):
     # Finally clear the key from env + .env file
     env_var = MANAGED_KEYS[provider]
     env_path = _find_env_file()
-    _write_env_key(env_path, env_var, "")
+    _write_env_key_all(env_var, "")
     os.environ.pop(env_var, None)
     if provider == "openai-oauth":
         write_codex_cli_auth(access_token="")

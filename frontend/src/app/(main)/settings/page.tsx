@@ -15,7 +15,8 @@ const PROVIDER_META: Record<string, { label: string; placeholder: string; link: 
   anthropic:  { label: 'Anthropic',  placeholder: 'sk-ant-…',        link: 'https://console.anthropic.com/settings/keys',    color: 'bg-orange-100 text-orange-800' },
   google:     { label: 'Google',     placeholder: 'AIzaSy…',         link: 'https://aistudio.google.com/app/apikey',          color: 'bg-blue-100 text-blue-800' },
   gemini:     { label: 'Gemini',     placeholder: 'AIzaSy…',         link: 'https://aistudio.google.com/app/apikey',          color: 'bg-blue-100 text-blue-800' },
-  'github-copilot': { label: 'GitHub Copilot OAuth', placeholder: 'gho_… or github_pat_…', link: 'https://github.com/settings/tokens', color: 'bg-slate-100 text-slate-800' },
+  'github-copilot': { label: 'GitHub Copilot Token', placeholder: 'Paste Copilot-compatible bearer token…', link: 'https://github.com/features/copilot', color: 'bg-slate-100 text-slate-800' },
+  'codex-proxy': { label: 'Codex Proxy URL', placeholder: 'http://127.0.0.1:10531/v1', link: '', color: 'bg-emerald-100 text-emerald-800' },
   openrouter: { label: 'OpenRouter', placeholder: 'sk-or-v1-…',      link: 'https://openrouter.ai/keys',                      color: 'bg-purple-100 text-purple-800' },
   openai:     { label: 'OpenAI',     placeholder: 'sk-…',            link: 'https://platform.openai.com/api-keys',            color: 'bg-green-100 text-green-800' },
   'openai-oauth': { label: 'OpenAI OAuth', placeholder: 'Paste Codex/ChatGPT OAuth access token…', link: '', color: 'bg-emerald-100 text-emerald-800' },
@@ -54,6 +55,7 @@ interface RuntimeCredentialStatus {
     using_default_proxy_url: boolean
     configuration_issue: string | null
     auth_ready: boolean
+    has_openai_api_key: boolean
     usable: boolean
     usability_summary: string
     recommended_action: string | null
@@ -62,12 +64,13 @@ interface RuntimeCredentialStatus {
     provider: string
     has_token: boolean
     masked_token: string | null
-    source: 'env' | 'collaboration_user' | 'none'
+    source: 'env_github_copilot_token' | 'env_github_token' | 'collaboration_user' | 'none'
     usable: boolean
     collaboration_user_count: number
     oauth_configured: boolean
     live_verified: boolean
     validation_error: string | null
+    has_copilot_scope: boolean | null
   }
 }
 
@@ -75,11 +78,17 @@ function getCodexRuntimeBadge(status: RuntimeCredentialStatus['openai_oauth']): 
   label: string
   className: string
 } {
-  if (status.usable) {
-    return { label: 'Usable', className: 'bg-emerald-100 text-emerald-800' }
+  if (status.has_openai_api_key) {
+    return { label: 'API key ready', className: 'bg-emerald-100 text-emerald-800' }
   }
-  if (status.codex_cli_logged_in || status.auth_ready) {
-    return { label: 'CLI connected', className: 'bg-blue-100 text-blue-800' }
+  if (status.usable) {
+    return { label: 'Proxy ready', className: 'bg-emerald-100 text-emerald-800' }
+  }
+  if (status.codex_cli_logged_in) {
+    return { label: 'CLI only (needs API key)', className: 'bg-amber-100 text-amber-800' }
+  }
+  if (status.auth_ready) {
+    return { label: 'Auth present', className: 'bg-blue-100 text-blue-800' }
   }
   return { label: 'Needs setup', className: 'bg-amber-100 text-amber-800' }
 }
@@ -274,13 +283,24 @@ function ApiKeysTab() {
   const connectGitHubOAuth = async () => {
     try {
       const res = await fetch(`${API_BASE}/v1/auth/github/authorize?origin=${encodeURIComponent(window.location.origin)}`)
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const { authorize_url, state } = await res.json()
+      const payload = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        const detail = payload?.detail || `HTTP ${res.status}`
+        const hint = res.status === 503
+          ? ' Backend OAuth is not configured. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in backend/.env, then restart DevForgeAI.'
+          : ''
+        throw new Error(`${detail}${hint}`)
+      }
+
+      const { authorize_url, state } = payload
+      if (!authorize_url || !state) {
+        throw new Error('GitHub OAuth response was missing authorize_url/state')
+      }
       sessionStorage.setItem('github_oauth_state', state)
       sessionStorage.setItem('github_oauth_redirect', '/settings?tab=api-keys')
       window.location.href = authorize_url
     } catch (e: any) {
-      addToast({ type: 'error', title: 'GitHub OAuth failed', message: e.message || 'Could not start GitHub sign-in', autoClose: 4000 })
+      addToast({ type: 'error', title: 'GitHub OAuth failed', message: e.message || 'Could not start GitHub sign-in', autoClose: 7000 })
     }
   }
 
@@ -330,17 +350,32 @@ function ApiKeysTab() {
         (no copy/paste needed). OpenRouter proxies GPT-4, Claude, Llama, and many more models through one connection.
       </div>
       <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 text-sm text-slate-700">
-        <strong>OAuth-backed providers</strong> — GitHub Copilot uses a GitHub OAuth or PAT token, and OpenAI OAuth
-        seeds the local Codex auth file used by the OAuth proxy. These are separate from normal API keys.
+        <strong>OAuth-backed providers</strong> — GitHub Copilot uses a GitHub OAuth or PAT token.
+        The <em>OpenAI Codex OAuth</em> row shows the Codex CLI status (for the standalone <code className="font-mono">codex</code> agent tool).
+        To route OpenAI/Codex models through DevForgeAI, set an <code className="font-mono">OPENAI_API_KEY</code> in the <strong>OpenAI</strong> row above — the ChatGPT OAuth token used by the CLI is a separate credential that cannot be used as an OpenAI API key.
       </div>
+
+      {runtimeStatus?.github_copilot.has_token && !runtimeStatus.github_copilot.usable && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <strong>Copilot visibility warning:</strong> A token is present, but live Copilot verification failed. Model discovery may be incomplete until a Copilot-compatible bearer token is configured.
+        </div>
+      )}
+
+      {runtimeStatus?.openai_oauth.auth_ready && !runtimeStatus.openai_oauth.has_openai_api_key && !runtimeStatus.openai_oauth.proxy_reachable && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <strong>OpenAI models not available:</strong> Codex CLI is authenticated in ChatGPT mode, but that token cannot be used as an OpenAI API key.
+          To enable OpenAI/Codex models in DevForgeAI, add a real <code className="font-mono bg-amber-100 px-1 rounded">OPENAI_API_KEY</code> (sk-…) to the <strong>OpenAI</strong> provider below, or get one at{' '}
+          <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer" className="underline font-medium">platform.openai.com/api-keys ↗</a>.
+        </div>
+      )}
 
       {runtimeStatus && (
         <div className="grid gap-4 lg:grid-cols-2">
-          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+          <div className={`rounded-lg border p-4 text-sm ${runtimeStatus.openai_oauth.has_openai_api_key ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-slate-200 bg-slate-50 text-slate-900'}`}>
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="font-semibold">OpenAI Codex Runtime</p>
-                <p className="mt-1 text-emerald-800/80">
+                <p className="font-semibold">OpenAI / Codex Runtime</p>
+                <p className={`mt-1 text-sm ${runtimeStatus.openai_oauth.has_openai_api_key ? 'text-emerald-800/80' : 'text-slate-600'}`}>
                   {runtimeStatus.openai_oauth.usability_summary}
                 </p>
               </div>
@@ -348,29 +383,39 @@ function ApiKeysTab() {
                 {codexRuntimeBadge?.label || 'Needs setup'}
               </span>
             </div>
-            <div className="mt-3 space-y-1 text-xs text-emerald-900/90">
-              <div>Access token: {runtimeStatus.openai_oauth.has_access_token ? (runtimeStatus.openai_oauth.masked_access_token || 'present') : 'missing'}</div>
-              <div>Refresh token: {runtimeStatus.openai_oauth.has_refresh_token ? 'present' : 'missing'}</div>
-              <div>Codex CLI: {runtimeStatus.openai_oauth.codex_cli_installed ? (runtimeStatus.openai_oauth.codex_cli_logged_in ? 'installed and logged in' : 'installed but not logged in') : 'not installed'}</div>
-              <div>Proxy: {runtimeStatus.openai_oauth.proxy_reachable ? `online at ${runtimeStatus.openai_oauth.proxy_base_url}` : `offline at ${runtimeStatus.openai_oauth.proxy_base_url}`}</div>
-              <div>Proxy URL: {runtimeStatus.openai_oauth.proxy_url_supported ? 'OpenAI-compatible http(s)' : 'unsupported transport'}</div>
-              <div>Proxy source: {runtimeStatus.openai_oauth.proxy_env_override ? 'CODEX_OAUTH_PROXY_BASE_URL override' : 'default built-in assumption'}</div>
-              <div>Auth file: {runtimeStatus.openai_oauth.auth_file}</div>
-              {runtimeStatus.openai_oauth.codex_cli_status && (
-                <div className="text-[11px] text-emerald-900/70">CLI status: {runtimeStatus.openai_oauth.codex_cli_status}</div>
+            <div className="mt-3 space-y-1 text-xs text-slate-700">
+              <div><span className={runtimeStatus.openai_oauth.has_openai_api_key ? 'text-emerald-700 font-medium' : 'text-red-600 font-medium'}>
+                {runtimeStatus.openai_oauth.has_openai_api_key ? '✓' : '✗'} OpenAI API key (OPENAI_API_KEY):
+              </span> {runtimeStatus.openai_oauth.has_openai_api_key ? 'set — model routing enabled' : 'not set — OpenAI models unavailable'}</div>
+              <div>Codex CLI: {runtimeStatus.openai_oauth.codex_cli_installed
+                ? (runtimeStatus.openai_oauth.codex_cli_logged_in
+                  ? <span className="text-blue-700">installed and logged in <span className="text-slate-500 font-normal">(ChatGPT mode — for standalone codex agent only)</span></span>
+                  : 'installed but not logged in')
+                : 'not installed'}</div>
+              {runtimeStatus.openai_oauth.codex_cli_logged_in && !runtimeStatus.openai_oauth.has_openai_api_key && (
+                <div className="text-amber-700 font-medium">⚠ ChatGPT OAuth token ≠ OpenAI API key. Set OPENAI_API_KEY separately for DevForgeAI.</div>
               )}
-              {runtimeStatus.openai_oauth.configuration_issue && (
-                <div className="text-[11px] text-amber-800">Issue: {runtimeStatus.openai_oauth.configuration_issue}</div>
+              {runtimeStatus.openai_oauth.proxy_env_override && (
+                <div>Proxy: {runtimeStatus.openai_oauth.proxy_reachable ? `online at ${runtimeStatus.openai_oauth.proxy_base_url}` : `offline at ${runtimeStatus.openai_oauth.proxy_base_url}`}</div>
               )}
               {runtimeStatus.openai_oauth.recommended_action && (
-                <div className="text-[11px] text-emerald-900/70">Next step: {runtimeStatus.openai_oauth.recommended_action}</div>
+                <div className="text-[11px] text-amber-800 mt-1">Next step: {runtimeStatus.openai_oauth.recommended_action}</div>
               )}
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
+              {!runtimeStatus.openai_oauth.has_openai_api_key && (
+                <a
+                  href="https://platform.openai.com/api-keys"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs px-2 py-1 rounded border border-blue-300 hover:bg-blue-50 text-blue-700 font-medium">
+                  Get OpenAI API Key ↗
+                </a>
+              )}
               <button
                 onClick={launchCodexCliLogin}
-                className="text-xs px-2 py-1 rounded border border-emerald-300 hover:bg-emerald-100 text-emerald-800 font-medium">
-                {runtimeStatus.openai_oauth.codex_cli_logged_in ? 'Reconnect Codex CLI' : 'Launch Codex CLI Login'}
+                className="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100 text-slate-700">
+                {runtimeStatus.openai_oauth.codex_cli_logged_in ? 'Reconnect Codex CLI (standalone)' : 'Codex CLI Login (standalone tool)'}
               </button>
             </div>
           </div>
@@ -393,7 +438,15 @@ function ApiKeysTab() {
             </div>
             <div className="mt-3 space-y-1 text-xs text-slate-700">
               <div>Token: {runtimeStatus.github_copilot.has_token ? (runtimeStatus.github_copilot.masked_token || 'present') : 'missing'}</div>
-              <div>Source: {runtimeStatus.github_copilot.source === 'collaboration_user' ? 'Collaboration user token' : runtimeStatus.github_copilot.source === 'env' ? 'Environment / API Keys tab' : 'None'}</div>
+              <div>Source: {
+                runtimeStatus.github_copilot.source === 'collaboration_user'
+                  ? 'Collaboration user token'
+                  : runtimeStatus.github_copilot.source === 'env_github_copilot_token'
+                  ? 'GITHUB_COPILOT_TOKEN'
+                  : runtimeStatus.github_copilot.source === 'env_github_token'
+                  ? 'GITHUB_TOKEN'
+                  : 'None'
+              }</div>
               <div>Users with GitHub token: {runtimeStatus.github_copilot.collaboration_user_count}</div>
               <div>OAuth app: {runtimeStatus.github_copilot.oauth_configured ? 'configured' : 'not configured'}</div>
               <div>Live probe: {runtimeStatus.github_copilot.live_verified ? 'passed' : 'not verified'}</div>
@@ -401,6 +454,11 @@ function ApiKeysTab() {
                 <div className="text-[11px] text-slate-600">Probe detail: {runtimeStatus.github_copilot.validation_error}</div>
               )}
             </div>
+            {runtimeStatus.github_copilot.has_token && runtimeStatus.github_copilot.has_copilot_scope === false && (
+              <div className="mt-3 rounded-md bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">
+                <strong>Limited model access:</strong> Your GitHub token is missing the <code>copilot</code> scope, so only basic GPT models are available. Click <strong>Reconnect GitHub OAuth</strong> below to re-authorize and unlock the full catalog (Claude, Gemini, o3, etc.).
+              </div>
+            )}
             <div className="mt-3 flex flex-wrap gap-2">
               <button
                 onClick={connectGitHubOAuth}
@@ -462,11 +520,21 @@ function ApiKeysTab() {
                     </button>
                   )}
                   {!isEditing && key.provider === 'openai-oauth' && (
-                    <button
-                      onClick={launchCodexCliLogin}
-                      className="text-xs px-2 py-1 rounded border border-emerald-300 hover:bg-emerald-50 text-emerald-700 font-medium">
-                      Launch Codex CLI Login
-                    </button>
+                    <>
+                      <a
+                        href="https://platform.openai.com/api-keys"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs px-2 py-1 rounded border border-blue-300 hover:bg-blue-50 text-blue-700 font-medium">
+                        Get OpenAI API Key ↗
+                      </a>
+                      <button
+                        onClick={launchCodexCliLogin}
+                        className="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50 text-slate-600"
+                        title="Authenticates the standalone codex CLI tool — not required for DevForgeAI model routing">
+                        Codex CLI Login (standalone)
+                      </button>
+                    </>
                   )}
                   {!isEditing && (
                     <button

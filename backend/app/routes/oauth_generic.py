@@ -24,6 +24,7 @@ from fastapi.responses import RedirectResponse
 
 from app.config import settings
 from app.services.oauth_providers import get_provider_registry, OAuthUserProfile
+from app.services.oauth_secrets import upsert_user_oauth_token
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +172,16 @@ async def oauth_callback(provider: str, code: str, state: str = ""):
         users[user_id] = user
 
     _save_users(users)
+
+    # Persist OAuth token in encrypted DB store (incremental migration path).
+    try:
+        await upsert_user_oauth_token(
+            user_id=str(user.get("id") or ""),
+            provider=provider,
+            token=profile.access_token or "",
+        )
+    except Exception as exc:
+        logger.warning("Could not persist encrypted OAuth token for %s: %s", provider, exc)
 
     # Issue JWT (identical to github_oauth.py flow)
     from app.routes.collaboration import _create_jwt

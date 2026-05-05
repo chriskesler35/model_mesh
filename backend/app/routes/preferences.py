@@ -10,6 +10,8 @@ from pydantic import BaseModel
 from app.database import get_db
 from app.middleware.auth import verify_api_key
 from app.models.preference import Preference
+from app.models.model import Model as ModelORM
+from app.models.provider import Provider as ProviderORM
 
 logger = logging.getLogger(__name__)
 
@@ -141,60 +143,81 @@ async def detect_preferences(body: DetectRequest, db: AsyncSession = Depends(get
         for m in body.messages[-20:]  # last 20 messages max
     )
 
-    # Resolve model
-    model_id = body.model or "llama3.1:8b"
-    from app.models.model import Model as ModelORM
-    from app.models.provider import Provider as ProviderORM
+    # Resolve model candidates: requested/default first, then active models.
+    preferred_model_id = (body.model or "llama3.1:8b").strip()
+    candidate_rows = []
 
     async with AsyncSessionLocal() as lookup_db:
-        result = await lookup_db.execute(
-            select(ModelORM, ProviderORM)
-            .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
-            .where(ModelORM.model_id == model_id)
-            .limit(1)
-        )
-        row = result.first()
-        if not row:
-            # Fallback to first active model
+        if preferred_model_id:
             result = await lookup_db.execute(
                 select(ModelORM, ProviderORM)
                 .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
-                .where(ModelORM.is_active == True)
+                .where(ModelORM.model_id == preferred_model_id)
                 .limit(1)
             )
-            row = result.first()
+            preferred_row = result.first()
+            if preferred_row:
+                candidate_rows.append(preferred_row)
 
-    if not row:
+        # Add active models as fallbacks (excluding duplicates by model_id).
+        result = await lookup_db.execute(
+            select(ModelORM, ProviderORM)
+            .join(ProviderORM, ModelORM.provider_id == ProviderORM.id)
+            .where(ModelORM.is_active == True)
+            .order_by(ModelORM.updated_at.desc())
+            .limit(10)
+        )
+        seen_ids = {row[0].model_id for row in candidate_rows}
+        for row in result.all():
+            model_obj = row[0]
+            if model_obj.model_id in seen_ids:
+                continue
+            candidate_rows.append(row)
+            seen_ids.add(model_obj.model_id)
+
+    if not candidate_rows:
         raise HTTPException(status_code=500, detail="No model available for preference detection")
 
-    model_orm, provider_orm = row
-
     client = ModelClient()
-    try:
-        response = await client.call_model(
-            model=model_orm,
-            provider=provider_orm,
-            messages=[
-                {"role": "system", "content": DETECT_PROMPT + conv_text},
-                {"role": "user", "content": "Extract preferences from the conversation above. Return JSON array only."},
-            ],
-            stream=False,
-            temperature=0.1,
-            max_tokens=1000,
-        )
+    detected = []
+    last_error = None
+    used_model_id = None
 
-        raw = response.choices[0].message.content.strip()
-        # Parse JSON — handle markdown code blocks
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    for model_orm, provider_orm in candidate_rows:
+        try:
+            response = await client.call_model(
+                model=model_orm,
+                provider=provider_orm,
+                messages=[
+                    {"role": "system", "content": DETECT_PROMPT + conv_text},
+                    {"role": "user", "content": "Extract preferences from the conversation above. Return JSON array only."},
+                ],
+                stream=False,
+                temperature=0.1,
+                max_tokens=1000,
+            )
 
-        detected = json.loads(raw)
-        if not isinstance(detected, list):
-            detected = []
+            raw = (response.choices[0].message.content or "").strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
-    except Exception as e:
-        logger.error(f"Preference detection failed: {e}")
-        return {"detected": [], "saved": 0, "error": str(e)}
+            parsed = json.loads(raw) if raw else []
+            detected = parsed if isinstance(parsed, list) else []
+            used_model_id = model_orm.model_id
+            break
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                "Preference detection model failed (model=%s, provider=%s): %s",
+                getattr(model_orm, "model_id", "unknown"),
+                getattr(provider_orm, "name", "unknown"),
+                e,
+            )
+            continue
+
+    if used_model_id is None:
+        logger.error(f"Preference detection failed for all candidate models: {last_error}")
+        return {"detected": [], "saved": 0, "error": str(last_error) if last_error else "No usable model"}
 
     # Save new preferences (skip duplicates by key)
     existing = await db.execute(select(Preference.key))
@@ -225,4 +248,4 @@ async def detect_preferences(body: DetectRequest, db: AsyncSession = Depends(get
         results.append({**item, "status": "saved"})
 
     await db.commit()
-    return {"detected": results, "saved": saved}
+    return {"detected": results, "saved": saved, "model_used": used_model_id}

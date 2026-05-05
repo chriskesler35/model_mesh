@@ -27,8 +27,7 @@ from app.config import settings
 from app.middleware.auth import verify_api_key
 from app.services.codex_oauth import get_codex_proxy_api_key, get_codex_proxy_base_url, should_use_codex_oauth_proxy
 from app.services.provider_credentials import get_provider_api_key, has_provider_api_key
-from app.services.command_executor import get_first_github_token
-from app.services.github_copilot import COPILOT_API_BASE, get_copilot_headers
+from app.services.github_copilot import COPILOT_API_BASE, get_copilot_headers, get_copilot_auth_token, is_pat_rejection_error_text
 
 logger = logging.getLogger(__name__)
 
@@ -434,6 +433,13 @@ async def _fetch_openai_compatible_models(base_url: str, api_key: str, provider_
         headers.update(extra_headers)
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.get(f"{base_url.rstrip('/')}/models", headers=headers)
+        if (
+            provider_name == "github-copilot"
+            and response.status_code == 400
+            and is_pat_rejection_error_text(response.text)
+        ):
+            logger.warning("GitHub Copilot model discovery rejected unsupported token type")
+            return []
         response.raise_for_status()
         payload = response.json()
 
@@ -562,9 +568,15 @@ async def discover_provider_models(provider_name: str) -> tuple[list[dict[str, A
             return await _fetch_openai_compatible_models("https://api.openai.com/v1", api_key, "openai-codex"), "provider_api"
 
     if normalized == "github-copilot":
-        github_token = (get_first_github_token() or "").strip()
+        github_token = (get_copilot_auth_token() or "").strip()
         if github_token:
-            return await _fetch_openai_compatible_models(COPILOT_API_BASE, github_token, "github-copilot", extra_headers=get_copilot_headers()), "provider_api"
+            # Exchange for a Copilot session token to get the full model catalog
+            # (includes Claude, Gemini, o3, etc. when copilot OAuth scope is present).
+            # Falls back to the raw OAuth token if exchange fails.
+            from app.services.github_copilot import exchange_for_copilot_token
+            session_token = await exchange_for_copilot_token(github_token)
+            api_token = session_token or github_token
+            return await _fetch_openai_compatible_models(COPILOT_API_BASE, api_token, "github-copilot", extra_headers=get_copilot_headers()), "provider_api"
 
     fallback_models = [dict(model) for model in PROVIDER_DEFAULT_MODELS.get(normalized, [])]
     enriched_fallback = [_enrich_with_litellm_metadata(normalized, entry) for entry in fallback_models]
