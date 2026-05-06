@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getAuthToken, probeAndCacheApiBase } from '@/lib/config'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -46,7 +46,7 @@ const FRIENDLY_ERRORS: Array<[RegExp, string]> = [
   [/Source file not found/i,    'The file could not be found on the server after uploading. Please try again.'],
   [/unsupported.*format/i,      'This file format is not supported yet. Try a different format or file type.'],
   [/content too large/i,        `The file is too large. Maximum supported size is ${MAX_FILE_MB} MB.`],
-  [/HTTP 5/i,                   'Something went wrong on the server. Please try again in a moment.'],
+  [/Internal Server Error/i,    'Server error during conversion. Please retry, and if it continues ask your admin to check backend logs.'],
 ]
 
 function friendlyError(raw: string): string {
@@ -89,6 +89,13 @@ function estimatedTime(file: File, isVideo: boolean): string {
   return 'about 10–20 seconds'
 }
 
+type DependencyState = {
+  ready: boolean
+  ffmpeg: { ready: boolean; path?: string; error?: string | null }
+  pillow: { ready: boolean; error?: string | null }
+  heif: { ready: boolean; error?: string | null }
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function MediaConverterTab() {
@@ -101,6 +108,8 @@ export default function MediaConverterTab() {
   const [progressLabel, setProgressLabel] = useState('')
   const [resultFilename, setResultFilename] = useState<string | null>(null)
   const [error, setError] = useState<string>('')
+  const [dependencyState, setDependencyState] = useState<DependencyState | null>(null)
+  const [dependencyError, setDependencyError] = useState<string>('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const isGif = targetFormat === 'gif'
@@ -114,6 +123,36 @@ export default function MediaConverterTab() {
     selectedFile && selectedFile.size > MAX_FILE_BYTES
       ? `File is too large (${formatBytes(selectedFile.size)}). Maximum is ${MAX_FILE_MB} MB.`
       : null
+
+  useEffect(() => {
+    let cancelled = false
+
+    const loadDependencyState = async () => {
+      try {
+        const base = await probeAndCacheApiBase()
+        const response = await fetch(`${base}/v1/tools/convert_media/status`, {
+          headers: { Authorization: `Bearer ${getAuthToken()}` },
+        })
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`)
+        }
+        const payload = (await response.json()) as DependencyState
+        if (!cancelled) {
+          setDependencyState(payload)
+          setDependencyError('')
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setDependencyError(err?.message || 'Unable to check media conversion dependencies')
+        }
+      }
+    }
+
+    loadDependencyState()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const selectFile = (file?: File | null) => {
     if (!file) return
@@ -157,7 +196,14 @@ export default function MediaConverterTab() {
   }
 
   const onConvert = async () => {
-    if (!selectedFile || fileSizeError) return
+    if (!selectedFile) {
+      setError('Please choose a file before converting.')
+      return
+    }
+    if (fileSizeError) {
+      setError(fileSizeError)
+      return
+    }
 
     setIsSubmitting(true)
     setError('')
@@ -176,18 +222,46 @@ export default function MediaConverterTab() {
 
       setProgressLabel('Converting…')
 
-      const response = await fetch(`${base}/v1/tools/convert_media/upload`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${getAuthToken()}` },
-        body: formData,
-      })
+      const endpoints = [
+        `${base}/v1/tools/convert_media/upload`,
+        '/v1/tools/convert_media/upload',
+      ]
+
+      let response: Response | null = null
+      let lastError: Error | null = null
+      for (const endpoint of endpoints) {
+        try {
+          response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${getAuthToken()}` },
+            body: formData,
+          })
+          // If route doesn't exist on this base URL, try the next endpoint.
+          if (response.status === 404) continue
+          break
+        } catch (err: any) {
+          lastError = err instanceof Error ? err : new Error(String(err))
+        }
+      }
+
+      if (!response) {
+        throw new Error(lastError?.message || 'Unable to reach media conversion service')
+      }
 
       if (!response.ok) {
         let detail = `HTTP ${response.status}`
         try {
           const payload = await response.json()
           detail = payload?.detail || detail
-        } catch { /* non-JSON response — keep status code detail */ }
+        } catch {
+          // Some proxies/backends return plain text for errors.
+          try {
+            const text = (await response.text()).trim()
+            if (text) detail = text
+          } catch {
+            // keep default detail
+          }
+        }
         throw new Error(detail)
       }
 
@@ -217,6 +291,26 @@ export default function MediaConverterTab() {
         </p>
       </div>
 
+      {dependencyState && (
+        <div className={`rounded-xl border px-4 py-3 text-sm ${dependencyState.ready ? 'border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-900/20' : 'border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-900/20'}`}>
+          <p className={`font-medium ${dependencyState.ready ? 'text-emerald-800 dark:text-emerald-300' : 'text-amber-800 dark:text-amber-300'}`}>
+            {dependencyState.ready ? 'Media conversion backend is ready.' : 'Media conversion backend needs attention.'}
+          </p>
+          <p className={`mt-1 text-xs ${dependencyState.ready ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-700 dark:text-amber-400'}`}>
+            FFmpeg: {dependencyState.ffmpeg.ready ? `ready${dependencyState.ffmpeg.path ? ` at ${dependencyState.ffmpeg.path}` : ''}` : dependencyState.ffmpeg.error || 'not ready'}
+          </p>
+          <p className={`mt-1 text-xs ${dependencyState.heif.ready ? 'text-emerald-700 dark:text-emerald-400' : 'text-gray-600 dark:text-gray-400'}`}>
+            HEIC support: {dependencyState.heif.ready ? 'ready' : dependencyState.heif.error || 'optional dependency not available'}
+          </p>
+        </div>
+      )}
+
+      {dependencyError && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-900/20 px-4 py-3 text-sm text-amber-800 dark:text-amber-300">
+          Unable to confirm backend media dependencies. {dependencyError}
+        </div>
+      )}
+
       {/* Success state */}
       {resultFilename ? (
         <div className="rounded-xl border border-emerald-200 bg-emerald-50 dark:bg-emerald-900/20 dark:border-emerald-700 p-5 space-y-3">
@@ -233,6 +327,7 @@ export default function MediaConverterTab() {
             </div>
           </div>
           <button
+            type="button"
             onClick={reset}
             className="text-sm font-medium text-emerald-700 dark:text-emerald-400 underline hover:no-underline"
           >
@@ -305,6 +400,7 @@ export default function MediaConverterTab() {
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                 {availableFormats.map((fmt) => (
                   <button
+                    type="button"
                     key={fmt.value}
                     onClick={() => setTargetFormat(fmt.value)}
                     className={`text-left rounded-lg border px-3 py-2.5 transition-colors ${
@@ -361,6 +457,7 @@ export default function MediaConverterTab() {
           {/* Convert button */}
           <div className="flex items-center gap-4">
             <button
+              type="button"
               onClick={onConvert}
               disabled={isSubmitting || !selectedFile || !!fileSizeError}
               className="px-5 py-2.5 rounded-lg bg-orange-500 hover:bg-orange-600 text-white text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed transition-colors"

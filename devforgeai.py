@@ -383,29 +383,11 @@ def cmd_start(target=None):
         Backend   →  {CYAN}http://localhost:{backend_port}{RESET}
         API Docs  →  {CYAN}http://localhost:{backend_port}/docs{RESET}
 
-  Press {BOLD}Ctrl+C{RESET} to stop.
+  Use {BOLD}python devforgeai.py stop{RESET} to stop the dev servers.
 """)
 
-    def shutdown(sig=None, frame=None):
-        print(f"\n  {YELLOW}Shutting down...{RESET}")
-        for name, p in procs:
-            kill_pid(p.pid)
-            print(f"  {CYAN}→{RESET}  Stopped {name}")
-        PID_FILE.unlink(missing_ok=True)
-        release_start_lock()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, shutdown)
-    if not IS_WIN:
-        signal.signal(signal.SIGTERM, shutdown)
-
-    try:
-        for _, p in procs:
-            p.wait()
-    except KeyboardInterrupt:
-        shutdown()
-    finally:
-        release_start_lock()
+    release_start_lock()
+    return
 
 
 def cmd_stop():

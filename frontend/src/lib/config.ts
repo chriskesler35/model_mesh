@@ -13,7 +13,7 @@
  * the primary port without the capabilities or other routes.
  */
 
-const BACKEND_PORTS = ['19001']
+const BACKEND_PORTS = ['19001', '19000']
 const SESSION_KEY_DETECTED_BASE = 'devforge_detected_api_base'
 
 function trimTrailingSlash(url: string): string {

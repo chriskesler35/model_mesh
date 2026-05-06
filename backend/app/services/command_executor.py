@@ -11,6 +11,8 @@ import asyncio
 import logging
 import os
 import re
+import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, Dict
@@ -470,6 +472,84 @@ _IMAGE_TARGET_FORMATS = {
 }
 
 
+def get_media_conversion_status() -> dict:
+    """Report whether optional media conversion dependencies are available."""
+    ffmpeg_path = _resolve_ffmpeg_executable()
+    ffmpeg_ready = False
+    ffmpeg_error = None
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, "-version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**os.environ},
+        )
+        ffmpeg_ready = result.returncode == 0
+        if not ffmpeg_ready:
+            ffmpeg_error = (result.stderr or result.stdout or "ffmpeg returned a non-zero exit code").strip()
+    except FileNotFoundError:
+        ffmpeg_error = "ffmpeg executable was not found"
+    except Exception as exc:
+        ffmpeg_error = f"{type(exc).__name__}: {exc}"
+
+    pillow_ready = False
+    pillow_error = None
+    try:
+        from PIL import Image  # noqa: F401
+        pillow_ready = True
+    except Exception as exc:
+        pillow_error = f"{type(exc).__name__}: {exc}"
+
+    heif_ready = False
+    heif_error = None
+    try:
+        from pillow_heif import register_heif_opener
+        register_heif_opener()
+        heif_ready = True
+    except Exception as exc:
+        heif_error = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "ready": ffmpeg_ready and pillow_ready,
+        "ffmpeg": {
+            "ready": ffmpeg_ready,
+            "path": ffmpeg_path,
+            "error": ffmpeg_error,
+        },
+        "pillow": {
+            "ready": pillow_ready,
+            "error": pillow_error,
+        },
+        "heif": {
+            "ready": heif_ready,
+            "error": heif_error,
+        },
+    }
+
+
+def _resolve_ffmpeg_executable() -> str:
+    """Resolve ffmpeg path across local shells, WinGet installs, and containers."""
+    env_ffmpeg = os.environ.get("FFMPEG_PATH", "").strip()
+    if env_ffmpeg and Path(env_ffmpeg).exists():
+        return env_ffmpeg
+
+    ffmpeg_on_path = shutil.which("ffmpeg")
+    if ffmpeg_on_path:
+        return ffmpeg_on_path
+
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        if local_app_data:
+            winget_root = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
+            if winget_root.exists():
+                matches = sorted(winget_root.glob("Gyan.FFmpeg*/**/bin/ffmpeg.exe"))
+                if matches:
+                    return str(matches[-1])
+
+    return "ffmpeg"
+
+
 def _resolve_workspace_path(relative_path: str, workspace_root: Path) -> Path:
     """Resolve a relative path against the workspace root.
 
@@ -815,13 +895,46 @@ async def tool_convert_media(
             vf_parts.append(f"scale={width}:-1:flags=lanczos")
         vf = ",".join(vf_parts)
 
-        command = f'ffmpeg -y -i "{src}" -vf "{vf}" "{out}"'
-        exit_code, stdout, stderr, _ = await run_command(command, workspace_root, timeout_sec=600)
+        ffmpeg_executable = _resolve_ffmpeg_executable()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                ffmpeg_executable,
+                "-y", "-i", str(src), "-vf", vf, str(out),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(workspace_root),
+                env={**os.environ},
+            )
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=600)
+                exit_code = proc.returncode or 0
+                stdout = stdout_bytes.decode("utf-8", errors="replace")
+                stderr = stderr_bytes.decode("utf-8", errors="replace")
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                stdout = ""
+                stderr = "[ffmpeg killed after 600s timeout]"
+                exit_code = -1
+        except FileNotFoundError:
+            return {
+                "success": False,
+                "output": (
+                    f"ffmpeg not found at '{ffmpeg_executable}'. "
+                    "Install FFmpeg and ensure it is on your PATH (or set FFMPEG_PATH), then restart the backend."
+                ),
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "output": f"ffmpeg could not be launched from '{ffmpeg_executable}': {type(exc).__name__}: {exc}",
+            }
+
         if exit_code != 0:
             return {
                 "success": False,
                 "output": (
-                    "ffmpeg conversion failed. Ensure ffmpeg is installed and on PATH.\n"
+                    f"ffmpeg conversion failed (exit {exit_code}) using '{ffmpeg_executable}'.\n"
                     f"{stderr or stdout}"
                 )[:5000],
             }
@@ -839,13 +952,19 @@ async def tool_convert_media(
             "output": f"Unsupported image target format: {fmt}",
         }
 
+    media_status = get_media_conversion_status()
+    if not media_status["pillow"]["ready"]:
+        return {
+            "success": False,
+            "output": f"Image conversion requires Pillow. {media_status['pillow'].get('error') or ''}".strip(),
+        }
+
     try:
         from PIL import Image
         try:
             from pillow_heif import register_heif_opener
             register_heif_opener()
         except Exception:
-            # HEIC conversion will fail naturally below if HEIF support is unavailable.
             pass
 
         with Image.open(src) as img:

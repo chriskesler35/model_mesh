@@ -129,3 +129,22 @@ async def test_convert_media_upload_failure(monkeypatch):
 
     assert exc.value.status_code == 400
     assert exc.value.detail == "bad input"
+
+
+@pytest.mark.asyncio
+async def test_convert_media_status_reports_dependencies(monkeypatch):
+    monkeypatch.setattr(
+        tools_route,
+        "get_media_conversion_status",
+        lambda: {
+            "ready": True,
+            "ffmpeg": {"ready": True, "path": "C:/ffmpeg/bin/ffmpeg.exe", "error": None},
+            "pillow": {"ready": True, "error": None},
+            "heif": {"ready": False, "error": "optional"},
+        },
+    )
+
+    status = await tools_route.convert_media_status()
+
+    assert status["ready"] is True
+    assert status["ffmpeg"]["path"].endswith("ffmpeg.exe")

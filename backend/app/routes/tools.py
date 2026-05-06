@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import logging
 from uuid import uuid4
 from pathlib import Path
 from typing import Optional
@@ -15,7 +16,10 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from app.middleware.auth import verify_api_key
-from app.services.command_executor import tool_convert_media
+from app.services.command_executor import get_media_conversion_status, tool_convert_media
+
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -112,6 +116,12 @@ async def convert_media(request: ConvertMediaRequest) -> dict:
     return result
 
 
+@router.get("/convert_media/status")
+async def convert_media_status() -> dict:
+    """Return whether backend media conversion dependencies are available."""
+    return get_media_conversion_status()
+
+
 @router.post("/convert_media/upload")
 async def convert_media_upload(
     file: UploadFile = File(...),
@@ -134,14 +144,23 @@ async def convert_media_upload(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to read upload: {exc}") from exc
 
-    result = await tool_convert_media(
-        source_path=str(source_path),
-        target_format=target_format,
-        workspace_root=workspace_root,
-        output_path=str(output_path),
-        fps=fps,
-        width=width,
-    )
+    try:
+        result = await tool_convert_media(
+            source_path=str(source_path),
+            target_format=target_format,
+            workspace_root=workspace_root,
+            output_path=str(output_path),
+            fps=fps,
+            width=width,
+        )
+    except Exception as exc:
+        logger.exception("Unexpected convert_media_upload failure")
+        try:
+            source_path.unlink(missing_ok=True)
+            output_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail=f"Unexpected conversion failure: {exc}") from exc
 
     if not result.get("success"):
         try:
@@ -152,7 +171,17 @@ async def convert_media_upload(
         raise HTTPException(status_code=400, detail=result.get("output", "Conversion failed"))
 
     if not output_path.exists():
-        raise HTTPException(status_code=500, detail="Conversion completed but output file was not found")
+        logger.error(
+            "Conversion reported success but output file missing: source=%s target=%s output=%s result=%s",
+            source_path,
+            target_format,
+            output_path,
+            result,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="Conversion failed to produce an output file. Check server dependencies (ffmpeg/Pillow) and logs.",
+        )
 
     original_stem = Path(file.filename or "converted").stem or "converted"
     download_name = f"{original_stem}.{target_format.strip().lower().lstrip('.')}"
