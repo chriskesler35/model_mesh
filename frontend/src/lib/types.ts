@@ -131,3 +131,18 @@ export const AGENT_TOOLS = [
   'generate_image',
   'image_variation'
 ] as const
+
+export interface ConvertMediaRequest {
+  source_path: string;
+  target_format: string;
+  output_path?: string;
+  fps?: number;
+  width?: number;
+}
+
+export interface ConvertMediaResponse {
+  success: boolean;
+  output: string;
+  source_path?: string;
+  output_path?: string;
+}

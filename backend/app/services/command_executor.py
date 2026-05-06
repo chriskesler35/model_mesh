@@ -462,6 +462,13 @@ _MAX_FILE_READ_BYTES = 200 * 1024  # 200 KB cap for read_file
 _MAX_LOCAL_FILE_READ_BYTES = 512 * 1024  # 512 KB cap for read_local_file
 _MAX_LOCAL_FILE_WRITE_BYTES = 2 * 1024 * 1024  # 2 MB cap for write_local_file
 
+_VIDEO_EXTENSIONS = {
+    ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".wmv", ".flv"
+}
+_IMAGE_TARGET_FORMATS = {
+    "png", "jpg", "jpeg", "webp", "bmp", "tiff", "gif"
+}
+
 
 def _resolve_workspace_path(relative_path: str, workspace_root: Path) -> Path:
     """Resolve a relative path against the workspace root.
@@ -507,6 +514,18 @@ def _resolve_execution_cwd(
     if not resolved.is_dir():
         raise ValueError(f"working_directory is not a directory: {resolved}")
     return resolved
+
+
+def _resolve_local_or_workspace_path(path_value: str, workspace_root: Path) -> Path:
+    """Resolve path as absolute local path or workspace-relative path."""
+    raw = (path_value or "").strip()
+    if not raw:
+        raise ValueError("Path is required.")
+
+    candidate = Path(raw).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return _resolve_workspace_path(raw, workspace_root)
 
 
 async def tool_read_file(
@@ -745,6 +764,114 @@ async def tool_web_fetch(
         return {"success": False, "output": f"Fetch error: {exc}"}
 
 
+async def tool_convert_media(
+    source_path: str,
+    target_format: str,
+    workspace_root: Path,
+    *,
+    output_path: Optional[str] = None,
+    fps: int = 12,
+    width: Optional[int] = None,
+) -> dict:
+    """Convert images between formats or convert video files to GIF."""
+    try:
+        src = _resolve_local_or_workspace_path(source_path, workspace_root)
+    except ValueError as exc:
+        return {"success": False, "output": str(exc)}
+
+    if not src.exists() or not src.is_file():
+        return {"success": False, "output": f"Source file not found: {src}"}
+
+    fmt = (target_format or "").strip().lower().lstrip(".")
+    if not fmt:
+        return {"success": False, "output": "target_format is required."}
+
+    if output_path:
+        try:
+            out = _resolve_local_or_workspace_path(output_path, workspace_root)
+        except ValueError as exc:
+            return {"success": False, "output": str(exc)}
+    else:
+        out = src.with_suffix(f".{fmt}")
+
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        return {"success": False, "output": f"Failed to create output directory: {exc}"}
+
+    src_ext = src.suffix.lower()
+    is_video = src_ext in _VIDEO_EXTENSIONS
+
+    if is_video:
+        if fmt != "gif":
+            return {
+                "success": False,
+                "output": "Video conversion currently supports target_format='gif' only.",
+            }
+
+        gif_fps = fps if isinstance(fps, int) and fps > 0 else 12
+        vf_parts = [f"fps={gif_fps}"]
+        if isinstance(width, int) and width > 0:
+            vf_parts.append(f"scale={width}:-1:flags=lanczos")
+        vf = ",".join(vf_parts)
+
+        command = f'ffmpeg -y -i "{src}" -vf "{vf}" "{out}"'
+        exit_code, stdout, stderr, _ = await run_command(command, workspace_root, timeout_sec=600)
+        if exit_code != 0:
+            return {
+                "success": False,
+                "output": (
+                    "ffmpeg conversion failed. Ensure ffmpeg is installed and on PATH.\n"
+                    f"{stderr or stdout}"
+                )[:5000],
+            }
+
+        return {
+            "success": True,
+            "output": f"Converted video to GIF: {out}",
+            "source_path": str(src),
+            "output_path": str(out),
+        }
+
+    if fmt not in _IMAGE_TARGET_FORMATS:
+        return {
+            "success": False,
+            "output": f"Unsupported image target format: {fmt}",
+        }
+
+    try:
+        from PIL import Image
+        try:
+            from pillow_heif import register_heif_opener
+            register_heif_opener()
+        except Exception:
+            # HEIC conversion will fail naturally below if HEIF support is unavailable.
+            pass
+
+        with Image.open(src) as img:
+            save_kwargs = {}
+            if fmt in {"jpg", "jpeg"}:
+                if img.mode in ("RGBA", "LA", "P"):
+                    img = img.convert("RGB")
+                save_kwargs["quality"] = 92
+            img.save(out, format=fmt.upper(), **save_kwargs)
+    except Exception as exc:
+        return {
+            "success": False,
+            "output": (
+                "Image conversion failed. For HEIC sources, install pillow-heif. "
+                f"Details: {exc}"
+            )[:5000],
+        }
+
+    return {
+        "success": True,
+        "output": f"Converted image to .{fmt}: {out}",
+        "source_path": str(src),
+        "output_path": str(out),
+    }
+
+
 async def execute_tool_call(
     tool_name: str,
     arguments: dict,
@@ -831,6 +958,16 @@ async def execute_tool_call(
             method=arguments.get("method", "GET"),
             headers=arguments.get("headers"),
             body=arguments.get("body"),
+        )
+
+    if name == "convert_media":
+        return await tool_convert_media(
+            source_path=arguments.get("source_path", ""),
+            target_format=arguments.get("target_format", ""),
+            workspace_root=workspace_root,
+            output_path=arguments.get("output_path"),
+            fps=int(arguments.get("fps") or 12),
+            width=arguments.get("width"),
         )
 
     return {"success": False, "output": f"Unknown tool: {name}"}

@@ -2,6 +2,7 @@
 
 import { API_BASE, API_KEY, AUTH_HEADERS, getApiBase } from '@/lib/config'
 import VoiceMode, { VoiceModeToggle } from '@/components/VoiceMode'
+import MediaConverterModal from '@/components/MediaConverterModal'
 
 import { useState, useEffect, useRef, useCallback, Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
@@ -1632,6 +1633,7 @@ export default function ChatPage() {
     { cmd: '/theme',       hint: '',            desc: 'Toggle dark/light mode' },
     { cmd: '/clear',       hint: '',            desc: 'Clear chat display' },
     { cmd: '/settings',    hint: '',            desc: 'Open settings page' },
+    { cmd: '/convert',     hint: '',            desc: '🎞️ Convert image or video (HEIC→PNG, video→GIF…)' },
     // Built-in method shortcuts
     { cmd: '/method',      hint: '<name>',      desc: 'Activate a development method by name' },
     { cmd: '/standard',    hint: '',            desc: 'Switch to Standard assistant mode' },
@@ -1706,6 +1708,9 @@ export default function ChatPage() {
       }
       case '/settings':
         window.location.href = '/settings'
+        break
+      case '/convert':
+        setShowMediaConverter(true)
         break
       case '/image':
         if (arg) {
@@ -1860,6 +1865,7 @@ export default function ChatPage() {
   }, [activeConvId, messages, personas, models, dynamicMethodCmds, addToast, setUserExists])
 
   const [showImageGen, setShowImageGen] = useState(false)
+  const [showMediaConverter, setShowMediaConverter] = useState(false)
   const [imagePrompt, setImagePrompt] = useState('')
   const [generatingImage, setGeneratingImage] = useState(false)
   const [imageProvider, setImageProvider] = useState<'gemini-imagen' | 'comfyui-local'>('gemini-imagen')
@@ -2944,6 +2950,9 @@ export default function ChatPage() {
 
   return (
     <div className="flex h-full w-full overflow-hidden">
+
+      {/* Media converter modal — opened via /convert slash command */}
+      <MediaConverterModal open={showMediaConverter} onClose={() => setShowMediaConverter(false)} />
 
       {/* Identity wizard — first-run and /soul /identity /user commands */}
       {wizardMode && (

@@ -312,6 +312,56 @@ _WEB_FETCH_SCHEMA: dict[str, Any] = {
     },
 }
 
+_CONVERT_MEDIA_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "convert_media",
+        "description": (
+            "Convert local media files between common formats. "
+            "Supports image conversion (including HEIC when pillow-heif is installed) "
+            "and video-to-GIF conversion via ffmpeg."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "source_path": {
+                    "type": "string",
+                    "description": (
+                        "Input file path. Absolute path or workspace-relative path."
+                    ),
+                },
+                "output_path": {
+                    "type": "string",
+                    "description": (
+                        "Output file path. Absolute path or workspace-relative path. "
+                        "If omitted, output is created next to source using target_format."
+                    ),
+                },
+                "target_format": {
+                    "type": "string",
+                    "description": (
+                        "Target format extension, e.g. png, jpg, webp, gif."
+                    ),
+                },
+                "fps": {
+                    "type": "integer",
+                    "description": (
+                        "Optional FPS for video-to-GIF conversion. Default 12."
+                    ),
+                },
+                "width": {
+                    "type": "integer",
+                    "description": (
+                        "Optional output width for video-to-GIF conversion. "
+                        "Height is auto-scaled."
+                    ),
+                },
+            },
+            "required": ["source_path", "target_format"],
+        },
+    },
+}
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 # Ordered list of all available tools — this is the default set given to agents.
@@ -324,6 +374,7 @@ ALL_TOOLS: list[str] = [
     "run_shell",
     "install_package",
     "web_fetch",
+    "convert_media",
 ]
 
 # Map of tool name → OpenAI schema
@@ -336,6 +387,7 @@ ALL_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "run_shell": _RUN_SHELL_SCHEMA,
     "install_package": _INSTALL_PACKAGE_SCHEMA,
     "web_fetch": _WEB_FETCH_SCHEMA,
+    "convert_media": _CONVERT_MEDIA_SCHEMA,
 }
 
 # How each tool is described in the system prompt for text-fallback models
@@ -348,6 +400,10 @@ _TOOL_PROMPT_LINES: dict[str, str] = {
     "run_shell": "CMD: <command> [working_directory]  — run a shell command",
     "install_package": "INSTALL: <manager> <packages> [working_directory]  — install packages",
     "web_fetch": "FETCH: <url>  — fetch URL content",
+    "convert_media": (
+        "CONVERT_MEDIA: <source_path> <target_format> [output_path] [fps] [width]  — "
+        "convert images or video-to-gif"
+    ),
 }
 
 

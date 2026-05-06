@@ -198,6 +198,13 @@ class ApiClient {
   async deleteAgent(id: string): Promise<void> {
     await this.request(`/v1/agents/${id}`, { method: 'DELETE' })
   }
+
+  async convertMedia(data: import('./types').ConvertMediaRequest): Promise<import('./types').ConvertMediaResponse> {
+    return this.request('/v1/tools/convert_media', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    })
+  }
 }
 
 // Lazy singleton — getApiBase() is called on first use, not at import time

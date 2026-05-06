@@ -4,6 +4,7 @@ import { API_BASE, AUTH_HEADERS, probeAndCacheApiBase } from '@/lib/config'
 import PreferencesTab from '@/components/PreferencesTab'
 import ImageSettingsTab from '@/components/ImageSettingsTab'
 import VoiceAudioTab from '@/components/VoiceAudioTab'
+import MediaConverterTab from '@/components/MediaConverterTab'
 import { RemoteAccessTab } from './remote'
 import { useToast } from '@/app/ToastProvider'
 
@@ -1230,7 +1231,7 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true)
   const [profileSaving, setProfileSaving] = useState(false)
   const [profileSaved, setProfileSaved] = useState(false)
-  const [activeTab, setActiveTab] = useState<'identity' | 'profile' | 'memory' | 'preferences' | 'voice' | 'conversations' | 'apikeys' | 'remote' | 'images' | 'server' | 'budget'>('identity')
+  const [activeTab, setActiveTab] = useState<'identity' | 'profile' | 'memory' | 'preferences' | 'voice' | 'conversations' | 'apikeys' | 'remote' | 'images' | 'media' | 'server' | 'budget'>('identity')
   const [budgetLimit, setBudgetLimit] = useState<string>('')
   const [budgetSaving, setBudgetSaving] = useState(false)
   const [budgetSaved, setBudgetSaved] = useState(false)
@@ -1433,6 +1434,7 @@ export default function SettingsPage() {
             ['preferences', 'Preferences', 'border-indigo-500 text-indigo-600'],
             ['voice', '🎙️ Voice & Audio', 'border-violet-500 text-violet-600'],
             ['images', 'Image Generation', 'border-pink-500 text-pink-600'],
+            ['media', '🎞️ Media Converter', 'border-orange-500 text-orange-600'],
             ['conversations', 'Conversations', 'border-indigo-500 text-indigo-600'],
             ['apikeys', 'API Keys', 'border-indigo-500 text-indigo-600'],
             ['budget', '💰 Budget', 'border-green-500 text-green-600'],
@@ -1661,6 +1663,11 @@ export default function SettingsPage() {
       {/* Image Generation Tab */}
       {activeTab === 'images' && (
         <ImageSettingsTab />
+      )}
+
+      {/* Media Converter Tab */}
+      {activeTab === 'media' && (
+        <MediaConverterTab />
       )}
 
       {/* Budget Tab */}
