@@ -39,7 +39,10 @@ async def test_tool_convert_media_video_requires_gif_target(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_convert_media_route_success(monkeypatch):
+    captured = {}
+
     async def _fake_convert_media(**kwargs):
+        captured.update(kwargs)
         return {
             "success": True,
             "output": "Converted image to .png: C:/tmp/out.png",
@@ -53,12 +56,18 @@ async def test_convert_media_route_success(monkeypatch):
         source_path="C:/tmp/in.heic",
         target_format="png",
         output_path="C:/tmp/out.png",
+        image_width=900,
+        image_height=600,
+        image_scale_percent=50,
     )
 
     result = await tools_route.convert_media(req)
 
     assert result["success"] is True
     assert result["output_path"] == "C:/tmp/out.png"
+    assert captured["image_width"] == 900
+    assert captured["image_height"] == 600
+    assert captured["image_scale_percent"] == 50
 
 
 @pytest.mark.asyncio
@@ -85,7 +94,10 @@ async def test_convert_media_route_failure(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_convert_media_upload_success(monkeypatch, tmp_path: Path):
+    captured = {}
+
     async def _fake_convert_media(**kwargs):
+        captured.update(kwargs)
         output_file = Path(kwargs["output_path"])
         output_file.write_bytes(b"png-bytes")
         return {
@@ -102,10 +114,60 @@ async def test_convert_media_upload_success(monkeypatch, tmp_path: Path):
         target_format="png",
         fps=12,
         width=None,
+        image_width=800,
+        image_height=450,
+        image_scale_percent=25,
     )
 
     assert isinstance(response, FileResponse)
     assert response.filename == "photo.png"
+    assert captured["image_width"] == 800
+    assert captured["image_height"] == 450
+    assert captured["image_scale_percent"] == 25
+
+
+@pytest.mark.asyncio
+async def test_tool_convert_media_resizes_image_with_aspect_ratio(tmp_path: Path):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    src = tmp_path / "input.png"
+    out = tmp_path / "output.png"
+    Image.new("RGB", (120, 80), color=(20, 120, 220)).save(src)
+
+    result = await tool_convert_media(
+        source_path=str(src),
+        target_format="png",
+        workspace_root=tmp_path,
+        output_path=str(out),
+        image_width=60,
+    )
+
+    assert result["success"] is True
+    with Image.open(out) as resized:
+        assert resized.size == (60, 40)
+
+
+@pytest.mark.asyncio
+async def test_tool_convert_media_resizes_image_by_percent(tmp_path: Path):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    src = tmp_path / "input.png"
+    out = tmp_path / "scaled.png"
+    Image.new("RGB", (200, 100), color=(20, 120, 220)).save(src)
+
+    result = await tool_convert_media(
+        source_path=str(src),
+        target_format="png",
+        workspace_root=tmp_path,
+        output_path=str(out),
+        image_scale_percent=25,
+    )
+
+    assert result["success"] is True
+    with Image.open(out) as resized:
+        assert resized.size == (50, 25)
 
 
 @pytest.mark.asyncio

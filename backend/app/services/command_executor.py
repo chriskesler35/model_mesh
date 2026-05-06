@@ -852,6 +852,9 @@ async def tool_convert_media(
     output_path: Optional[str] = None,
     fps: int = 12,
     width: Optional[int] = None,
+    image_width: Optional[int] = None,
+    image_height: Optional[int] = None,
+    image_scale_percent: Optional[int] = None,
 ) -> dict:
     """Convert images between formats or convert video files to GIF."""
     try:
@@ -952,6 +955,24 @@ async def tool_convert_media(
             "output": f"Unsupported image target format: {fmt}",
         }
 
+    if image_width is not None and image_width <= 0:
+        return {
+            "success": False,
+            "output": "image_width must be a positive integer.",
+        }
+
+    if image_height is not None and image_height <= 0:
+        return {
+            "success": False,
+            "output": "image_height must be a positive integer.",
+        }
+
+    if image_scale_percent is not None and image_scale_percent <= 0:
+        return {
+            "success": False,
+            "output": "image_scale_percent must be a positive integer.",
+        }
+
     media_status = get_media_conversion_status()
     if not media_status["pillow"]["ready"]:
         return {
@@ -968,6 +989,31 @@ async def tool_convert_media(
             pass
 
         with Image.open(src) as img:
+            if image_width is not None or image_height is not None:
+                original_w, original_h = img.size
+                if image_width is not None and image_height is not None:
+                    target_w = image_width
+                    target_h = image_height
+                elif image_width is not None:
+                    target_w = image_width
+                    target_h = max(1, int(round((original_h * target_w) / max(1, original_w))))
+                else:
+                    target_h = image_height or original_h
+                    target_w = max(1, int(round((original_w * target_h) / max(1, original_h))))
+
+                resample = getattr(Image, "Resampling", Image).LANCZOS
+                if (target_w, target_h) != (original_w, original_h):
+                    img = img.resize((target_w, target_h), resample=resample)
+            elif image_scale_percent is not None:
+                original_w, original_h = img.size
+                scale = image_scale_percent / 100.0
+                target_w = max(1, int(round(original_w * scale)))
+                target_h = max(1, int(round(original_h * scale)))
+
+                resample = getattr(Image, "Resampling", Image).LANCZOS
+                if (target_w, target_h) != (original_w, original_h):
+                    img = img.resize((target_w, target_h), resample=resample)
+
             save_kwargs = {}
             if fmt in {"jpg", "jpeg"}:
                 if img.mode in ("RGBA", "LA", "P"):

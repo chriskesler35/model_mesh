@@ -6,6 +6,7 @@ import { getAuthToken, probeAndCacheApiBase } from '@/lib/config'
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type TargetFormat = 'png' | 'jpg' | 'jpeg' | 'webp' | 'bmp' | 'tiff' | 'gif'
+type ImageResizeMode = 'none' | 'pixels' | 'percent'
 
 interface FormatOption {
   value: TargetFormat
@@ -103,6 +104,10 @@ export default function MediaConverterTab() {
   const [targetFormat, setTargetFormat] = useState<TargetFormat>('png')
   const [fps, setFps] = useState('12')
   const [width, setWidth] = useState('')
+  const [imageWidth, setImageWidth] = useState('')
+  const [imageHeight, setImageHeight] = useState('')
+  const [imageResizeMode, setImageResizeMode] = useState<ImageResizeMode>('none')
+  const [imageScalePercent, setImageScalePercent] = useState('50')
   const [isDragging, setIsDragging] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [progressLabel, setProgressLabel] = useState('')
@@ -163,6 +168,10 @@ export default function MediaConverterTab() {
     }
     setSelectedFile(file)
     setTargetFormat(suggestFormat(file.name))
+    setImageResizeMode('none')
+    setImageWidth('')
+    setImageHeight('')
+    setImageScalePercent('50')
     setResultFilename(null)
     setError('')
   }
@@ -218,6 +227,13 @@ export default function MediaConverterTab() {
       if (isGif) {
         formData.append('fps', String(Math.max(1, Number(fps) || 12)))
         if (width.trim()) formData.append('width', String(Math.max(1, Number(width) || 1)))
+      } else {
+        if (imageResizeMode === 'pixels') {
+          if (imageWidth.trim()) formData.append('image_width', String(Math.max(1, Number(imageWidth) || 1)))
+          if (imageHeight.trim()) formData.append('image_height', String(Math.max(1, Number(imageHeight) || 1)))
+        } else if (imageResizeMode === 'percent') {
+          formData.append('image_scale_percent', String(Math.max(1, Number(imageScalePercent) || 100)))
+        }
       }
 
       setProgressLabel('Converting…')
@@ -451,6 +467,117 @@ export default function MediaConverterTab() {
                   />
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* Image resize options */}
+          {selectedFile && !isVideo && !isGif && (
+            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/30 p-4 space-y-3">
+              <p className="text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide">Image Size Options</p>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setImageResizeMode('none')}
+                  className={`rounded-lg border px-3 py-2 text-xs font-medium transition-colors ${
+                    imageResizeMode === 'none'
+                      ? 'border-orange-400 bg-orange-50 dark:bg-orange-900/20'
+                      : 'border-gray-300 dark:border-gray-600 hover:border-orange-200'
+                  }`}
+                >
+                  Original size
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setImageResizeMode('pixels')}
+                  className={`rounded-lg border px-3 py-2 text-xs font-medium transition-colors ${
+                    imageResizeMode === 'pixels'
+                      ? 'border-orange-400 bg-orange-50 dark:bg-orange-900/20'
+                      : 'border-gray-300 dark:border-gray-600 hover:border-orange-200'
+                  }`}
+                >
+                  Custom pixels
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setImageResizeMode('percent')}
+                  className={`rounded-lg border px-3 py-2 text-xs font-medium transition-colors ${
+                    imageResizeMode === 'percent'
+                      ? 'border-orange-400 bg-orange-50 dark:bg-orange-900/20'
+                      : 'border-gray-300 dark:border-gray-600 hover:border-orange-200'
+                  }`}
+                >
+                  Percentage
+                </button>
+              </div>
+
+              {imageResizeMode === 'pixels' && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="block text-xs font-medium text-gray-700 dark:text-gray-300">
+                      Width in pixels
+                      <span className="ml-1 font-normal text-gray-400">Optional. Keeps aspect ratio if height is empty.</span>
+                    </label>
+                    <input
+                      value={imageWidth}
+                      onChange={(e) => setImageWidth(e.target.value)}
+                      type="number"
+                      min={1}
+                      placeholder="e.g. 1280"
+                      className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="block text-xs font-medium text-gray-700 dark:text-gray-300">
+                      Height in pixels
+                      <span className="ml-1 font-normal text-gray-400">Optional. Keeps aspect ratio if width is empty.</span>
+                    </label>
+                    <input
+                      value={imageHeight}
+                      onChange={(e) => setImageHeight(e.target.value)}
+                      type="number"
+                      min={1}
+                      placeholder="e.g. 720"
+                      className="w-full rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {imageResizeMode === 'percent' && (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap gap-2">
+                    {[25, 50, 75].map((pct) => (
+                      <button
+                        key={pct}
+                        type="button"
+                        onClick={() => setImageScalePercent(String(pct))}
+                        className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+                          Number(imageScalePercent) === pct
+                            ? 'border-orange-400 bg-orange-50 dark:bg-orange-900/20'
+                            : 'border-gray-300 dark:border-gray-600 hover:border-orange-200'
+                        }`}
+                      >
+                        {pct}%
+                      </button>
+                    ))}
+                  </div>
+                  <div className="space-y-1">
+                    <label className="block text-xs font-medium text-gray-700 dark:text-gray-300">
+                      Resize percentage
+                      <span className="ml-1 font-normal text-gray-400">100 keeps original size, lower values shrink.</span>
+                    </label>
+                    <input
+                      value={imageScalePercent}
+                      onChange={(e) => setImageScalePercent(e.target.value)}
+                      type="number"
+                      min={1}
+                      max={1000}
+                      placeholder="e.g. 50"
+                      className="w-full sm:w-48 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white px-3 py-2 text-sm"
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

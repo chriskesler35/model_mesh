@@ -46,6 +46,9 @@ class ConvertMediaRequest(BaseModel):
     output_path: Optional[str] = None
     fps: int = 12
     width: Optional[int] = None
+    image_width: Optional[int] = None
+    image_height: Optional[int] = None
+    image_scale_percent: Optional[int] = None
 
 
 @router.post("/read_file")
@@ -109,6 +112,9 @@ async def convert_media(request: ConvertMediaRequest) -> dict:
         output_path=request.output_path,
         fps=request.fps,
         width=request.width,
+        image_width=request.image_width,
+        image_height=request.image_height,
+        image_scale_percent=request.image_scale_percent,
     )
 
     if not result.get("success"):
@@ -128,6 +134,9 @@ async def convert_media_upload(
     target_format: str = Form(...),
     fps: int = Form(12),
     width: Optional[int] = Form(None),
+    image_width: Optional[int] = Form(None),
+    image_height: Optional[int] = Form(None),
+    image_scale_percent: Optional[int] = Form(None),
 ):
     """Upload a media file, convert it, and return the converted file download."""
     workspace_root = Path(__file__).resolve().parents[3]
@@ -152,6 +161,9 @@ async def convert_media_upload(
             output_path=str(output_path),
             fps=fps,
             width=width,
+            image_width=image_width,
+            image_height=image_height,
+            image_scale_percent=image_scale_percent,
         )
     except Exception as exc:
         logger.exception("Unexpected convert_media_upload failure")
