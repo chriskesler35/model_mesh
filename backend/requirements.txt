@@ -40,7 +40,7 @@ python-pptx>=0.6.23
 
 # Auth (multi-user collaboration)
 bcrypt>=4.2.0
-PyJWT>=2.10.0
+PyJWT>=2.12.1
 cryptography>=42.0.0
 
 # Redis (optional, for caching)
